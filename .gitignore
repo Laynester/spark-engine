@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.sprk
+.DS_Store
+*.tsbuildinfo
+/packages/studio/public/runtime/**.d.ts
+/packages/studio/public/**.js

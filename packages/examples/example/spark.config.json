@@ -1,0 +1,7 @@
+{
+  "name": "HelloSpark",
+  "version": "1.0.0",
+  "entryScripts": ["scripts/main.ts"],
+  "assetDirs": ["assets"],
+  "outputDir": "dist"
+}

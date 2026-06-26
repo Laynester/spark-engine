@@ -1,0 +1,80 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  # ──────────────────────────────────────────────────────────
+  # Quick typecheck — fast feedback on PRs
+  # ──────────────────────────────────────────────────────────
+  typecheck:
+    name: Type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+      - run: npm ci
+      - run: npm run typecheck
+
+  # ──────────────────────────────────────────────────────────
+  # Tauri desktop app — cross-platform matrix
+  # ──────────────────────────────────────────────────────────
+  tauri:
+    name: Tauri (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: packages/studio/src-tauri -> target
+
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            librsvg2-dev \
+            patchelf
+
+      - run: npm ci
+
+      # Build runtime first — its bundle step copies .d.ts files
+      # into studio/public/runtime/ for the editor's intellisense.
+      - name: Build @spark/runtime
+        run: npm run build -w packages/runtime
+
+      # Tauri's beforeBuildCommand (tsc && vite build) runs
+      # automatically from the studio dir.
+      - name: Build Tauri app
+        run: npx tauri build
+        working-directory: packages/studio
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: spark-studio-${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'macos-latest' && 'macos' || 'windows' }}
+          path: packages/studio/src-tauri/target/release/bundle/

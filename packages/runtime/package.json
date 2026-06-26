@@ -1,0 +1,23 @@
+{
+  "name": "@spark/runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/runtime.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "bundle": "node scripts/bundle-runtime.mjs",
+    "build:types": "tsc --declaration --emitDeclarationOnly",
+    "build": "npm run bundle && npm run build:types",
+    "copy:studio": "cp dist/runtime.js ../studio/public/runtime.js",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "pixi.js": "^8.0.0",
+    "jszip": "^3.10.0",
+    "eventemitter3": "^5.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

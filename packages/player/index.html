@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Spark Player</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #0d0d1a;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+
+      #spark-container {
+        width: 100%;
+        height: 100%;
+        position: relative;
+      }
+
+      #spark-canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+
+      /* Drop zone overlay when no package is loaded */
+      .spark-drop-hint {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        color: #444466;
+        pointer-events: none;
+        z-index: 1;
+      }
+
+      .spark-drop-hint .icon {
+        font-size: 48px;
+        margin-bottom: 12px;
+        opacity: 0.4;
+      }
+
+      .spark-drop-hint .text {
+        font-size: 16px;
+        opacity: 0.5;
+        letter-spacing: 0.5px;
+      }
+
+      .spark-drop-hint .sub {
+        font-size: 12px;
+        margin-top: 8px;
+        opacity: 0.3;
+      }
+
+      .spark-drop-hint.dragging .icon {
+        opacity: 0.8;
+        transform: scale(1.1);
+        transition: all 0.15s ease;
+      }
+
+      .spark-drop-hint.dragging .text {
+        opacity: 0.9;
+        color: #6688cc;
+      }
+
+      .spark-drop-hint.hidden {
+        opacity: 0;
+        transition: opacity 0.3s ease;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="spark-container">
+      <div class="spark-drop-hint" id="spark-drop-hint">
+        <div class="icon">&#9670;</div>
+        <div class="text">Drop a .sprk file to begin</div>
+        <div class="sub">or append ?sprk=&lt;url&gt; for hot reload</div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,27 @@
+{
+  "name": "@spark/builder",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "bin": {
+    "spark": "tsx ./src/cli.ts"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx ./src/cli.ts",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "chokidar": "^4.0.0",
+    "esbuild": "^0.24.0",
+    "jszip": "^3.10.0",
+    "tsx": "^4.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}
