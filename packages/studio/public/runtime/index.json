@@ -4,5 +4,5 @@
     "Entity.d.ts",
     "EventBus.d.ts",
     "types.d.ts",
-    "utils.d.ts"
+    "global.d.ts"
 ]

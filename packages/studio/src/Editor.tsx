@@ -1,15 +1,7 @@
-import { useRef, useCallback, useEffect, act } from "react";
+import { useCallback, useRef } from "react";
 import Editor from "@monaco-editor/react";
-import type { OnMount, BeforeMount } from "@monaco-editor/react";
+import { discoverLibraryScripts, generateClassDeclarations, LibraryProject, parseSparkImports, resolveSparkImport } from "./sparkImportParser";
 import { listDirectory, readFile } from "./workspace";
-import {
-  parseSparkImports,
-  discoverLibraryScripts,
-  resolveSparkImport,
-  buildCompletionDetail,
-  generateClassDeclarations,
-} from "./sparkImportParser";
-import type { LibraryProject } from "./sparkImportParser";
 
 export interface OpenFile {
   path: string;
@@ -39,100 +31,83 @@ export function EditorPanel({
   files,
   activeFile,
   onFileChange,
-  onFileSave,
   onSetActive,
+  onFileSave,
   workspacePath,
-  projects,
+  projects
 }: EditorPanelProps) {
-  const editorRef = useRef<any>(null);
-  const monacoRef = useRef<any>(null);
-  const runtimeLoadedRef = useRef(false);
-  const libraryProjectsRef = useRef<LibraryProject[]>([]);
-  const libraryTypesDisposableRef = useRef<any>(null);
-
   const activeFileData = files.find((f) => f.path === activeFile) ?? null;
+  const editorRef = useRef<any>(null);
+  const libraryProjectsRef = useRef<LibraryProject[]>([]);
 
-  const PROJECT_ROOT = "file:///workspace";
+  const handleEditorChange = useCallback(
+    (value?: string) => {
+      if (activeFile && value !== undefined) {
+        onFileChange(activeFile, value);
+      }
+    },
+    [activeFile, onFileChange]
+  );
 
-  const toUri = useCallback((p: string) => {
-    const normalized = p.startsWith("/") ? p : "/" + p;
-    return monacoRef.current?.Uri.parse(`${PROJECT_ROOT}${normalized}`);
-  }, []);
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+        e.preventDefault();
+        if (editorRef.current && activeFile) {
+          const value = editorRef.current.getValue();
+          onFileSave(activeFile, value);
+        }
+      }
+    },
+    [activeFile, onFileSave]
+  );
 
-  // ============================
-  // BEFORE MOUNT
-  // ============================
-  const handleBeforeMount: BeforeMount = useCallback((monaco) => {
-    monacoRef.current = monaco;
+  const handleBeforeMount = (editor: any, monaco: any) => {
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+      if (activeFile) {
+        const value = editor.getValue();
+        onFileSave(activeFile, value);
+      }
+    });
     monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
-      module: monaco.languages.typescript.ModuleKind.ESNext,
-      target: monaco.languages.typescript.ScriptTarget.ES2022,
+      target: monaco.languages.typescript.ScriptTarget.ES2020,
       moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
-      baseUrl: PROJECT_ROOT,
-      paths: {
-        "@spark/runtime": ["node_modules/@spark/*"],
-        "@spark/*": ["node_modules/@spark/*"],
-      },
-      esModuleInterop: true,
-      allowSyntheticDefaultImports: true,
-      allowJs: true,
-      checkJs: true,
-      lib: ["lib.es2022.d.ts", "lib.dom.d.ts"],
-      strict: false,
-      skipLibCheck: true,
-      resolveJsonModule: true,
+      module: monaco.languages.typescript.ModuleKind.CommonJS,
+      allowNonTsExtensions: true,
     });
 
-    // Spark import("") completion
-    monaco.languages.registerCompletionItemProvider("typescript", {
-      triggerCharacters: ['"', "'"],
-      provideCompletionItems: (model: any, position: any) => {
-        const textUntilPosition = model.getValueInRange({
-          startLineNumber: position.lineNumber,
-          startColumn: 1,
-          endLineNumber: position.lineNumber,
-          endColumn: position.column,
-        });
-
-        const match = textUntilPosition.match(/spark\.import\(\s*["']([^"']*)$/);
-        if (!match) return { suggestions: [] };
-
-        const typed = match[1];
-        return {
-          suggestions: libraryProjectsRef.current.flatMap((proj) =>
-            proj.scripts
-              .filter((s) => s.qualified.toLowerCase().includes(typed.toLowerCase()))
-              .map((script) => ({
-                label: script.qualified,
-                kind: monaco.languages.CompletionItemKind.Module,
-                detail: buildCompletionDetail(script),
-                documentation: `Library: ${proj.name}`,
-                insertText: script.qualified,
-                range: {
-                  startLineNumber: position.lineNumber,
-                  endLineNumber: position.lineNumber,
-                  startColumn: position.column - typed.length,
-                  endColumn: position.column,
-                },
-              }))
-          ),
-        };
-      },
-    });
     (async () => {
-      loadRuntimeDts(monaco);
+      monaco.languages.typescript.typescriptDefaults.setEagerModelSync(true);
+      try {
+        // Assuming index.json returns an array like ["index.d.ts", "types.d.ts", ...]
+        const fileNames: string[] = await fetch('/runtime/index.json').then((r) => r.json());
+
+        // Use for...of to correctly iterate through the file names
+        for (const fileName of fileNames) {
+          // 1. Added parentheses to r.text() 
+          // 2. Ensuring the fetch path has a leading slash if needed
+          const fileContent = await fetch(`/runtime/${fileName}`).then((r) => r.text());
+
+          // Registering with the correct virtual path
+          monaco.languages.typescript.typescriptDefaults.addExtraLib(
+            fileContent,
+            `file:///node_modules/@spark/runtime/${fileName}`
+          );
+        }
+      } catch (error) {
+        console.error("Failed to load Spark runtime types:", error);
+      }
+
       let cancelled = false;
-      // Load libraries
-      if (workspacePath && projects.length > 0) {
-        try {
-          const libs = await discoverLibraryScripts(workspacePath, projects);
-          if (cancelled) return;
-          libraryProjectsRef.current = libs;
-          await updateLibraryTypes(monaco);
-        } catch (e) { }
-      }
 
-      // Background models (siblings + spark.import)
+      console.log(activeFile);
+      if (!activeFile) return;
+
+      const toUri = (p) => {
+        const cleanPath = p.startsWith('/') ? p : `/${p}`;
+        return monaco.Uri.file(cleanPath);
+      };
+
       try {
         const dir = activeFile.includes("/") ? activeFile.slice(0, activeFile.lastIndexOf("/")) : ".";
         const { entries } = await listDirectory(dir);
@@ -142,169 +117,78 @@ export function EditorPanel({
           if (!/\.(ts|d\.ts)$/.test(entry.name)) continue;
 
           const uri = toUri(entry.path);
+
+          // Check if Monaco already has this model using the Uri object
           if (!monaco.editor.getModel(uri)) {
             const content = await readFile(entry.path);
+            console.log(`Loading sibling file: ${entry.path}`);
+            // Pass the real uri object here instead of a string
             monaco.editor.createModel(content, "typescript", uri);
           }
         }
 
-        const content = await readFile(activeFile);
-        const imports = parseSparkImports(content);
-        for (const imp of imports) {
-          const resolved = resolveSparkImport(imp, libraryProjectsRef.current);
-          if (!resolved) continue;
-          const uri = toUri(resolved.diskPath);
-          if (!monaco.editor.getModel(uri)) {
-            const src = await readFile(resolved.diskPath);
-            monaco.editor.createModel(src, "typescript", uri);
-          }
-        }
-      } catch (e) { }
-    })();
-
-  }, [activeFile]);
-
-  // ============================
-  // PROPER RUNTIME LOADING
-  // ============================
-  async function loadRuntimeDts(monaco: any) {
-    if (runtimeLoadedRef.current) return;
-    runtimeLoadedRef.current = true;
-
-    try {
-      // Bootstrap file that imports the real index
-      monaco.editor.createModel(
-        `import "@spark/runtime";`,
-        "typescript",
-        monaco.Uri.parse("file:///__spark_bootstrap__.ts")
-      );
-
-      // Package.json for proper module resolution
-      monaco.editor.createModel(
-        JSON.stringify({
-          name: "@spark/runtime",
-          version: "1.0.0",
-          types: "./index.d.ts",
-          main: "./index.d.ts",
-        }),
-        "json",
-        monaco.Uri.parse("file:///node_modules/@spark/runtime/package.json")
-      );
-
-      // Load all runtime definition files
-      const fileList = ["index.d.ts", "SparkRuntime.d.ts", "Entity.d.ts", "EventBus.d.ts", "types.d.ts"];
-
-      await Promise.all(
-        fileList.map(async (name) => {
-          if (!name.endsWith(".d.ts")) return;
+        if (workspacePath && projects.length > 0) {
           try {
-            const content = await fetch(`/runtime/${name}`).then((r) => r.text());
-            monaco.languages.typescript.typescriptDefaults.addExtraLib(
-              content,
-              `file:///node_modules/@spark/runtime/${name}`
-            );
-          } catch (err) {
-            console.warn(`Failed to load ${name}`, err);
-          }
-        })
-      );
-
-      console.log("✅ Spark runtime types loaded");
-    } catch (err) {
-      console.error("Failed to load runtime types", err);
-    }
-  }
-
-  async function updateLibraryTypes(monaco: any) {
-    if (libraryTypesDisposableRef.current) {
-      libraryTypesDisposableRef.current.dispose();
-    }
-
-    const declarations: string[] = [];
-    for (const project of libraryProjectsRef.current) {
-      for (const script of project.scripts) {
-        try {
-          const content = await readFile(script.diskPath);
-          declarations.push(...generateClassDeclarations(content));
-        } catch { }
-      }
-    }
-
-    if (declarations.length > 0) {
-      libraryTypesDisposableRef.current = monaco.languages.typescript.typescriptDefaults.addExtraLib(
-        declarations.join("\n"),
-        `file:///__spark_library_types_${Date.now()}.d.ts`
-      );
-    }
-  }
-
-  // ============================
-  // BACKGROUND MODELS
-  // ============================
-  useEffect(() => {
-    if (!activeFile || !monacoRef.current) return;
-
-    const monaco = monacoRef.current;
-    let cancelled = false;
-
-    (async () => {
-      // Load libraries
-      if (workspacePath && projects.length > 0) {
-        try {
-          const libs = await discoverLibraryScripts(workspacePath, projects);
-          if (cancelled) return;
-          libraryProjectsRef.current = libs;
-          await updateLibraryTypes(monaco);
-        } catch (e) { }
-      }
-
-      // Background models (siblings + spark.import)
-      try {
-        const dir = activeFile.includes("/") ? activeFile.slice(0, activeFile.lastIndexOf("/")) : ".";
-        const { entries } = await listDirectory(dir);
-
-        for (const entry of entries) {
-          if (cancelled || entry.is_dir || entry.path === activeFile) continue;
-          if (!/\.(ts|d\.ts)$/.test(entry.name)) continue;
-
-          const uri = toUri(entry.path);
-          if (!monaco.editor.getModel(uri)) {
-            const content = await readFile(entry.path);
-            monaco.editor.createModel(content, "typescript", uri);
+            const libs = await discoverLibraryScripts(workspacePath, projects);
+            if (cancelled) return;
+            libraryProjectsRef.current = libs;
+          } catch (e) {
+            console.error(e);
           }
         }
 
+        // 2. Parse active file for spark.import calls, but load them GLOBALLY
         const content = await readFile(activeFile);
         const imports = parseSparkImports(content);
+
+        let globalDeclarations = "";
+
         for (const imp of imports) {
           const resolved = resolveSparkImport(imp, libraryProjectsRef.current);
           if (!resolved) continue;
-          const uri = toUri(resolved.diskPath);
-          if (!monaco.editor.getModel(uri)) {
-            const src = await readFile(resolved.diskPath);
-            monaco.editor.createModel(src, "typescript", uri);
-          }
+
+          // Read the raw source code of the Manager.ts file
+          const src = await readFile(resolved.diskPath);
+
+          // Use your utility to parse "export class GameManager" into "declare class GameManager"
+          const classDecls = generateClassDeclarations(src);
+
+          // Append them to our active global injection block
+          globalDeclarations += `\n/* Global types from ${imp.qualified} */\n` + classDecls.join("\n") + "\n";
         }
-      } catch (e) { }
+
+        // 3. Inject everything into Monaco as an Ambient Global Library
+        if (globalDeclarations.trim().length > 0) {
+          // We give it a unique virtual file name so it behaves globally
+          monaco.languages.typescript.typescriptDefaults.addExtraLib(
+            globalDeclarations,
+            `file:///global-spark-libraries.d.ts`
+          );
+        }
+
+        const activeModel = monaco.editor.getModel(toUri(activeFile));
+        if (activeModel) {
+          activeModel.setValue(activeModel.getValue());
+        }
+      } catch (e) {
+        console.log('erroooor', e);
+      }
+
     })();
-
-    return () => { cancelled = true; };
-  }, [activeFile, workspacePath, projects, toUri]);
-
-  const handleEditorDidMount: OnMount = useCallback((editor) => {
-    editorRef.current = editor;
-  }, []);
-
-  const handleEditorChange = useCallback((value?: string) => {
-    if (activeFile && value !== undefined) {
-      onFileChange(activeFile, value);
-    }
-  }, [activeFile, onFileChange]);
+  }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       {/* Tab Bar */}
-      <div style={{ display: "flex", background: "#0d0d1a", borderBottom: "1px solid #1a1a30", overflowX: "auto", flexShrink: 0 }}>
+      <div
+        style={{
+          display: "flex",
+          background: "#0d0d1a",
+          borderBottom: "1px solid #1a1a30",
+          overflowX: "auto",
+          flexShrink: 0,
+        }}
+      >
         {files.map((file) => (
           <div
             key={file.path}
@@ -313,8 +197,10 @@ export function EditorPanel({
               padding: "8px 16px",
               cursor: "pointer",
               color: file.path === activeFile ? "#fff" : "#aaa",
-              background: file.path === activeFile ? "#1e1e3a" : "transparent",
-              borderBottom: file.path === activeFile ? "2px solid #44aaff" : "none",
+              background:
+                file.path === activeFile ? "#1e1e3a" : "transparent",
+              borderBottom:
+                file.path === activeFile ? "2px solid #44aaff" : "none",
             }}
           >
             {getDisplayName(file.path)}
@@ -324,28 +210,35 @@ export function EditorPanel({
       </div>
 
       {/* Editor */}
-      <div style={{ flex: 1, overflow: "hidden" }}>
+      <div style={{ flex: 1, overflow: "hidden" }} onKeyDown={handleKeyDown}>
         {activeFileData ? (
           <Editor
             path={activeFileData.path}
             language="typescript"
-            value={activeFileData.content}
+            defaultValue={activeFileData.content}
             theme="vs-dark"
-            beforeMount={handleBeforeMount}
             onChange={handleEditorChange}
-            onMount={handleEditorDidMount}
             options={{
               automaticLayout: true,
-              fontSize: 14,
-              minimap: { enabled: true },
+              fontSize: 12,
+              minimap: { enabled: false },
               quickSuggestions: true,
               suggestOnTriggerCharacters: true,
               parameterHints: { enabled: true },
               wordWrap: "on",
             }}
+            onMount={handleBeforeMount}
           />
         ) : (
-          <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "#666" }}>
+          <div
+            style={{
+              height: "100%",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "#666",
+            }}
+          >
             Open a file from the project tree
           </div>
         )}
@@ -353,3 +246,4 @@ export function EditorPanel({
     </div>
   );
 }
+
