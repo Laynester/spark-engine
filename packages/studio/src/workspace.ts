@@ -78,6 +78,10 @@ export async function writeFile(path: string, content: string): Promise<void> {
   return invoke("write_file", { path, content });
 }
 
+export async function writeFileBinary(path: string, content: string): Promise<void> {
+  return invoke("write_file_binary", { path, content });
+}
+
 export async function fileExists(path: string): Promise<boolean> {
   return invoke("file_exists", { path });
 }
@@ -102,14 +106,5 @@ export async function deleteEntry(path: string): Promise<void> {
   return invoke("delete_entry", { path });
 }
 
-export interface BuildOutput {
-  success: boolean;
-  stdout: string;
-  stderr: string;
-  output_path: string | null;
-}
-
-export async function buildProject(projectPath: string): Promise<BuildOutput> {
-  return invoke("build_project", { projectPath });
-}
+export { buildInBrowser as buildProject, type BuildOutput } from "./buildInBrowser";
 

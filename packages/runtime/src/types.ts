@@ -38,7 +38,7 @@ export interface SparkAPI {
   destroy(entity: Entity): void;
   loadAsset(path: string): Promise<Blob | undefined>;
   loadPackage(url: string): Promise<LoadedPackage>;
-  import(qualified: string): Promise<ScriptClass>;
+  import(qualified: string): Promise<any>;
   loadScript(path: string): Promise<ScriptInstance>;
   on(event: string, callback: (...args: any[]) => void): void;
   once(event: string, callback: (...args: any[]) => void): void;

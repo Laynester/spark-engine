@@ -1,3 +1,4 @@
+import GameManager from "../../example-library/scripts/Manager";
 import { Logger } from "./Logger";
 
 export default class Demo {
@@ -18,7 +19,7 @@ export default class Demo {
     // Import GameManager singleton from the library package
     // This only works if library.sprk was loaded before main.sprk
     try {
-      const GameManager = await this.spark.import("library:scripts/Manager.js");
+      const gm: GameManager = await this.spark.import("library:scripts/Manager.js");
       this.manager = GameManager.getInstance();
       this.manager.onChange(() => this.updateScoreDisplay());
       this.manager.addScore(100);

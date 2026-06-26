@@ -7,8 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri:dev": "tauri",
-    "build:tauri": "tauri build",
+    "tauri:dev": "tauri dev",
+    "build:tauri": "tauri bundle",
     "clean": "rm -rf dist src-tauri/target"
   },
   "dependencies": {

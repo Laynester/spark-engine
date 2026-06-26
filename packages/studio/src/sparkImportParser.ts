@@ -136,6 +136,86 @@ export function resolveSparkImport(
   return null;
 }
 
+// ── Generate declare class declarations from source ─────
+
+/**
+ * Given a TypeScript source string, returns an array of `declare class`
+ * declaration strings with method signatures extracted.
+ *
+ * Skips private/protected members and constructors.
+ * Handles `export class X` and `export default class X`.
+ * Handles params with nested parens like `(cb: () => void)`.
+ */
+export function generateClassDeclarations(source: string): string[] {
+  const declarations: string[] = [];
+
+  // Find each exported class
+  const classRegex = /export(?:\s+default)?\s+class\s+(\w+)(?:\s+extends\s+(\w+))?/g;
+  let classMatch: RegExpExecArray | null;
+
+  while ((classMatch = classRegex.exec(source)) !== null) {
+    const className = classMatch[1];
+    const extendsClass = classMatch[2];
+
+    // Find the opening brace of the class body
+    const bodyStart = source.indexOf("{", classMatch.index + classMatch[0].length);
+    if (bodyStart === -1) continue;
+
+    // Extract class body by counting braces
+    let depth = 1;
+    let lineStart = bodyStart + 1;
+    const bodyLines: string[] = [];
+
+    for (let i = bodyStart + 1; i < source.length && depth > 0; i++) {
+      if (source[i] === "{") {
+        depth++;
+      } else if (source[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          bodyLines.push(source.slice(lineStart, i));
+        }
+      } else if (source[i] === "\n") {
+        bodyLines.push(source.slice(lineStart, i));
+        lineStart = i + 1;
+      }
+    }
+
+    const body = bodyLines.join("\n");
+    const methods: string[] = [];
+
+    // Match method signatures: skips private/protected and constructor
+    // Params can have one level of nested parens for functions like `() => void`
+    const methodRegex = /^\s*(?:(?:private\s+|protected\s+)?(?:static\s+)?(\w+)\s*\(((?:[^()]|\([^()]*\))*)\)\s*(?::\s*([^{]+?))?\s*\{)/gm;
+    let methodMatch: RegExpExecArray | null;
+
+    while ((methodMatch = methodRegex.exec(body)) !== null) {
+      const fullMatch = methodMatch[0];
+      const methodName = methodMatch[1];
+      const params = methodMatch[2];
+      const returnType = methodMatch[3] ? methodMatch[3].trim() : "void";
+
+      // Skip private/protected and constructor
+      if (/^\s*(private|protected)\s/.test(fullMatch)) continue;
+      if (methodName === "constructor") continue;
+
+      const isStatic = /\bstatic\s/.test(fullMatch);
+      methods.push(`  ${isStatic ? "static " : ""}${methodName}(${params}): ${returnType};`);
+    }
+
+    const extendsClause = extendsClass ? ` extends ${extendsClass}` : "";
+    if (methods.length > 0) {
+      declarations.push(
+        `declare class ${className}${extendsClause} {\n${methods.join("\n")}\n}`
+      );
+    } else {
+      // Fallback: still register empty class so <ClassName> is a valid type
+      declarations.push(`declare class ${className}${extendsClause} { }`);
+    }
+  }
+
+  return declarations;
+}
+
 // ── Monaco completion detail builder ────────────────────
 
 export function buildCompletionDetail(script: LibraryScript): string {

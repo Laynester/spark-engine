@@ -9,7 +9,7 @@
     "bundle": "node scripts/bundle-runtime.mjs",
     "build:types": "tsc --declaration --emitDeclarationOnly",
     "build": "npm run bundle && npm run build:types",
-    "copy:studio": "cp dist/runtime.js ../studio/public/runtime.js",
+    "copy:studio": "cp dist/runtime.js ../studio/public/runtime.js && cp dist/**.d.ts ../studio/public/runtime",
     "clean": "rm -rf dist"
   },
   "dependencies": {

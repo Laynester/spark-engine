@@ -79,6 +79,21 @@ pub fn read_file_binary(path: &str) -> Result<String, String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(&data))
 }
 
+pub fn write_file_binary(path: &str, content: &str) -> Result<(), String> {
+    let file_path = PathBuf::from(path);
+
+    // Ensure parent directory exists
+    if let Some(parent) = file_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
+    }
+
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(content)
+        .map_err(|e| format!("Failed to decode base64 content: {}", e))?;
+
+    fs::write(&file_path, &decoded).map_err(|e| format!("Failed to write binary file: {}", e))
+}
+
 pub fn write_file(path: &str, content: &str) -> Result<(), String> {
     let file_path = PathBuf::from(path);
 
