@@ -26,7 +26,7 @@ export interface TextConfig {
 }
 
 export interface ScriptClass {
-  new(spark: Record<string, unknown>): Record<string, unknown>;
+  new(spark: SparkAPI): Record<string, unknown>;
   onCreate?(): void;
   onUpdate?(dt: number): void;
   onDestroy?(): void;

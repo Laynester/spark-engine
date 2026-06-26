@@ -1,5 +1,5 @@
 import type { LoadedPackage } from "./PackageLoader";
-import type { ScriptClass } from "./types";
+import type { ScriptClass, SparkAPI } from "./types";
 
 export interface ScriptInstance {
   readonly name: string;
@@ -46,7 +46,7 @@ export class ScriptManager {
    * top-level code still executes, registering event handlers on the global spark.
    * Returns null in that case — no instance is needed.
    */
-async loadScript(path: string, namespace: string): Promise<ScriptClass | null> {
+  async loadScript(path: string, namespace: string): Promise<ScriptClass | null> {
     const nsScripts = this.scriptClasses.get(namespace);
     if (!nsScripts) {
       throw new Error(`Package "${namespace}" is not loaded`);
@@ -115,7 +115,7 @@ async loadScript(path: string, namespace: string): Promise<ScriptClass | null> {
     return ScriptClass;
   }
 
-  createInstance(path: string, namespace: string, sparkAPI: Record<string, unknown>): ScriptInstance {
+  createInstance(path: string, namespace: string, sparkAPI: SparkAPI): ScriptInstance {
     const nsScripts = this.scriptClasses.get(namespace);
     if (!nsScripts) {
       throw new Error(`Package "${namespace}" is not loaded`);
@@ -126,7 +126,7 @@ async loadScript(path: string, namespace: string): Promise<ScriptClass | null> {
       throw new Error(`Script not loaded: ${namespace}:${path}`);
     }
 
-    const instance = new ScriptClass(sparkAPI) as Record<string, unknown>;
+    const instance = new ScriptClass(sparkAPI);
 
     const scriptInstance: ScriptInstance = {
       name: path.split("/").pop() ?? path,
@@ -147,7 +147,7 @@ async loadScript(path: string, namespace: string): Promise<ScriptClass | null> {
    * Load and create instances for all entry scripts of a given namespace package.
    * Skips if that namespace's entries were already started.
    */
-  async createEntryInstances(namespace: string, sparkAPI: Record<string, unknown>): Promise<ScriptInstance[]> {
+  async createEntryInstances(namespace: string, sparkAPI: SparkAPI): Promise<ScriptInstance[]> {
     if (this.startedPackages.has(namespace)) {
       return [];
     }

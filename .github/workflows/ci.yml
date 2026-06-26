@@ -64,8 +64,20 @@ jobs:
         run: npx tauri build
         working-directory: packages/studio
 
+      - name: Stage installer artifact
+        shell: bash
+        run: |
+          mkdir -p artifact
+          if [ "${{ runner.os }}" == "macOS" ]; then
+            cp packages/studio/src-tauri/target/release/bundle/dmg/*.dmg artifact/
+          elif [ "${{ runner.os }}" == "Windows" ]; then
+            cp packages/studio/src-tauri/target/release/bundle/nsis/*.exe artifact/
+          else
+            cp packages/studio/src-tauri/target/release/bundle/appimage/*.AppImage artifact/
+          fi
+
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
           name: spark-studio-${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'macos-latest' && 'macos' || 'windows' }}
-          path: packages/studio/src-tauri/target/release/bundle/
+          path: artifact/

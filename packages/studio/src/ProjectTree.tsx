@@ -4,13 +4,14 @@ import type { FileEntry } from "./workspace";
 
 // Files and directories to hide from the tree
 const HIDDEN_NAMES = new Set([
-  "spark-workspace.json",
-  "spark.config.json",
-  "node_modules",
-  ".git",
+  ".built",
   ".DS_Store",
+  ".git",
   ".gitkeep",
   ".spark-tmp",
+  "node_modules",
+  "spark-workspace.json",
+  "spark.config.json",
 ]);
 
 const HIDDEN_SUFFIXES = [".sprk"];
@@ -34,10 +35,10 @@ interface ProjectTreeProps {
 }
 
 function getFileIcon(name: string): string {
-  if (name.endsWith(".ts") || name.endsWith(".tsx")) return "\u25B6";
+  if (name.endsWith(".ts") || name.endsWith(".tsx")) return "TS";
   if (name.endsWith(".json")) return "\u007B";
   if (name.endsWith(".js")) return "\u0192";
-  if (name.match(/\.(png|jpg|jpeg|gif|svg|webp)$/i)) return "\u25A3";
+  if (name.match(/\.(png|jpg|jpeg|gif|svg|webp)$/i)) return "📸";
   if (name.startsWith(".")) return "\u2699";
   return "\u25CB";
 }

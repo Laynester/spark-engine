@@ -1,4 +1,4 @@
-import type { SparkConfig, EntityConfig, TextConfig, ScriptClass } from "./types";
+import type { SparkConfig, EntityConfig, TextConfig, ScriptClass, SparkAPI } from "./types";
 import { EventBus } from "./EventBus";
 import { loadPackage as loadSprkPackage } from "./PackageLoader";
 import type { LoadedPackage, PackageManifest } from "./PackageLoader";
@@ -24,7 +24,7 @@ export class SparkRuntime implements InputHandler {
   private packageRegistry = new Map<string, LoadedPackage>();
   private active = false;
   private initPromise: Promise<void>;
-  private sparkAPI: Record<string, unknown>;
+  private sparkAPI: SparkAPI;
   private baseUrl: string = "";
 
   constructor(config: SparkConfig) {
