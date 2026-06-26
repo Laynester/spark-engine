@@ -103,7 +103,7 @@ export function EditorPanel({
       console.log(activeFile);
       if (!activeFile) return;
 
-      const toUri = (p) => {
+      const toUri = (p: string) => {
         const cleanPath = p.startsWith('/') ? p : `/${p}`;
         return monaco.Uri.file(cleanPath);
       };
