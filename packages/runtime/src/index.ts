@@ -1,9 +1,10 @@
 export { SparkRuntime } from "./SparkRuntime";
-export type { SparkConfig, EntityConfig, TextConfig, ScriptClass, SparkAPI } from "./types";
+export type { SparkConfig, EntityConfig, TextConfig, ScriptClass, SparkAPI, PrefabPart, PrefabDefinition } from "./types";
 export type { PackageManifest, LoadedPackage } from "./PackageLoader";
 export { Entity } from "./Entity";
 export type { EntityType } from "./Entity";
 export type { ScriptInstance } from "./ScriptManager";
 export { EventBus } from "./EventBus";
 export type { RuntimeEventMap } from "./EventBus";
-export { spark } from "./global";
+export { PrefabManager } from "./PrefabManager";
+export type { PrefabSpawnConfig } from "./PrefabManager";

@@ -18,6 +18,12 @@ pub struct WorkspaceManifest {
     pub entry_project: Option<String>,
     pub projects: HashMap<String, WorkspaceProject>,
     pub last_opened: Option<String>,
+    /// Canvas width in pixels. When set, the player uses this instead of filling the window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    /// Canvas height in pixels. When set, the player uses this instead of filling the window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }
 
 fn default_spark_version() -> String {
@@ -41,6 +47,8 @@ pub fn create_workspace(path: &str, name: &str) -> Result<WorkspaceManifest, Str
         entry_project: None,
         projects: HashMap::new(),
         last_opened: Some(chrono_now()),
+        width: None,
+        height: None,
     };
 
     save_manifest(&dir, &manifest)?;

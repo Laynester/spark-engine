@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { ProjectTree } from "./ProjectTree";
 import { EditorPanel } from "./Editor";
 import { ContextMenu } from "./ContextMenu";
@@ -6,6 +6,11 @@ import type { ContextMenuItem } from "./ContextMenu";
 import { WorkspaceConfigDialog } from "./WorkspaceConfigDialog";
 import { ProjectConfigDialog } from "./ProjectConfigDialog";
 import { PlayerPanel } from "./PlayerPanel";
+import { DeleteConfirmDialog } from "./Dialogs/DeleteConfirmDialog";
+import { RenameDialog } from "./Dialogs/RenameDialog";
+import { NewItemDialog } from "./Dialogs/NewItemDialog";
+import { useSidebarResize } from "./hooks/useSidebarResize";
+import { useErrorToast } from "./hooks/useErrorToast";
 import { readFile, writeFile, findProjects, createFile, createDirectory, deleteEntry, renameEntry } from "./workspace";
 import type { OpenFile } from "./Editor";
 import type { WorkspaceManifest, FileEntry } from "./workspace";
@@ -19,17 +24,14 @@ interface StudioLayoutProps {
 export function StudioLayout({ manifest, workspacePath, onBack }: StudioLayoutProps) {
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
   const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
-  const [leftPanelWidth, setLeftPanelWidth] = useState(240);
+  const { width: leftPanelWidth, handleMouseDown: handleResizeMouseDown } = useSidebarResize(240);
   const [projects, setProjects] = useState<string[]>([]);
   const [currentManifest, setCurrentManifest] = useState(manifest);
   const [showWorkspaceConfig, setShowWorkspaceConfig] = useState(false);
   const [showProjectConfig, setShowProjectConfig] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const errorTimer = useRef<ReturnType<typeof setTimeout>>();
-  const sidebarRef = useRef<HTMLDivElement>(null);
-  const isDragging = useRef(false);
+  const { errorMsg, showError, clearError } = useErrorToast(4000);
 
   // Context menu state
   const [ctxMenu, setCtxMenu] = useState<{
@@ -44,7 +46,6 @@ export function StudioLayout({ manifest, workspacePath, onBack }: StudioLayoutPr
     parentPath: string;
   } | null>(null);
   const [newItemName, setNewItemName] = useState("");
-  const promptInputRef = useRef<HTMLInputElement>(null);
 
   // Prompt for renaming
   const [renamePrompt, setRenamePrompt] = useState<{
@@ -52,7 +53,6 @@ export function StudioLayout({ manifest, workspacePath, onBack }: StudioLayoutPr
     oldName: string;
   } | null>(null);
   const [renameName, setRenameName] = useState("");
-  const renameInputRef = useRef<HTMLInputElement>(null);
 
   // Confirm delete
   const [deleteConfirm, setDeleteConfirm] = useState<{
@@ -60,19 +60,6 @@ export function StudioLayout({ manifest, workspacePath, onBack }: StudioLayoutPr
     name: string;
     isDir: boolean;
   } | null>(null);
-
-  useEffect(() => {
-    if (newItemPrompt && promptInputRef.current) {
-      promptInputRef.current.focus();
-    }
-  }, [newItemPrompt]);
-
-  useEffect(() => {
-    if (renamePrompt && renameInputRef.current) {
-      renameInputRef.current.focus();
-      renameInputRef.current.select();
-    }
-  }, [renamePrompt]);
 
   // Detect projects
   useEffect(() => {
@@ -187,9 +174,7 @@ export function StudioLayout({ manifest, workspacePath, onBack }: StudioLayoutPr
               }
               setRefreshKey((k) => k + 1);
             } catch (err) {
-              setErrorMsg("Failed to delete project: " + String(err));
-              clearTimeout(errorTimer.current);
-              errorTimer.current = setTimeout(() => setErrorMsg(null), 4000);
+              showError("Failed to delete project: " + String(err));
             }
           },
         });
@@ -232,9 +217,9 @@ export function StudioLayout({ manifest, workspacePath, onBack }: StudioLayoutPr
   }, [ctxMenu, handleTreeContextMenu]);
 
   // Handle confirmed delete
-  const handleDelete = useCallback(async () => {
-    if (!deleteConfirm) return;
-    const { path, name, isDir } = deleteConfirm;
+  const handleDelete = useCallback(async (item: typeof deleteConfirm) => {
+    if (!item) return;
+    const { path, isDir } = item;
     try {
       await deleteEntry(path);
       // Close editor tabs for deleted files/folders
@@ -247,7 +232,7 @@ export function StudioLayout({ manifest, workspacePath, onBack }: StudioLayoutPr
       console.error("Failed to delete:", err);
     }
     setDeleteConfirm(null);
-  }, [deleteConfirm, activeFilePath]);
+  }, [activeFilePath]);
 
   // Handle rename
   const handleRename = async () => {
@@ -338,30 +323,7 @@ export default class Main implements ScriptClass {
     }
   };
 
-  // Sidebar resize
-  const handleMouseDown = useCallback(() => {
-    isDragging.current = true;
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-  }, []);
 
-  useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!isDragging.current) return;
-      setLeftPanelWidth(Math.max(160, Math.min(500, e.clientX)));
-    };
-    const handleMouseUp = () => {
-      isDragging.current = false;
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", handleMouseUp);
-    return () => {
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
-    };
-  }, []);
 
   return (
     <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}>
@@ -406,7 +368,7 @@ export default class Main implements ScriptClass {
       {/* Main content */}
       <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
         {/* Left sidebar */}
-        <div ref={sidebarRef} style={{
+        <div style={{
           width: leftPanelWidth, minWidth: 160, background: "#0d0d1a",
           borderRight: "1px solid #1a1a30", display: "flex", flexDirection: "column", overflow: "hidden",
         }}>
@@ -442,7 +404,7 @@ export default class Main implements ScriptClass {
         </div>
 
         {/* Resize handle */}
-        <div onMouseDown={handleMouseDown} style={{ width: 4, cursor: "col-resize", background: "transparent", flexShrink: 0 }} />
+        <div onMouseDown={handleResizeMouseDown} style={{ width: 4, cursor: "col-resize", background: "transparent", flexShrink: 0 }} />
 
         {/* Center — Editor */}
         <div style={{ flex: 1, overflow: "hidden" }}>
@@ -473,6 +435,8 @@ export default class Main implements ScriptClass {
             projects={projects}
             workspacePath={workspacePath}
             entryProject={currentManifest.entry_project}
+            width={currentManifest.width}
+            height={currentManifest.height}
             onStop={() => setIsPlaying(false)}
           />
         </div>
@@ -486,7 +450,7 @@ export default class Main implements ScriptClass {
           padding: "8px 16px", fontSize: 13, color: "#ff8877", zIndex: 10001,
           boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
           maxWidth: 500, textAlign: "center",
-        }}>
+        }} onClick={clearError}>
           {errorMsg}
         </div>
       )}
@@ -513,119 +477,33 @@ export default class Main implements ScriptClass {
 
       {/* Delete Confirmation */}
       {deleteConfirm && (
-        <div style={{
-          position: "fixed", inset: 0, zIndex: 9999,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          background: "rgba(0,0,0,0.5)",
-        }} onClick={() => setDeleteConfirm(null)}>
-          <div style={{
-            background: "#16162a", border: "1px solid #663333", borderRadius: 12,
-            padding: 24, width: 360, boxShadow: "0 16px 64px rgba(0,0,0,0.6)",
-          }} onClick={(e) => e.stopPropagation()}>
-            <h3 style={{ margin: "0 0 8px", fontSize: 14, fontWeight: 600, color: "#ff8877" }}>
-              Delete {deleteConfirm.isDir ? "Folder" : "File"}
-            </h3>
-            <p style={{ fontSize: 13, color: "#9999bb", margin: "0 0 16px", lineHeight: 1.5 }}>
-              Delete <strong style={{ color: "#d0d0e0" }}>{deleteConfirm.name}</strong>?
-              {deleteConfirm.isDir && " All contents will be removed."}
-              This cannot be undone.
-            </p>
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-              <button onClick={() => setDeleteConfirm(null)}
-                style={{ padding: "6px 16px", background: "transparent", color: "#8888aa", border: "1px solid #333355", borderRadius: 6, cursor: "pointer", fontSize: 12 }}>
-                Cancel
-              </button>
-              <button onClick={handleDelete}
-                style={{ padding: "6px 16px", background: "#6a2020", color: "#ff8877", border: "1px solid #993333", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 500 }}>
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
+        <DeleteConfirmDialog
+          item={deleteConfirm}
+          onConfirm={handleDelete}
+          onCancel={() => setDeleteConfirm(null)}
+        />
       )}
 
       {/* Rename Prompt */}
       {renamePrompt && (
-        <div style={{
-          position: "fixed", inset: 0, zIndex: 9999,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          background: "rgba(0,0,0,0.5)",
-        }} onClick={() => { setRenamePrompt(null); setRenameName(""); }}>
-          <div style={{
-            background: "#16162a", border: "1px solid #333366", borderRadius: 12,
-            padding: 24, width: 360, boxShadow: "0 16px 64px rgba(0,0,0,0.6)",
-          }} onClick={(e) => e.stopPropagation()}>
-            <h3 style={{ margin: "0 0 16px", fontSize: 14, fontWeight: 600, color: "#d0d0e0" }}>
-              Rename
-            </h3>
-            <input
-              ref={renameInputRef}
-              placeholder="New name"
-              value={renameName}
-              onChange={(e) => setRenameName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleRename();
-                if (e.key === "Escape") { setRenamePrompt(null); setRenameName(""); }
-              }}
-              style={{
-                width: "100%", padding: "8px 12px", background: "#0d0d1a", color: "#d0d0e0",
-                border: "1px solid #333355", borderRadius: 6, fontSize: 13, outline: "none",
-              }}
-            />
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
-              <button onClick={() => { setRenamePrompt(null); setRenameName(""); }}
-                style={{ padding: "6px 16px", background: "transparent", color: "#8888aa", border: "1px solid #333355", borderRadius: 6, cursor: "pointer", fontSize: 12 }}>
-                Cancel
-              </button>
-              <button onClick={handleRename}
-                style={{ padding: "6px 16px", background: "#2a4a8a", color: "#e0e0e0", border: "1px solid #3a5aaa", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 500 }}>
-                Rename
-              </button>
-            </div>
-          </div>
-        </div>
+        <RenameDialog
+          prompt={renamePrompt}
+          name={renameName}
+          onNameChange={setRenameName}
+          onConfirm={handleRename}
+          onCancel={() => { setRenamePrompt(null); setRenameName(""); }}
+        />
       )}
 
       {/* New Item Prompt */}
       {newItemPrompt && (
-        <div style={{
-          position: "fixed", inset: 0, zIndex: 9999,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          background: "rgba(0,0,0,0.5)",
-        }} onClick={() => { setNewItemPrompt(null); setNewItemName(""); }}>
-          <div style={{
-            background: "#16162a", border: "1px solid #333366", borderRadius: 12,
-            padding: 24, width: 360, boxShadow: "0 16px 64px rgba(0,0,0,0.6)",
-          }} onClick={(e) => e.stopPropagation()}>
-            <h3 style={{ margin: "0 0 16px", fontSize: 14, fontWeight: 600, color: "#d0d0e0" }}>
-              New {newItemPrompt.type === "project" ? "Project" : newItemPrompt.type === "folder" ? "Folder" : "File"}
-            </h3>
-            <input
-              ref={promptInputRef}
-              placeholder={newItemPrompt.type === "project" ? "Project name" : `${newItemPrompt.type} name`}
-              value={newItemName}
-              onChange={(e) => setNewItemName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleCreateItem();
-                if (e.key === "Escape") { setNewItemPrompt(null); setNewItemName(""); }
-              }}
-              style={{
-                width: "100%", padding: "8px 12px", background: "#0d0d1a", color: "#d0d0e0",
-                border: "1px solid #333355", borderRadius: 6, fontSize: 13, outline: "none",
-              }}
-            />
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
-              <button onClick={() => { setNewItemPrompt(null); setNewItemName(""); }}
-                style={{ padding: "6px 16px", background: "transparent", color: "#8888aa", border: "1px solid #333355", borderRadius: 6, cursor: "pointer", fontSize: 12 }}>
-                Cancel
-              </button>
-              <button onClick={handleCreateItem}
-                style={{ padding: "6px 16px", background: "#2a4a8a", color: "#e0e0e0", border: "1px solid #3a5aaa", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 500 }}>
-                Create
-              </button>
-            </div>
-          </div>
-        </div>
+        <NewItemDialog
+          prompt={newItemPrompt}
+          name={newItemName}
+          onNameChange={setNewItemName}
+          onConfirm={handleCreateItem}
+          onCancel={() => { setNewItemPrompt(null); setNewItemName(""); }}
+        />
       )}
 
       {/* Workspace Config Dialog */}

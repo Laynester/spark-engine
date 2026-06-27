@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { SparkConfig } from "./types.js";
+import { ensureArray } from "./types.js";
 
 export function loadConfig(configPath?: string): SparkConfig {
   const resolvedPath = configPath
@@ -8,8 +9,7 @@ export function loadConfig(configPath?: string): SparkConfig {
     : resolve(process.cwd(), "spark.config.json");
 
   if (!existsSync(resolvedPath)) {
-    console.error(`Error: spark.config.json not found at ${resolvedPath}`);
-    process.exit(1);
+    throw new Error(`spark.config.json not found at ${resolvedPath}`);
   }
 
   const raw = readFileSync(resolvedPath, "utf-8");
@@ -18,8 +18,7 @@ export function loadConfig(configPath?: string): SparkConfig {
   try {
     parsed = JSON.parse(raw);
   } catch {
-    console.error("Error: spark.config.json is not valid JSON");
-    process.exit(1);
+    throw new Error("spark.config.json is not valid JSON");
   }
 
   const config: SparkConfig = {
@@ -28,7 +27,9 @@ export function loadConfig(configPath?: string): SparkConfig {
     entryScripts: ensureArray(parsed.entryScripts),
     scriptDirs: parsed.scriptDirs !== undefined ? ensureArray(parsed.scriptDirs) : ["scripts"],
     assetDirs: ensureArray(parsed.assetDirs),
+    prefabDir: typeof parsed.prefabDir === "string" ? parsed.prefabDir : "prefabs",
     outputDir: ".built",
+    audioBitrate: typeof parsed.audioBitrate === "number" ? parsed.audioBitrate : 128,
   };
 
   if (config.entryScripts.length === 0) {
@@ -36,10 +37,4 @@ export function loadConfig(configPath?: string): SparkConfig {
   }
 
   return config;
-}
-
-function ensureArray(val: unknown): string[] {
-  if (Array.isArray(val)) return val.map(String);
-  if (typeof val === "string") return [val];
-  return [];
 }

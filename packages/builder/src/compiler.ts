@@ -37,7 +37,6 @@ export async function compileScripts(
   config: SparkConfig,
   projectDir: string
 ): Promise<CompiledScript[]> {
-  // Collect all .ts files from scriptDirs
   const scriptDirs = config.scriptDirs ?? ["scripts"];
   const allScriptFiles: string[] = [];
 
@@ -47,17 +46,12 @@ export async function compileScripts(
     allScriptFiles.push(...tsFiles);
   }
 
-  // Track which entries should be auto-started
-  const entryPaths = new Set(
-    config.entryScripts.map((s) => join(projectDir, s))
-  );
-
   if (allScriptFiles.length === 0) {
     return [];
   }
 
-  // Build all scripts with esbuild (each file becomes a separate output)
-  // @spark/runtime is provided by the player — never bundle it
+  // Build all scripts with esbuild (each file becomes a separate output).
+  // @spark/runtime is provided by the player — never bundle it.
   const result = await esbuild.build({
     entryPoints: allScriptFiles,
     bundle: true,
@@ -73,27 +67,24 @@ export async function compileScripts(
     metafile: true,
   });
 
-  // Map outputs back to their relative paths using metafile
   const compiled: CompiledScript[] = [];
   const metafile = result.metafile!;
 
   for (const fullPath of allScriptFiles) {
-    // Find relative path from project dir to use as metafile key
     const relativePath = relative(projectDir, fullPath);
 
-    // Find the matching output in metafile
     const outputKey = Object.keys(metafile.outputs).find((key) => {
       return relativePath in metafile.outputs[key].inputs;
     });
 
     if (!outputKey) {
-      console.warn(`  \u26a0 Could not find compiled output for "${relativePath}"`);
+      console.warn(`  ⚠ Could not find compiled output for "${relativePath}"`);
       continue;
     }
 
     const outputFile = result.outputFiles.find((f) => f.path.endsWith(outputKey));
     if (!outputFile) {
-      console.warn(`  \u26a0 Compiled output file not found for "${relativePath}"`);
+      console.warn(`  ⚠ Compiled output file not found for "${relativePath}"`);
       continue;
     }
 

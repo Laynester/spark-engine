@@ -19,6 +19,8 @@ export function WorkspaceConfigDialog({
 }: WorkspaceConfigDialogProps) {
   const [name, setName] = useState(manifest.name);
   const [entryProject, setEntryProject] = useState(manifest.entry_project ?? "");
+  const [width, setWidth] = useState(manifest.width?.toString() ?? "");
+  const [height, setHeight] = useState(manifest.height?.toString() ?? "");
   const [projectMap, setProjectMap] = useState<Record<string, { path: string; type: "app" | "lib" }>>(
     Object.fromEntries(
       Object.entries(manifest.projects).map(([key, val]) => [key, { path: val.path, type: val.type as "app" | "lib" }])
@@ -40,6 +42,8 @@ export function WorkspaceConfigDialog({
       ...manifest,
       name: name.trim(),
       entry_project: entryProject || null,
+      width: width.trim() !== "" ? Number(width.trim()) : undefined,
+      height: height.trim() !== "" ? Number(height.trim()) : undefined,
       projects: Object.fromEntries(
         Object.entries(projectMap).map(([key, val]) => [key, val])
       ),
@@ -150,6 +154,36 @@ export function WorkspaceConfigDialog({
               ) : null
             )}
           </select>
+        </div>
+
+        {/* Canvas Size */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={labelStyle}>Canvas Size</div>
+          <p style={{ fontSize: 11, color: "#555577", margin: "0 0 8px" }}>
+            Set the game window size. Leave blank to fill the browser window.
+          </p>
+          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+            <input
+              style={{ ...inputStyle, width: 80 }}
+              type="number"
+              min="1"
+              max="4096"
+              value={width}
+              onChange={(e) => setWidth(e.target.value)}
+              placeholder="Width"
+            />
+            <span style={{ color: "#555577", fontSize: 13 }}>&times;</span>
+            <input
+              style={{ ...inputStyle, width: 80 }}
+              type="number"
+              min="1"
+              max="4096"
+              value={height}
+              onChange={(e) => setHeight(e.target.value)}
+              placeholder="Height"
+            />
+            <span style={{ color: "#444466", fontSize: 11 }}>pixels</span>
+          </div>
         </div>
 
         {error && (

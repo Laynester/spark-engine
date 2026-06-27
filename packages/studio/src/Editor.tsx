@@ -100,7 +100,6 @@ export function EditorPanel({
 
       let cancelled = false;
 
-      console.log(activeFile);
       if (!activeFile) return;
 
       const toUri = (p: string) => {
@@ -171,7 +170,7 @@ export function EditorPanel({
           activeModel.setValue(activeModel.getValue());
         }
       } catch (e) {
-        console.log('erroooor', e);
+        console.error("Failed to set up Monaco intellisense:", e);
       }
 
     })();

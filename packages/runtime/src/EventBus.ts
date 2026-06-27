@@ -17,6 +17,8 @@ export type RuntimeEventMap = {
   "pointerdown": [id: string];
   "pointerup": [id: string];
   "pointermove": [id: string, x: number, y: number];
+  "keydown": [key: string];
+  "keyup": [key: string];
 };
 
 export class EventBus {

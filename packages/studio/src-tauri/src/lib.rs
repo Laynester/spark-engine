@@ -1,3 +1,4 @@
+mod audio;
 mod file_ops;
 mod recent;
 mod workspace;
@@ -118,6 +119,11 @@ fn delete_entry(path: String) -> Result<(), String> {
     file_ops::delete_entry(&path)
 }
 
+#[tauri::command]
+async fn optimize_audio(path: String, bitrate: u32) -> Result<audio::AudioOptimizeResult, String> {
+    audio::optimize_audio(path, bitrate).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -141,6 +147,7 @@ pub fn run() {
             create_directory,
             delete_entry,
             rename_entry,
+            optimize_audio,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Spark Studio");

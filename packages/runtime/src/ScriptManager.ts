@@ -168,21 +168,8 @@ export class ScriptManager {
       // already ran their top-level code during import — no instance to create.
       if (!ScriptClass) continue;
 
-      const instance = new ScriptClass(sparkAPI) as Record<string, unknown>;
-
-      const scriptInstance: ScriptInstance = {
-        name: entry.split("/").pop() ?? entry,
-        path: entry,
-        namespace,
-        instance,
-        onCreate: typeof instance.onCreate === "function" ? instance.onCreate.bind(instance) : undefined,
-        onUpdate: typeof instance.onUpdate === "function" ? instance.onUpdate.bind(instance) : undefined,
-        onDestroy: typeof instance.onDestroy === "function" ? instance.onDestroy.bind(instance) : undefined,
-        onClick: typeof instance.onClick === "function" ? instance.onClick.bind(instance) : undefined,
-      };
-
+      const scriptInstance = this.createInstance(entry, namespace, sparkAPI);
       instances.push(scriptInstance);
-      this.instances.push(scriptInstance);
     }
 
     return instances;

@@ -11,6 +11,10 @@ export interface WorkspaceManifest {
   entry_project: string | null;
   projects: Record<string, WorkspaceProject>;
   last_opened: string | null;
+  /** Canvas width in pixels. When set, the player uses this instead of filling the window. */
+  width?: number;
+  /** Canvas height in pixels. When set, the player uses this instead of filling the window. */
+  height?: number;
 }
 
 export interface RecentEntry {
@@ -104,6 +108,17 @@ export async function renameEntry(oldPath: string, newName: string): Promise<str
 
 export async function deleteEntry(path: string): Promise<void> {
   return invoke("delete_entry", { path });
+}
+
+export interface AudioOptimizeResult {
+  data: string;
+  original_size: number;
+  optimized_size: number;
+  ext: string;
+}
+
+export async function optimizeAudio(path: string, bitrate: number): Promise<AudioOptimizeResult> {
+  return invoke("optimize_audio", { path, bitrate });
 }
 
 export { buildInBrowser as buildProject, type BuildOutput } from "./buildInBrowser";

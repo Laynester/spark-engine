@@ -10,7 +10,15 @@ import { DisplayTree } from "./DisplayTree";
 import { UpdateLoop } from "./UpdateLoop";
 import { InputManager } from "./InputManager";
 import type { InputHandler } from "./InputManager";
-import { spark as globalSpark } from "./global";
+import { spark as globalSpark } from "./types";
+import { SparkAPIObject } from "./SparkAPIObject";
+import { KeyboardManager } from "./KeyboardManager";
+import { AudioManager } from "./AudioManager";
+import { SceneManager } from "./SceneManager";
+import type { SceneDefinition } from "./SceneManager";
+import { Camera } from "./Camera";
+import { CollisionManager } from "./CollisionManager";
+import { PrefabManager } from "./PrefabManager";
 
 export class SparkRuntime implements InputHandler {
   readonly events: EventBus;
@@ -19,13 +27,19 @@ export class SparkRuntime implements InputHandler {
   readonly scripts: ScriptManager;
   readonly input: InputManager;
   readonly updateLoop: UpdateLoop;
+  readonly keyboard: KeyboardManager;
+  readonly audio: AudioManager;
+  readonly scene: SceneManager;
+  readonly camera: Camera;
+  readonly collision: CollisionManager;
+  readonly prefab: PrefabManager;
 
   private entities = new Map<string, Entity>();
   private packageRegistry = new Map<string, LoadedPackage>();
   private active = false;
   private initPromise: Promise<void>;
   private sparkAPI: SparkAPI;
-  private baseUrl: string = "";
+  baseUrl: string = "";
 
   constructor(config: SparkConfig) {
     this.events = new EventBus();
@@ -34,22 +48,47 @@ export class SparkRuntime implements InputHandler {
     this.scripts = new ScriptManager();
     this.input = new InputManager();
     this.updateLoop = new UpdateLoop();
+    this.keyboard = new KeyboardManager();
+    this.audio = new AudioManager();
+    this.scene = new SceneManager({
+      spawnEntity: (config, id) => this.spawn(config, id),
+      destroyEntity: (entity) => this.destroy(entity),
+      loadScriptFile: (path, ns) => this.scripts.loadScript(path, ns),
+      createScriptInstance: (path, ns, api) => this.scripts.createInstance(path, ns, this.sparkAPI),
+      callOnCreate: (instances) => this.scripts.callOnCreate(instances),
+      addUpdateCallback: (cb) => this.updateLoop.add(cb),
+      removeUpdateCallback: (cb) => this.updateLoop.remove(cb),
+    });
+    this.camera = new Camera({
+      worldLayer: this.display.worldLayer,
+      backgroundLayer: this.display.backgroundLayer,
+      loadTexture: (path) => this.assets.loadTexture(path),
+      getViewportSize: () => ({
+        width: this.display.app.renderer.width,
+        height: this.display.app.renderer.height,
+      }),
+    });
+    this.collision = new CollisionManager({
+      getAllEntities: () => this.getAllEntities(),
+    });
+    this.prefab = new PrefabManager({
+      spawnEntity: (config, id) => this.spawn(config, id),
+      destroyEntity: (entity) => this.destroy(entity),
+      loadTexture: (path) => this.assets.loadTexture(path),
+    });
 
-    // Build the scripts API surface
-    this.sparkAPI = {
-      spawn: this.spawn.bind(this),
-      destroy: this.destroy.bind(this),
-      loadAsset: this.loadAsset.bind(this),
-      loadPackage: this.loadPackageUrl.bind(this),
-      import: this.importModule.bind(this),
-      loadScript: this.loadScript.bind(this),
-      on: this.events.on.bind(this.events),
-      once: this.events.once.bind(this.events),
-      emit: this.events.emit.bind(this.events),
-      baseUrl: this.baseUrl,
-    };
+    // Build the scripts API surface (class-backed — no .bind() needed)
+    this.sparkAPI = new SparkAPIObject(this);
 
     this.input.setHandler(this);
+
+    // Wire keyboard events through the runtime's EventBus
+    this.keyboard.setEmitter((event, ...args) => {
+      (this.events.emit as any)(event, ...args);
+    });
+
+    // Give AudioManager access to the asset loader
+    this.audio.setAssetLoader((path) => this.assets.loadAsset(path));
 
     // Kick off async init, store the promise so start() can await it
     this.initPromise = this.init(config);
@@ -70,6 +109,18 @@ export class SparkRuntime implements InputHandler {
       this.packageRegistry.set(pkg.manifest.name, pkg);
       this.assets.addPackage(pkg);
       this.scripts.addPackage(pkg);
+
+      // Preload audio in background (non-blocking, fire-and-forget)
+      this.audio.preloadPackage(pkg.manifest).catch((err) => {
+        console.warn("[Spark] Audio preload failed:", err);
+      });
+
+      // Auto-register prefab definitions from the package
+      if (pkg.manifest.prefabs) {
+        for (const prefabDef of pkg.manifest.prefabs) {
+          this.prefab.define(prefabDef.name, prefabDef);
+        }
+      }
 
       this.events.emit("package:loaded", pkg.manifest as unknown as Record<string, unknown>);
       return pkg;
@@ -108,8 +159,18 @@ export class SparkRuntime implements InputHandler {
     // Wire global spark events
     this.updateLoop.add(this._forwardUpdate);
 
+    // Drive prefab frame animations
+    this.updateLoop.add(this._prefabUpdate);
+
     this.updateLoop.start();
     this.input.enable();
+    this.keyboard.enable();
+
+    // Clear one-shot key states (pressed/released) after each frame
+    this.updateLoop.addPost(this._keyboardEndFrame);
+
+    // Apply camera follow + bounds each frame
+    this.updateLoop.addPost(this._cameraUpdate);
 
     this.events.emit("start");
     globalSpark.emit("ready");
@@ -119,13 +180,29 @@ export class SparkRuntime implements InputHandler {
     globalSpark.emit("update", dt);
   };
 
+  private _keyboardEndFrame = () => {
+    this.keyboard.endFrame();
+  };
+
+  private _prefabUpdate = (dt: number) => {
+    this.prefab.update(dt);
+  };
+
+  private _cameraUpdate = () => {
+    this.camera.update();
+  };
+
   stop(): void {
     if (!this.active) return;
     this.active = false;
 
     this.updateLoop.remove(this._forwardUpdate);
+    this.updateLoop.remove(this._prefabUpdate);
+    this.updateLoop.removePost(this._keyboardEndFrame);
+    this.updateLoop.removePost(this._cameraUpdate);
     this.updateLoop.stop();
     this.input.disable();
+    this.keyboard.disable();
     this.scripts.callOnDestroy();
 
     this.events.emit("stop");
@@ -144,16 +221,34 @@ export class SparkRuntime implements InputHandler {
     }
 
     this.entities.set(entity.id, entity);
-    this.display.stage.addChild(entity.pixiObj);
+    // Place entity in the correct layer
+    const layer = entity.layer === "background" ? this.display.backgroundLayer
+      : entity.layer === "ui" ? this.display.uiLayer
+      : this.display.worldLayer;
+    layer.addChild(entity.pixiObj);
 
     this.events.emit("entity:spawned", entity.id);
     return entity;
   }
 
   destroy(entity: Entity): void {
+    // Collect all descendant IDs before destroying, so Entity.destroy()
+    // handles the pixi hierarchy once without double-destroy.
+    const ids = this._collectDescendantIds(entity);
     entity.destroy();
-    this.entities.delete(entity.id);
-    this.events.emit("entity:destroyed", entity.id);
+    for (const id of ids) {
+      this.entities.delete(id);
+      this.events.emit("entity:destroyed", id);
+    }
+  }
+
+  /** Collect an entity's id and all descendant ids recursively. */
+  private _collectDescendantIds(entity: Entity): string[] {
+    const ids = [entity.id];
+    for (const child of entity.children) {
+      ids.push(...this._collectDescendantIds(child));
+    }
+    return ids;
   }
 
   async loadAsset(path: string): Promise<Blob | undefined> {
@@ -190,7 +285,10 @@ export class SparkRuntime implements InputHandler {
     try {
       await this.scripts.loadScript(scriptPath, namespace);
       const instance = this.scripts.createInstance(scriptPath, namespace, this.sparkAPI);
-      instance.onCreate?.();
+      await this.scripts.callOnCreate([instance]);
+      if (instance.onUpdate) {
+        this.updateLoop.add(instance.onUpdate);
+      }
       this.events.emit("script:loaded", path);
       return instance;
     } catch (error) {
@@ -212,7 +310,6 @@ export class SparkRuntime implements InputHandler {
     if (!this.baseUrl) {
       const lastSlash = url.lastIndexOf("/");
       this.baseUrl = url.slice(0, lastSlash + 1);
-      (this.sparkAPI as any).baseUrl = this.baseUrl;
     }
 
     // file:// URL — use Tauri's readFile if available (set by PlayerPanel)
@@ -246,7 +343,6 @@ export class SparkRuntime implements InputHandler {
     if (!this.baseUrl) {
       const lastSlash = url.lastIndexOf("/");
       this.baseUrl = url.slice(0, lastSlash + 1);
-      (this.sparkAPI as any).baseUrl = this.baseUrl;
     }
 
     return pkg;
@@ -295,6 +391,10 @@ export class SparkRuntime implements InputHandler {
     this.assets.cleanup();
     this.input.destroy();
     this.updateLoop.destroy();
+    this.keyboard.destroy();
+    this.audio.destroy();
+    this.camera.destroy();
+    this.scene.destroy();
 
     for (const entity of this.entities.values()) {
       entity.destroy();

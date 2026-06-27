@@ -1,5 +1,7 @@
 import * as esbuild from "esbuild-wasm";
 import JSZip from "jszip";
+import type { SparkConfig, PackageManifest, PrefabDefinition } from "@spark/builder/types";
+import { ensureArray } from "@spark/builder/types";
 import {
   readFile,
   readFileBinary,
@@ -9,24 +11,7 @@ import {
 } from "./workspace";
 
 // ── Types ────────────────────────────────────────────────────
-
-interface SparkConfig {
-  name: string;
-  version: string;
-  entryScripts: string[];
-  scriptDirs?: string[];
-  assetDirs: string[];
-  outputDir?: string;
-}
-
-interface PackageManifest {
-  sparkVersion: string;
-  name: string;
-  version: string;
-  entryScripts: string[];
-  assets: string[];
-  createdAt: string;
-}
+// SparkConfig and PackageManifest are imported from @spark/builder
 
 export interface BuildOutput {
   success: boolean;
@@ -116,13 +101,11 @@ async function loadConfig(projectPath: string): Promise<SparkConfig> {
         : ["scripts"],
     assetDirs: ensureArray(parsed.assetDirs),
     outputDir: ".built",
+    prefabDir:
+      typeof parsed.prefabDir === "string" ? parsed.prefabDir : "prefabs",
+    audioBitrate:
+      typeof parsed.audioBitrate === "number" ? parsed.audioBitrate : 128,
   };
-}
-
-function ensureArray(val: unknown): string[] {
-  if (Array.isArray(val)) return val.map(String);
-  if (typeof val === "string") return [val];
-  return [];
 }
 
 // ── Esbuild plugin — resolves imports via Tauri file APIs ────
@@ -249,9 +232,57 @@ export async function buildInBrowser(
     log(`  Initialising esbuild (WASM)...`);
     await ensureEsbuild();
 
-    // 3. Collect all .ts files from script directories
-    log(`  Scanning scripts...`);
+    // 3. Collect all files from the project
+    log(`  Scanning files...`);
     const allFiles = await listDirectoryRecursive(projectPath);
+
+    // 4. Discover prefab definitions
+    let prefabs: PrefabDefinition[] = [];
+    if (config.prefabDir) {
+      const prefabDirPrefix = join(projectPath, config.prefabDir);
+      const prefabFiles = allFiles.filter(
+        (f) => !f.is_dir && f.name.endsWith(".prefab.json") && f.path.startsWith(prefabDirPrefix),
+      );
+      if (prefabFiles.length > 0) {
+        log(`  Loading ${prefabFiles.length} prefab(s)...`);
+        for (const file of prefabFiles) {
+          try {
+            const raw = await readFile(file.path);
+            const def: PrefabDefinition = JSON.parse(raw);
+            if (!def.name || (!Array.isArray(def.parts) && !def.variants)) {
+              log(`     ⚠ Skipping invalid prefab: ${file.name} (needs "parts" or "variants")`);
+              continue;
+            }
+            if (def.variants) {
+              let variantValid = true;
+              for (const [vName, v] of Object.entries(def.variants)) {
+                if (!Array.isArray(v.parts) && !v.states) {
+                  log(`     ⚠ Skipping invalid prefab: ${file.name} (variant "${vName}" needs "parts" or "states")`);
+                  variantValid = false;
+                  break;
+                }
+              }
+              if (!variantValid) continue;
+            }
+            prefabs.push(def);
+            const partCount = def.parts?.length ?? Object.keys(def.variants!).length;
+            const variantInfo = def.variants ? `, ${Object.keys(def.variants).length} variant(s)` : "";
+            const stateInfo = def.variants
+              ? (() => {
+                  const total = Object.values(def.variants).reduce((sum, v) => sum + (v.states ? Object.keys(v.states).length : 0), 0);
+                  return total > 0 ? `, ${total} state(s)` : "";
+                })()
+              : "";
+            log(`     ◆ ${def.name} (${partCount} part${partCount > 1 ? "s" : ""}${variantInfo}${stateInfo})`);
+          } catch {
+            log(`     ⚠ Failed to parse prefab: ${file.name}`);
+          }
+        }
+      }
+    }
+
+    // 5. Collect all .ts files from script directories
+    log(`  Scanning scripts...`);
     const scriptDirs = config.scriptDirs ?? ["scripts"];
     const allTsFiles: string[] = [];
 
@@ -270,7 +301,7 @@ export async function buildInBrowser(
       }
     }
 
-    // 4. Compile all scripts with esbuild
+    // 6. Compile all scripts with esbuild
     let compiledScripts: Array<{
       entry: string;
       code: string;
@@ -308,13 +339,11 @@ export async function buildInBrowser(
         error("esbuild produced no output files");
         compiledScripts = [];
       } else {
-        // Use metafile to map each entry point to its compiled output.
-        // This is more reliable than matching by path suffix.
+        // Map each entry point to its compiled output via metafile
         const metafile = result.metafile!;
         compiledScripts = [];
 
         for (const entry of allTsFiles) {
-          // Find the output key in metafile that contains this entry
           const outputKey = Object.keys(metafile.outputs).find(
             (key) => {
               const inputs = metafile.outputs[key].inputs;
@@ -362,7 +391,7 @@ export async function buildInBrowser(
       compiledScripts = [];
     }
 
-    // 5. Create ZIP package — scripts + assets + manifest
+    // 7. Create ZIP package — scripts + assets + manifest
     log(
       `  Packaging assets from ${config.assetDirs.length} director(ies)...`,
     );
@@ -373,6 +402,7 @@ export async function buildInBrowser(
     }
 
     const allAssets: string[] = [];
+
     for (const assetDir of config.assetDirs) {
       const dirPrefix = join(projectPath, assetDir);
       for (const file of allFiles) {
@@ -387,7 +417,16 @@ export async function buildInBrowser(
       }
     }
 
-    // 6. Generate manifest
+    // 8. Add prefab definitions as bundled JSON
+    if (prefabs.length > 0) {
+      const prefabDirPath = config.prefabDir ?? "prefabs";
+      for (const def of prefabs) {
+        const prefabPath = `${prefabDirPath}/${def.name}.prefab.json`;
+        zip.file(prefabPath, JSON.stringify(def));
+      }
+    }
+
+    // 9. Generate manifest
     const entryPaths = config.entryScripts.map((s) =>
       s.replace(/\.ts$/, ".js"),
     );
@@ -397,11 +436,12 @@ export async function buildInBrowser(
       version: config.version,
       entryScripts: entryPaths,
       assets: allAssets,
+      prefabs: prefabs.length > 0 ? prefabs : undefined,
       createdAt: new Date().toISOString(),
     };
-    zip.file("manifest.json", JSON.stringify(manifest, null, 2));
+    zip.file("manifest.json", JSON.stringify(manifest));
 
-    // 7. Write .sprk output
+    // 10. Write .sprk output
     const outputDir =
       outputOverride ?? join(projectPath, "..", ".built");
     const outputPath = join(outputDir, `${config.name}.sprk`);
@@ -409,12 +449,23 @@ export async function buildInBrowser(
     const buffer = await zip.generateAsync({
       type: "uint8array",
       compression: "DEFLATE",
-      compressionOptions: { level: 6 },
+      compressionOptions: { level: 9 },
     });
     await writeFileBinary(outputPath, uint8ArrayToBase64(buffer));
 
     const sizeKB = (buffer.length / 1024).toFixed(1);
+    const sizeMBNum = buffer.length / (1024 * 1024);
     log(`\n  \u2713 Built ${config.name}.sprk (${sizeKB} KB)`);
+
+    // Size breakdown
+    const scriptBytes = compiledScripts.reduce((sum, s) => sum + s.code.length, 0);
+    log(`  ── Size breakdown:`);
+    log(`     Scripts : ${(scriptBytes / 1024).toFixed(1)} KB (${compiledScripts.length} files)`);
+    log(`     Assets  : ${allAssets.length} files`);
+    log(`     Total   : ${sizeMBNum.toFixed(2)} MB (${sizeKB} KB)`);
+    if (sizeMBNum > 5) {
+      log(`     ⚠  Large .sprk — check for big audio/images or uncompressed assets`);
+    }
 
     return {
       success: true,

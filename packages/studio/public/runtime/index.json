@@ -1,8 +1,1 @@
-[
-    "index.d.ts",
-    "SparkRuntime.d.ts",
-    "Entity.d.ts",
-    "EventBus.d.ts",
-    "types.d.ts",
-    "global.d.ts"
-]
+["AssetManager.d.ts","AudioManager.d.ts","Camera.d.ts","CollisionManager.d.ts","DisplayTree.d.ts","Entity.d.ts","EventBus.d.ts","InputManager.d.ts","KeyboardManager.d.ts","PackageLoader.d.ts","PrefabManager.d.ts","SceneManager.d.ts","ScriptManager.d.ts","SparkAPIObject.d.ts","SparkRuntime.d.ts","UpdateLoop.d.ts","global.d.ts","index.d.ts","types.d.ts"]

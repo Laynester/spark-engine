@@ -5,6 +5,7 @@ export type UpdateCallback = (dt: number) => void;
 export class UpdateLoop {
   private ticker: Ticker | null = null;
   private callbacks: Set<UpdateCallback> = new Set();
+  private postCallbacks: Set<() => void> = new Set();
   private boundTick: (ticker: Ticker) => void;
 
   constructor() {
@@ -23,6 +24,15 @@ export class UpdateLoop {
     this.callbacks.delete(callback);
   }
 
+  /** Register a callback that fires after ALL frame callbacks, every frame. */
+  addPost(callback: () => void): void {
+    this.postCallbacks.add(callback);
+  }
+
+  removePost(callback: () => void): void {
+    this.postCallbacks.delete(callback);
+  }
+
   start(): void {
     if (!this.ticker) return;
     this.ticker.add(this.boundTick);
@@ -36,13 +46,25 @@ export class UpdateLoop {
   private tick(ticker: Ticker): void {
     const dt = ticker.deltaTime;
     for (const callback of this.callbacks) {
-      callback(dt);
+      try {
+        callback(dt);
+      } catch (error) {
+        console.error(`[Spark] Error in update callback:`, error);
+      }
+    }
+    for (const cb of this.postCallbacks) {
+      try {
+        cb();
+      } catch (error) {
+        console.error(`[Spark] Error in post-frame callback:`, error);
+      }
     }
   }
 
   destroy(): void {
     this.stop();
     this.callbacks.clear();
+    this.postCallbacks.clear();
     this.ticker = null;
   }
 }

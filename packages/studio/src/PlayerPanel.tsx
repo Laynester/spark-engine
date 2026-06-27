@@ -9,6 +9,8 @@ interface PlayerPanelProps {
   projects: string[];
   workspacePath: string;
   entryProject: string | null;
+  width?: number;
+  height?: number;
   onStop: () => void;
 }
 
@@ -24,7 +26,7 @@ function b64ToArrayBuffer(b64: string): ArrayBuffer {
   return bytes.buffer;
 }
 
-export function PlayerPanel({ projects, workspacePath, entryProject, onStop }: PlayerPanelProps) {
+export function PlayerPanel({ projects, workspacePath, entryProject, width, height, onStop }: PlayerPanelProps) {
   const [completedCount, setCompletedCount] = useState(0);
   const [currentBuild, setCurrentBuild] = useState<string | null>(null);
   const [phase, setPhase] = useState<"building" | "running" | "error">("building");
@@ -34,6 +36,7 @@ export function PlayerPanel({ projects, workspacePath, entryProject, onStop }: P
   const [debugEntities, setDebugEntities] = useState(0);
   const [debugPackages, setDebugPackages] = useState<string[]>([]);
   const [debugLogs, setDebugLogs] = useState<LogEntry[]>([]);
+  const [runtimeReady, setRuntimeReady] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const runtimeRef = useRef<SparkRuntime | null>(null);
   const debugLogRef = useRef<HTMLDivElement>(null);
@@ -82,30 +85,31 @@ export function PlayerPanel({ projects, workspacePath, entryProject, onStop }: P
   }, [showDebug]);
 
   // Poll debug stats when running (only when panel is open)
+  // Driven by the Pixi ticker via runtime.updateLoop so maxFPS is reflected
   useEffect(() => {
-    if (phase !== "running" || !showDebug) return;
-    let frameId: number;
+    if (phase !== "running" || !showDebug || !runtimeReady) return;
+    const rt = runtimeRef.current!;
+
     let lastTime = performance.now();
     let frames = 0;
 
-    const poll = () => {
+    const onTick = () => {
       const now = performance.now();
       frames++;
       if (now - lastTime >= 1000) {
         setDebugFps(frames);
         frames = 0;
         lastTime = now;
-        const rt = runtimeRef.current;
-        if (rt) {
-          setDebugEntities(rt.getAllEntities().length);
-          setDebugPackages(rt.loadedPackages);
-        }
+        setDebugEntities(rt.getAllEntities().length);
+        setDebugPackages(rt.loadedPackages);
       }
-      frameId = requestAnimationFrame(poll);
     };
-    frameId = requestAnimationFrame(poll);
-    return () => cancelAnimationFrame(frameId);
-  }, [phase, showDebug]);
+
+    rt.updateLoop.add(onTick);
+    return () => {
+      rt.updateLoop.remove(onTick);
+    };
+  }, [phase, showDebug, runtimeReady]);
 
   // Auto-scroll debug logs
   useEffect(() => {
@@ -126,10 +130,11 @@ export function PlayerPanel({ projects, workspacePath, entryProject, onStop }: P
       try {
         setLog((prev) => prev + `\nReading ${sprkPath}...`);
 
-        const runtime = new SparkRuntime({ view: canvasRef.current! });
+        const runtime = new SparkRuntime({ view: canvasRef.current!, width, height });
         runtimeRef.current = runtime;
         await runtime.loadPackageUrl("file://" + sprkPath);
         await runtime.start();
+        setRuntimeReady(true);
 
         setLog((prev) => prev + `\n✓ Game running`);
       } catch (err) {
@@ -288,14 +293,20 @@ export function PlayerPanel({ projects, workspacePath, entryProject, onStop }: P
 
       {/* Content area */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-        <div style={{ flex: 1, position: "relative", minHeight: 0 }}>
+        <div style={{
+          position: "relative", minHeight: 0,
+          display: "flex",
+        }}>
           {phase === "running" ? (
             <>
               <canvas
                 ref={canvasRef}
                 style={{
-                  width: "100%", height: "100%", display: "block",
+                  width: width ?? "100%",
+                  height: height ?? "100%",
+                  display: "block",
                   background: "#000",
+                  flexShrink: 0,
                 }}
               />
               {/* Debug overlay panel */}

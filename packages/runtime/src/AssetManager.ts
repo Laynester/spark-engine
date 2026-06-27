@@ -1,15 +1,43 @@
-import { Assets, Texture } from "pixi.js";
+import { Texture } from "pixi.js";
 import type { LoadedPackage } from "./PackageLoader";
 
+const TEXTURE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp"]);
+
+/**
+ * Manages loaded packages and their assets.
+ * Textures are preloaded eagerly when a package is added and cached
+ * under "namespace:path" keys for instant script access.
+ */
 export class AssetManager {
   private packages = new Map<string, LoadedPackage>();
   private textureCache = new Map<string, Texture>();
   private blobUrls = new Map<string, string>();
 
+  /** Add a loaded package and preload all its textures immediately. */
   addPackage(pkg: LoadedPackage): void {
     const ns = pkg.manifest.name;
-    // Don't clean up — just add
     this.packages.set(ns, pkg);
+    this.preloadPackage(pkg);
+  }
+
+  /**
+   * Preload all textures listed in the package manifest.
+   * Assets are cached under "namespace:path" keys (e.g. "clubpenguin:assets/player.png").
+   * Non-texture assets are verified but not decoded (audio is preloaded separately).
+   */
+  private preloadPackage(pkg: LoadedPackage): void {
+    const ns = pkg.manifest.name;
+    for (const assetPath of pkg.manifest.assets) {
+      const cacheKey = `${ns}:${assetPath}`;
+      const ext = assetPath.split(".").pop()?.toLowerCase();
+      if (ext && TEXTURE_EXTS.has(ext)) {
+        console.log(`[Spark Assets] Preloading texture: ${cacheKey}`);
+        // Fire-and-forget texture preload — cached once loaded
+        this.loadTexture(cacheKey).catch((err) => {
+          console.warn(`[Spark Assets] Failed to preload texture: ${cacheKey}`, err);
+        });
+      }
+    }
   }
 
   /**
@@ -38,7 +66,10 @@ export class AssetManager {
 
   async loadTexture(path: string): Promise<Texture> {
     const cached = this.textureCache.get(path);
-    if (cached) return cached;
+    if (cached) {
+      console.log(`[Spark Assets] Texture cache hit: ${path}`);
+      return cached;
+    }
 
     if (this.packages.size === 0) {
       throw new Error("No packages loaded");
@@ -49,16 +80,18 @@ export class AssetManager {
       throw new Error(`Asset not found: ${path}`);
     }
 
-    const url = URL.createObjectURL(resolved.blob);
-    this.blobUrls.set(path, url);
+    const ext = path.split(".").pop()?.toLowerCase() ?? "unknown";
+    console.log(`[Spark Assets] Creating texture from blob: ${path} (ext=${ext}, size=${resolved.blob.size} bytes)`);
 
     try {
-      const texture = await Assets.load<Texture>(url);
+      // Use createImageBitmap + Texture.from instead of Assets.load()
+      // because blob URLs lack file extensions and Pixi can't pick a parser.
+      const bitmap = await createImageBitmap(resolved.blob);
+      const texture = Texture.from(bitmap);
       this.textureCache.set(path, texture);
       return texture;
     } catch (error) {
-      URL.revokeObjectURL(url);
-      this.blobUrls.delete(path);
+      console.error(`[Spark Assets] Failed to create texture: ${path}`, error);
       throw error;
     }
   }
@@ -80,12 +113,6 @@ export class AssetManager {
   }
 
   cleanup(): void {
-    // Release all blob URLs
-    for (const url of this.blobUrls.values()) {
-      URL.revokeObjectURL(url);
-    }
-    this.blobUrls.clear();
-
     // Destroy all textures
     for (const texture of this.textureCache.values()) {
       texture.destroy(true);

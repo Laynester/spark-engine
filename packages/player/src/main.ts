@@ -41,12 +41,8 @@ runtime.events.on("package:loaded", (manifest: Record<string, unknown>) => {
 runtime.events.on("start", () => { started = true; debug.logEvent("Started"); });
 runtime.events.on("stop", () => { started = false; debug.logEvent("Stopped"); });
 
-// FPS tracking via requestAnimationFrame
-function fpsLoop(time: number) {
-  debug.tick(time);
-  requestAnimationFrame(fpsLoop);
-}
-requestAnimationFrame(fpsLoop);
+// FPS tracking — driven by the Pixi ticker so maxFPS is reflected
+runtime.updateLoop.add(() => debug.tick(performance.now()));
 
 function isSprkFile(file: File): boolean {
   return file.name.endsWith(".sprk");

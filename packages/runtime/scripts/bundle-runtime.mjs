@@ -1,7 +1,7 @@
 import * as esbuild from "esbuild";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
-import { readdirSync, copyFileSync, mkdirSync, existsSync } from "fs";
+import { readdirSync, copyFileSync, mkdirSync, existsSync, writeFileSync } from "fs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, "..");
@@ -14,7 +14,7 @@ await esbuild.build({
   platform: "browser",
   target: "esnext",
   sourcemap: false,
-  minify: false,
+  minify: true,
   tsconfig: resolve(root, "tsconfig.json"),
   logLevel: "info",
 });
@@ -26,8 +26,18 @@ if (!existsSync(studioPublicRuntime)) {
 }
 
 const distDir = resolve(root, "dist");
+const dtsFiles = [];
+
 for (const file of readdirSync(distDir)) {
   if (file.endsWith(".d.ts") && !file.endsWith(".d.ts.map")) {
     copyFileSync(resolve(distDir, file), resolve(studioPublicRuntime, file));
+    dtsFiles.push(file);
   }
 }
+
+// Auto-generate index.json so Monaco knows which files to load
+dtsFiles.sort();
+const indexPath = resolve(studioPublicRuntime, "index.json");
+writeFileSync(indexPath, JSON.stringify(dtsFiles) + "\n");
+console.log(`  Copied ${dtsFiles.length} .d.ts file(s) to studio/public/runtime/`);
+console.log(`  Generated index.json (${dtsFiles.length} entries)`);

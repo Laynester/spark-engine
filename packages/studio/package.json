@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
+    "@spark/builder": "*",
     "@spark/runtime": "*",
     "@tauri-apps/api": "^2.0.0",
     "esbuild-wasm": "^0.24.0",

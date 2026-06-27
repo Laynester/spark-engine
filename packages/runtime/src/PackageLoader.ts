@@ -6,6 +6,25 @@ export interface PackageManifest {
   version: string;
   entryScripts: string[];
   assets: string[];
+  prefabs?: Array<{
+    name: string;
+    parts: Array<{
+      texture: string;
+      zOffset?: number;
+      alpha?: number;
+      tint?: number;
+      blendMode?: string;
+      visible?: boolean;
+      scale?: number;
+      rotation?: number;
+      zIndex?: number;
+      x?: number;
+      y?: number;
+    }>;
+    hitbox?: { width: number; height: number; offsetX?: number; offsetY?: number };
+    tags?: string[];
+    layer?: "background" | "world" | "ui";
+  }>;
   createdAt: string;
 }
 
