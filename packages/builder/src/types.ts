@@ -92,6 +92,17 @@ export interface BuildResult {
   assetCount: number;
 }
 
+// ── Workspace types ───────────────────────────────────────────────
+
+export interface WorkspaceManifest {
+  spark_version: string;
+  name: string;
+  entry_project?: string | null;
+  last_opened?: string | null;
+  width?: number;
+  height?: number;
+}
+
 export function ensureArray(val: unknown): string[] {
   if (Array.isArray(val)) return val.map(String);
   if (typeof val === "string") return [val];

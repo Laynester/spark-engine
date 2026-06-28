@@ -46,6 +46,21 @@ export async function compileScripts(
     allScriptFiles.push(...tsFiles);
   }
 
+  // Also explicitly include any entry scripts that may not live under
+  // the scriptDirs (e.g. entryScripts: ["src/main.ts"] with scriptDirs: ["scripts"]).
+  for (const entry of config.entryScripts) {
+    const absPath = join(projectDir, entry);
+    if (!allScriptFiles.includes(absPath)) {
+      if (entry.endsWith(".ts")) {
+        if (existsSync(absPath)) {
+          allScriptFiles.push(absPath);
+        } else {
+          console.warn(`  ⚠ Entry script not found: ${entry}`);
+        }
+      }
+    }
+  }
+
   if (allScriptFiles.length === 0) {
     return [];
   }
@@ -74,14 +89,16 @@ export async function compileScripts(
     const relativePath = relative(projectDir, fullPath);
 
     const outputKey = Object.keys(metafile.outputs).find((key) => {
-      return relativePath in metafile.outputs[key].inputs;
+      const inputs = Object.keys(metafile.outputs[key].inputs);
+      // Match by absolute path (if esbuild stored absolute paths) or
+      // by relative path suffix (if stored relative to cwd).
+      return inputs.some((k) => k === fullPath || k.endsWith(relativePath));
     });
 
     if (!outputKey) {
       console.warn(`  ⚠ Could not find compiled output for "${relativePath}"`);
       continue;
     }
-
     const outputFile = result.outputFiles.find((f) => f.path.endsWith(outputKey));
     if (!outputFile) {
       console.warn(`  ⚠ Compiled output file not found for "${relativePath}"`);

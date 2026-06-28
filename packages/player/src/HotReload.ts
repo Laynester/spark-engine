@@ -34,6 +34,7 @@ export class HotReload {
   }
 
   private async check(): Promise<void> {
+    console.log('testing')
     try {
       const response = await fetch(this.options.sprkUrl, { method: "HEAD" });
       const modified = response.headers.get("last-modified") ?? "";
@@ -51,6 +52,7 @@ export class HotReload {
         this.lastModified = marker;
       }
     } catch {
+      console.log('test?')
       // File not available yet — skip silently
     }
   }

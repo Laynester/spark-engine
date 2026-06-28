@@ -1,4 +1,4 @@
-import { resolve, join } from "node:path";
+import { resolve, join, dirname } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { compileScripts } from "./compiler.js";
@@ -31,12 +31,23 @@ export async function build(
   configOrPath?: SparkConfig | string,
   outputOverride?: string,
 ): Promise<BuildResult> {
-  const config: SparkConfig =
-    typeof configOrPath === "string" || configOrPath === undefined
-      ? loadConfig(configOrPath as string | undefined)
-      : configOrPath;
+  let config: SparkConfig;
+  let projectDir: string;
 
-  const projectDir = process.cwd();
+  if (typeof configOrPath === "string") {
+    // Config path provided — project dir is the config file's directory
+    config = loadConfig(configOrPath);
+    projectDir = dirname(resolve(process.cwd(), configOrPath));
+  } else if (configOrPath === undefined) {
+    // No config — look for spark.config.json in cwd
+    config = loadConfig();
+    projectDir = process.cwd();
+  } else {
+    // SparkConfig object provided — use cwd as project dir
+    config = configOrPath;
+    projectDir = process.cwd();
+  }
+
   const startTime = performance.now();
 
   console.log(`\n  Building ${config.name} v${config.version}...\n`);
