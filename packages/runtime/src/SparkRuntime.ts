@@ -50,14 +50,18 @@ export class SparkRuntime implements InputHandler {
     this.updateLoop = new UpdateLoop();
     this.keyboard = new KeyboardManager();
     this.audio = new AudioManager();
+    // Build the scripts API surface (class-backed — no .bind() needed)
+    this.sparkAPI = new SparkAPIObject(this);
+
     this.scene = new SceneManager({
       spawnEntity: (config, id) => this.spawn(config, id),
       destroyEntity: (entity) => this.destroy(entity),
       loadScriptFile: (path, ns) => this.scripts.loadScript(path, ns),
-      createScriptInstance: (path, ns, api) => this.scripts.createInstance(path, ns, this.sparkAPI),
+      createScriptInstance: (path, ns, api) => this.scripts.createInstance(path, ns, api),
       callOnCreate: (instances) => this.scripts.callOnCreate(instances),
       addUpdateCallback: (cb) => this.updateLoop.add(cb),
       removeUpdateCallback: (cb) => this.updateLoop.remove(cb),
+      sparkAPI: this.sparkAPI,
     });
     this.camera = new Camera({
       worldLayer: this.display.worldLayer,
@@ -76,9 +80,6 @@ export class SparkRuntime implements InputHandler {
       destroyEntity: (entity) => this.destroy(entity),
       loadTexture: (path) => this.assets.loadTexture(path),
     });
-
-    // Build the scripts API surface (class-backed — no .bind() needed)
-    this.sparkAPI = new SparkAPIObject(this);
 
     this.input.setHandler(this);
 
@@ -122,6 +123,12 @@ export class SparkRuntime implements InputHandler {
         }
       }
 
+      // Run entry scripts for newly loaded package if runtime is already active.
+      // (start() only runs for packages loaded before the initial start.)
+      if (this.active) {
+        await this._startPackageEntryScripts(pkg.manifest.name);
+      }
+
       this.events.emit("package:loaded", pkg.manifest as unknown as Record<string, unknown>);
       return pkg;
     } catch (error) {
@@ -133,28 +140,14 @@ export class SparkRuntime implements InputHandler {
   async start(): Promise<void> {
     await this.initPromise;
 
-    // Always run entry scripts for any unstarted namespaces (idempotent for already-started ones)
-    const allInstances: ScriptInstance[] = [];
-    for (const ns of this.scripts.getLoadedNamespaces()) {
-      const instances = await this.scripts.createEntryInstances(ns, this.sparkAPI);
-      allInstances.push(...instances);
-    }
-
-    if (allInstances.length > 0) {
-      // Register update callbacks for new instances
-      for (const inst of allInstances) {
-        if (inst.onUpdate) {
-          this.updateLoop.add(inst.onUpdate);
-        }
-      }
-
-      // Fire onCreate for new instances only
-      await this.scripts.callOnCreate(allInstances);
-    }
-
     // Only initialize loop + input once
     if (this.active) return;
     this.active = true;
+
+    // Always run entry scripts for any unstarted namespaces (idempotent for already-started ones)
+    for (const ns of this.scripts.getLoadedNamespaces()) {
+      await this._startPackageEntryScripts(ns);
+    }
 
     // Wire global spark events
     this.updateLoop.add(this._forwardUpdate);
@@ -187,6 +180,23 @@ export class SparkRuntime implements InputHandler {
   private _prefabUpdate = (dt: number) => {
     this.prefab.update(dt);
   };
+
+  /**
+   * Run entry scripts for a namespace package and return the number of
+   * instances created. Idempotent — skips already-started packages.
+   */
+  private async _startPackageEntryScripts(namespace: string): Promise<number> {
+    const instances = await this.scripts.createEntryInstances(namespace, this.sparkAPI);
+    if (instances.length > 0) {
+      for (const inst of instances) {
+        if (inst.onUpdate) {
+          this.updateLoop.add(inst.onUpdate);
+        }
+      }
+      await this.scripts.callOnCreate(instances);
+    }
+    return instances.length;
+  }
 
   private _cameraUpdate = () => {
     this.camera.update();
@@ -224,7 +234,7 @@ export class SparkRuntime implements InputHandler {
     // Place entity in the correct layer
     const layer = entity.layer === "background" ? this.display.backgroundLayer
       : entity.layer === "ui" ? this.display.uiLayer
-      : this.display.worldLayer;
+        : this.display.worldLayer;
     layer.addChild(entity.pixiObj);
 
     this.events.emit("entity:spawned", entity.id);
@@ -249,6 +259,14 @@ export class SparkRuntime implements InputHandler {
       ids.push(...this._collectDescendantIds(child));
     }
     return ids;
+  }
+
+  setBackgroundColor(color: number): void {
+    this.display.setBackgroundColor(color);
+  }
+
+  getTextureSize(path: string): { width: number; height: number } | null {
+    return this.assets.getTextureSize(path);
   }
 
   async loadAsset(path: string): Promise<Blob | undefined> {
@@ -301,6 +319,7 @@ export class SparkRuntime implements InputHandler {
   async loadPackageUrl(url: string): Promise<LoadedPackage> {
     await this.initPromise;
 
+
     // Resolve relative URL against baseUrl (set after first package is loaded)
     if (!url.includes("://") && this.baseUrl) {
       url = this.baseUrl + url;
@@ -311,6 +330,8 @@ export class SparkRuntime implements InputHandler {
       const lastSlash = url.lastIndexOf("/");
       this.baseUrl = url.slice(0, lastSlash + 1);
     }
+
+    console.log(url)
 
     // file:// URL — use Tauri's readFile if available (set by PlayerPanel)
     if (url.startsWith("file://")) {

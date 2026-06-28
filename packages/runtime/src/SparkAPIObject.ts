@@ -33,6 +33,14 @@ export class SparkAPIObject implements SparkAPI {
     this.runtime.destroy(entity);
   }
 
+  setBackgroundColor(color: number): void {
+    this.runtime.setBackgroundColor(color);
+  }
+
+  getTextureSize(path: string): { width: number; height: number } | null {
+    return this.runtime.getTextureSize(path);
+  }
+
   async loadAsset(path: string): Promise<Blob | undefined> {
     return this.runtime.loadAsset(path);
   }

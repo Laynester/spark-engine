@@ -284,11 +284,13 @@ export function StudioLayout({ manifest, workspacePath, onBack }: StudioLayoutPr
         // Create a project folder with spark.config.json and scripts/main.ts
         const projectDir = `${parentPath}/${name}`;
         await createDirectory(`${projectDir}/scripts`);
+        await createDirectory(`${projectDir}/assets`);
         const configContent = JSON.stringify({
           name,
           version: "1.0.0",
           entryScripts: ["scripts/main.ts"],
           scriptDirs: ["scripts"],
+          assetDirs: ["assets"],
           outputDir: "../.built",
         }, null, 2);
         await writeFile(`${projectDir}/spark.config.json`, configContent);

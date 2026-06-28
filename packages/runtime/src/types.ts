@@ -20,7 +20,12 @@ export interface EntityConfig {
   y?: number;
   rotation?: number;
   scale?: number;
+  width?: number;
+  height?: number;
   visible?: boolean;
+  blendMode?: string;
+  tint?: number;
+  alpha?: number;
   tags?: string[];
   hitbox?: { width: number; height: number; offsetX?: number; offsetY?: number };
   layer?: "background" | "world" | "ui";
@@ -111,6 +116,8 @@ export interface ScriptClass {
 export interface SparkAPI {
   spawn(config: EntityConfig & { text?: TextConfig }, id?: string): Entity;
   destroy(entity: Entity): void;
+  setBackgroundColor(color: number): void;
+  getTextureSize(path: string): { width: number; height: number } | null;
   loadAsset(path: string): Promise<Blob | undefined>;
   loadPackage(url: string): Promise<LoadedPackage>;
   import(qualified: string): Promise<any>;
@@ -163,7 +170,15 @@ export interface SparkAPI {
   };
   readonly prefab: {
     define(name: string, definition: PrefabDefinition): void;
-    spawn(name: string, config?: { x?: number; y?: number; id?: string; variant?: string; state?: string }): Entity;
+    spawn(name: string, config?: {
+      x?: number;
+      y?: number;
+      id?: string;
+      variant?: string;
+      state?: string;
+      /** Base zIndex applied to all child parts. */
+      zIndex?: number;
+    }): Entity;
     destroy(entity: Entity): void;
     setVariant(entity: Entity, variant: string): void;
     getVariant(entity: Entity): string | undefined;

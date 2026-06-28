@@ -39,6 +39,8 @@ export function EditorPanel({
   const activeFileData = files.find((f) => f.path === activeFile) ?? null;
   const editorRef = useRef<any>(null);
   const libraryProjectsRef = useRef<LibraryProject[]>([]);
+  const activeFileRef = useRef(activeFile);
+  activeFileRef.current = activeFile;
 
   const handleEditorChange = useCallback(
     (value?: string) => {
@@ -63,10 +65,12 @@ export function EditorPanel({
   );
 
   const handleBeforeMount = (editor: any, monaco: any) => {
+    editorRef.current = editor;
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-      if (activeFile) {
+      const file = activeFileRef.current;
+      if (file) {
         const value = editor.getValue();
-        onFileSave(activeFile, value);
+        onFileSave(file, value);
       }
     });
     monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
@@ -213,7 +217,7 @@ export function EditorPanel({
         {activeFileData ? (
           <Editor
             path={activeFileData.path}
-            language="typescript"
+            language={activeFileData.language}
             defaultValue={activeFileData.content}
             theme="vs-dark"
             onChange={handleEditorChange}

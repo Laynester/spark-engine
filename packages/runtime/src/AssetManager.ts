@@ -100,6 +100,13 @@ export class AssetManager {
     return this.textureCache.get(path);
   }
 
+  /** Get the dimensions of a loaded texture, or null if not yet cached. */
+  getTextureSize(path: string): { width: number; height: number } | null {
+    const texture = this.textureCache.get(path);
+    if (!texture) return null;
+    return { width: texture.width, height: texture.height };
+  }
+
   async loadAsset(path: string): Promise<Blob | undefined> {
     if (this.packages.size === 0) {
       throw new Error("No packages loaded");

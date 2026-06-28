@@ -5,3 +5,4 @@ dist/
 *.tsbuildinfo
 /packages/studio/public/runtime/**.d.ts
 /packages/studio/public/**.js
+/assets

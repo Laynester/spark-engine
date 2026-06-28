@@ -52,9 +52,6 @@ jobs:
       - name: Build @spark/runtime
         run: npm run build -w packages/runtime
 
-      - name: Copy Runtime to studio
-        run: npm run copy:studio -w packages/runtime
-
       - name: Copy wasm to tauri
         run: cp node_modules/esbuild-wasm/esbuild.wasm packages/studio/public/esbuild.wasm
 

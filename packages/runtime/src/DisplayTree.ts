@@ -72,6 +72,10 @@ export class DisplayTree {
     }
   }
 
+  setBackgroundColor(color: number): void {
+    this.app.renderer.background.color = color;
+  }
+
   get view(): HTMLCanvasElement {
     return this.canvas;
   }

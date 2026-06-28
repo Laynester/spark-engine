@@ -18,6 +18,7 @@ export class SceneManager {
   current: string | null = null;
   state: Record<string, any> = {};
 
+  private _sparkAPI: any;
   private sceneDefs = new Map<string, SceneDefinition>();
   private activeInstances: any[] = [];
   private sceneEntities = new Set<any>();
@@ -30,6 +31,8 @@ export class SceneManager {
     callOnCreate: (instances: any[]) => Promise<void>;
     addUpdateCallback: (cb: (dt: number) => void) => void;
     removeUpdateCallback: (cb: (dt: number) => void) => void;
+    /** The public SparkAPI — passed to scene script constructors. */
+    sparkAPI: any;
   }) {
     this.spawnEntity = deps.spawnEntity;
     this.destroyEntity = deps.destroyEntity;
@@ -38,6 +41,7 @@ export class SceneManager {
     this.callOnCreate = deps.callOnCreate;
     this.addUpdateCallback = deps.addUpdateCallback;
     this.removeUpdateCallback = deps.removeUpdateCallback;
+    this._sparkAPI = deps.sparkAPI;
   }
 
   /** Register a scene definition. */
@@ -85,7 +89,7 @@ export class SceneManager {
       const nsKey = ns || "default";
       const ScriptClass = await this.loadScriptFile(scriptPath, nsKey);
       if (ScriptClass) {
-        const instance = this.createScriptInstance(scriptPath, nsKey, {});
+        const instance = this.createScriptInstance(scriptPath, nsKey, this._sparkAPI);
         this.activeInstances.push(instance);
         await this.callOnCreate([instance]);
         if (instance.onUpdate) {

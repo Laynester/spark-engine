@@ -16,6 +16,7 @@ export function ProjectConfigDialog({
   const [name, setName] = useState("");
   const [entryScripts, setEntryScripts] = useState<string[]>([""]);
   const [scriptDirs, setScriptDirs] = useState<string[]>([""]);
+  const [assetDirs, setAssetDirs] = useState<string[]>([""]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -27,6 +28,7 @@ export function ProjectConfigDialog({
         setName(config.name ?? "");
         setEntryScripts(config.entryScripts?.length ? config.entryScripts : [""]);
         setScriptDirs(config.scriptDirs?.length ? config.scriptDirs : [""]);
+        setAssetDirs(config.assetDirs?.length ? config.assetDirs : [""]);
       })
       .catch(() => {
         // File doesn't exist yet — use defaults
@@ -43,6 +45,7 @@ export function ProjectConfigDialog({
 
     const filteredScripts = entryScripts.filter((s) => s.trim());
     const filteredDirs = scriptDirs.filter((d) => d.trim());
+    const filteredAssetDirs = assetDirs.filter((d) => d.trim());
 
     if (filteredScripts.length === 0) {
       setError("At least one entry script is required");
@@ -61,6 +64,7 @@ export function ProjectConfigDialog({
       version: "1.0.0",
       entryScripts: filteredScripts,
       scriptDirs: filteredDirs,
+      assetDirs: filteredAssetDirs,
       outputDir: "dist",
     };
 
@@ -90,6 +94,12 @@ export function ProjectConfigDialog({
     setScriptDirs((prev) => prev.map((v, j) => (j === i ? val : v)));
   const removeScriptDir = (i: number) =>
     setScriptDirs((prev) => (prev.length > 1 ? prev.filter((_, j) => j !== i) : prev));
+
+  const addAssetDir = () => setAssetDirs((prev) => [...prev, ""]);
+  const updateAssetDir = (i: number, val: string) =>
+    setAssetDirs((prev) => prev.map((v, j) => (j === i ? val : v)));
+  const removeAssetDir = (i: number) =>
+    setAssetDirs((prev) => (prev.length > 1 ? prev.filter((_, j) => j !== i) : prev));
 
   const labelStyle: React.CSSProperties = {
     fontSize: 11,
@@ -237,6 +247,35 @@ export function ProjectConfigDialog({
           ))}
           <button onClick={addScriptDir} style={addButtonStyle}>
             + Add script directory
+          </button>
+        </div>
+
+        {/* Asset Directories */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={labelStyle}>Asset Directories</div>
+          <p style={{ fontSize: 11, color: "#555577", margin: "0 0 8px" }}>
+            Directories containing images, audio, and other assets to bundle with the project.
+            Subdirectories are included recursively.
+          </p>
+          {assetDirs.map((dir, i) => (
+            <div key={i} style={{ display: "flex", gap: 6, marginBottom: 4 }}>
+              <input
+                style={inputStyle}
+                value={dir}
+                onChange={(e) => updateAssetDir(i, e.target.value)}
+                placeholder="assets"
+              />
+              <button
+                onClick={() => removeAssetDir(i)}
+                style={removeButtonStyle}
+                title="Remove"
+              >
+                &times;
+              </button>
+            </div>
+          ))}
+          <button onClick={addAssetDir} style={addButtonStyle}>
+            + Add asset directory
           </button>
         </div>
 

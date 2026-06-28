@@ -1,5 +1,6 @@
 import { Container, Sprite, Text, Texture } from "pixi.js";
 import type { EntityConfig, TextConfig } from "./types";
+import { resolveBlendMode } from "./blendModes";
 
 export type EntityType = "sprite" | "container" | "text";
 
@@ -47,6 +48,11 @@ export class Entity {
       sprite.visible = false; // hidden until texture loads
       this.pixiObj = sprite;
       this.type = "sprite";
+    } else if (config.tint !== undefined) {
+      // Tinted rectangle — use Pixi's built-in white texture so tint produces visible color
+      const sprite = new Sprite(Texture.WHITE);
+      this.pixiObj = sprite;
+      this.type = "sprite";
     } else {
       // Container entity
       this.pixiObj = new Container();
@@ -67,11 +73,31 @@ export class Entity {
     if (config.x !== undefined) this.pixiObj.x = config.x;
     if (config.y !== undefined) this.pixiObj.y = config.y;
     if (config.rotation !== undefined) this.pixiObj.rotation = config.rotation;
+    if (config.width !== undefined) {
+      this.pixiObj.width = config.width;
+    }
+    if (config.height !== undefined) {
+      this.pixiObj.height = config.height;
+    }
     if (config.scale !== undefined) {
       this.pixiObj.scale.set(config.scale);
     }
     if (config.visible !== undefined) {
       this.pixiObj.visible = config.visible;
+    }
+    if (config.blendMode) {
+      const resolved = resolveBlendMode(config.blendMode);
+      if (resolved) {
+        (this.pixiObj as any).blendMode = resolved;
+      } else {
+        console.warn(`Unknown blendMode: "${config.blendMode}"`);
+      }
+    }
+    if (config.tint !== undefined) {
+      (this.pixiObj as any).tint = config.tint;
+    }
+    if (config.alpha !== undefined) {
+      this.pixiObj.alpha = config.alpha;
     }
   }
 
@@ -135,9 +161,19 @@ export class Entity {
     return this.pixiObj.width;
   }
 
+  set width(value: number) {
+    if (this._destroyed) return;
+    this.pixiObj.width = value;
+  }
+
   get height(): number {
     if (this._destroyed) return 0;
     return this.pixiObj.height;
+  }
+
+  set height(value: number) {
+    if (this._destroyed) return;
+    this.pixiObj.height = value;
   }
 
   /** Render order within the layer. Higher values render on top. */

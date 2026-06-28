@@ -8,6 +8,7 @@ import type {
   PrefabVariant,
   TextConfig,
 } from "./types";
+import { resolveBlendMode } from "./blendModes";
 
 export interface PrefabSpawnConfig {
   x?: number;
@@ -17,40 +18,19 @@ export interface PrefabSpawnConfig {
   variant?: string;
   /** Which state to use. Defaults to the first state or the definition's defaultState. */
   state?: string;
-}
-
-/** Maps user-friendly blend mode names to Pixi v8 blend mode strings. */
-const BLEND_MODE_MAP: Record<string, string> = {
-  normal: "normal",
-  add: "add",
-  additive: "add",
-  multiply: "multiply",
-  screen: "screen",
-  overlay: "overlay",
-  darken: "darken",
-  lighten: "lighten",
-  "color-dodge": "color-dodge",
-  "color-burn": "color-burn",
-  "hard-light": "hard-light",
-  "soft-light": "soft-light",
-  difference: "difference",
-  exclusion: "exclusion",
-  hue: "hue",
-  saturation: "saturation",
-  color: "color",
-  luminosity: "luminosity",
-};
-
-/** Resolve a user-supplied blend mode string to a Pixi v8 blend mode. */
-function resolveBlendMode(raw: string): string | undefined {
-  const key = raw.toLowerCase().replace(/[\s_-]+/g, "-");
-  return BLEND_MODE_MAP[key];
+  /**
+   * Base render zIndex applied to all child parts.
+   * Each part's individual zIndex is added on top of this base.
+   */
+  zIndex?: number;
 }
 
 interface InstanceMeta {
   name: string;
   variant: string;
   state: string;
+  /** Base zIndex applied to all child parts. */
+  zIndex: number;
 }
 
 /** Runtime tracking for an actively animating part. */
@@ -181,6 +161,7 @@ export class PrefabManager {
       resolvedVariant.tags ?? (def.tags ? [...def.tags] : undefined);
     const layer = resolvedVariant.layer ?? def.layer ?? "world";
 
+    const baseZIndex = config?.zIndex ?? 0;
     const parent = this.spawnEntity(
       {
         x: config?.x ?? 0,
@@ -192,12 +173,13 @@ export class PrefabManager {
       config?.id,
     );
 
-    this._spawnParts(parent, parts, def.name);
+    this._spawnParts(parent, parts, def.name, baseZIndex);
 
     this.instances.set(parent, {
       name,
       variant: variantName,
       state: stateName,
+      zIndex: baseZIndex,
     });
     return parent;
   }
@@ -239,12 +221,13 @@ export class PrefabManager {
     const parts = this._resolveParts(resolvedVariant, stateName, def.name);
 
     this._destroyChildren(entity);
-    this._spawnParts(entity, parts, def.name);
+    this._spawnParts(entity, parts, def.name, meta.zIndex);
 
     this.instances.set(entity, {
       name: meta.name,
       variant,
       state: stateName,
+      zIndex: meta.zIndex,
     });
   }
 
@@ -282,12 +265,13 @@ export class PrefabManager {
     const parts = this._resolveParts(resolvedVariant, stateName, def.name);
 
     this._destroyChildren(entity);
-    this._spawnParts(entity, parts, def.name);
+    this._spawnParts(entity, parts, def.name, meta.zIndex);
 
     this.instances.set(entity, {
       name: meta.name,
       variant: meta.variant,
       state: stateName,
+      zIndex: meta.zIndex,
     });
   }
 
@@ -484,6 +468,7 @@ export class PrefabManager {
     parent: Entity,
     parts: PrefabPart[],
     prefabName: string,
+    baseZIndex: number = 0,
   ): void {
     for (const part of parts) {
       const texture = this._getInitialTexture(part);
@@ -491,7 +476,7 @@ export class PrefabManager {
 
       const child = this._spawnChild(parent, texture, part);
       if (child) {
-        this._applyPartOverrides(child, part, prefabName);
+        this._applyPartOverrides(child, part, prefabName, baseZIndex);
 
         // Set up frame animation if this part has frames
         if (part.frames && part.frames.length > 1 && part.autoPlay !== false) {
@@ -546,6 +531,7 @@ export class PrefabManager {
     child: Entity,
     part: PrefabPart,
     prefabName: string,
+    baseZIndex: number = 0,
   ): void {
     const pixi = (child as any).pixiObj;
 
@@ -562,12 +548,15 @@ export class PrefabManager {
       }
     }
     if (part.zOffset !== undefined) child.zOffset = part.zOffset;
-    if (part.zIndex !== undefined) child.zIndex = part.zIndex;
+    if (part.zIndex !== undefined || baseZIndex !== 0) {
+      child.zIndex = (part.zIndex ?? 0) + baseZIndex;
+    }
     if (part.scale !== undefined) child.scale = part.scale;
     if (part.rotation !== undefined) child.rotation = part.rotation;
     if (part.visible !== undefined) child.visible = part.visible;
-    if (part.x !== undefined) child.x = part.x;
-    if (part.y !== undefined) child.y = part.y;
+    // NOTE: part.x / part.y are NOT re-applied here because they were
+    // already baked into the child's position in _spawnChild as
+    // parent.x + part.x / parent.y + part.y.
   }
 
   /** Apply per-frame overrides during animation. */
