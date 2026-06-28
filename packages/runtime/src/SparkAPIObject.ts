@@ -37,6 +37,10 @@ export class SparkAPIObject implements SparkAPI {
     this.runtime.setBackgroundColor(color);
   }
 
+  setAntialias(enabled: boolean): void {
+    this.runtime.setAntialias(enabled);
+  }
+
   getTextureSize(path: string): { width: number; height: number } | null {
     return this.runtime.getTextureSize(path);
   }

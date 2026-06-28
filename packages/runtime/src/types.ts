@@ -12,6 +12,8 @@ export interface SparkConfig {
   width?: number;
   height?: number;
   backgroundColor?: number;
+  /** Enable anti-aliasing (smooth edges). Disable for crisp pixel-art rendering. (default true) */
+  antialias?: boolean;
 }
 
 export interface EntityConfig {
@@ -33,6 +35,8 @@ export interface EntityConfig {
   zIndex?: number;
   /** Y-sort offset. When camera.setSortByY is enabled, effective zIndex = y + zOffset. */
   zOffset?: number;
+  /** Enable pixel-perfect hit detection on this entity (only non-transparent pixels register clicks). */
+  pixelPerfect?: boolean;
 }
 
 export interface TextConfig {
@@ -117,6 +121,15 @@ export interface SparkAPI {
   spawn(config: EntityConfig & { text?: TextConfig }, id?: string): Entity;
   destroy(entity: Entity): void;
   setBackgroundColor(color: number): void;
+  /**
+   * Toggle anti-aliasing at runtime.
+   *
+   * - `true`  → smooth edges (default browser CSS scaling)
+   * - `false` → crisp pixel-art edges via CSS `image-rendering: pixelated`
+   *
+   * For full MSAA antialias control, set `antialias: false` in SparkConfig at init.
+   */
+  setAntialias(enabled: boolean): void;
   getTextureSize(path: string): { width: number; height: number } | null;
   loadAsset(path: string): Promise<Blob | undefined>;
   loadPackage(url: string): Promise<LoadedPackage>;
@@ -180,6 +193,10 @@ export interface SparkAPI {
       zIndex?: number;
     }): Entity;
     destroy(entity: Entity): void;
+    /** Move the entire prefab to an absolute position. */
+    moveTo(entity: Entity, x: number, y: number): void;
+    /** Move the entire prefab by a relative delta. */
+    moveBy(entity: Entity, dx: number, dy: number): void;
     setVariant(entity: Entity, variant: string): void;
     getVariant(entity: Entity): string | undefined;
     setState(entity: Entity, state: string): void;

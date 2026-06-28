@@ -6,6 +6,7 @@ import { AssetManager } from "./AssetManager";
 import { ScriptManager } from "./ScriptManager";
 import type { ScriptInstance } from "./ScriptManager";
 import { Entity } from "./Entity";
+import { Sprite, Texture } from "pixi.js";
 import { DisplayTree } from "./DisplayTree";
 import { UpdateLoop } from "./UpdateLoop";
 import { InputManager } from "./InputManager";
@@ -119,7 +120,7 @@ export class SparkRuntime implements InputHandler {
       // Auto-register prefab definitions from the package
       if (pkg.manifest.prefabs) {
         for (const prefabDef of pkg.manifest.prefabs) {
-          this.prefab.define(prefabDef.name, prefabDef);
+          this.prefab.define(prefabDef.name, prefabDef, pkg.manifest.name);
         }
       }
 
@@ -265,6 +266,10 @@ export class SparkRuntime implements InputHandler {
     this.display.setBackgroundColor(color);
   }
 
+  setAntialias(enabled: boolean): void {
+    this.display.setAntialias(enabled);
+  }
+
   getTextureSize(path: string): { width: number; height: number } | null {
     return this.assets.getTextureSize(path);
   }
@@ -376,17 +381,73 @@ export class SparkRuntime implements InputHandler {
   }
 
   // Input handler implementation
-  onClick(id: string): void {
+  onClick(id: string, localX?: number, localY?: number): void {
+    const entity = this.entities.get(id);
+
+    // Pixel-perfect check: if enabled, verify click hit a non-transparent pixel
+    if (entity && entity.pixelPerfect) {
+      if (!this._isPixelHit(entity, localX, localY)) return;
+    }
+
+    entity?.onClick?.(entity);
     this.scripts.callOnClick();
     this.events.emit("click", id);
   }
 
-  onPointerDown(id: string): void {
+  onPointerDown(id: string, localX?: number, localY?: number): void {
+    const entity = this.entities.get(id);
+
+    if (entity && entity.pixelPerfect) {
+      if (!this._isPixelHit(entity, localX, localY)) return;
+    }
+
+    entity?.onPointerDown?.(entity);
     this.events.emit("pointerdown", id);
   }
 
-  onPointerUp(id: string): void {
+  onPointerUp(id: string, localX?: number, localY?: number): void {
+    const entity = this.entities.get(id);
+
+    if (entity && entity.pixelPerfect) {
+      if (!this._isPixelHit(entity, localX, localY)) return;
+    }
+
+    entity?.onPointerUp?.(entity);
     this.events.emit("pointerup", id);
+  }
+
+  /**
+   * Check whether a click position falls on a non-transparent pixel of the entity's sprite texture.
+   * Uses PixiJS's renderer.extract.pixels() for GPU readback.
+   */
+  private _isPixelHit(entity: Entity, localX?: number, localY?: number): boolean {
+    if (localX === undefined || localY === undefined) return true;
+    if (entity.type !== "sprite") return true;
+
+    const sprite = entity.pixiObj as Sprite;
+    const texture = sprite.texture;
+    if (!texture || texture === Texture.WHITE) return true;
+
+    try {
+      const extracted = this.display.app.renderer.extract.pixels(texture);
+      const pixelData = extracted.pixels;
+      const texW = extracted.width;
+      const texH = extracted.height;
+
+      // Map from sprite local coords to texture pixel coords, accounting for anchor
+      const texX = Math.round(localX + sprite.anchor.x * texW);
+      const texY = Math.round(localY + sprite.anchor.y * texH);
+
+      // Out of bounds = no hit
+      if (texX < 0 || texX >= texW || texY < 0 || texY >= texH) return false;
+
+      // Check alpha (byte 3 of RGBA pixel)
+      const alpha = pixelData[(texY * texW + texX) * 4 + 3];
+      return alpha > 128; // semi-transparent threshold
+    } catch {
+      // Fall back to bounding box on readback error
+      return true;
+    }
   }
 
   // Convenience methods

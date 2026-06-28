@@ -23,6 +23,15 @@ export class Entity {
   /** Which layer this entity belongs to. */
   layer: "background" | "world" | "ui" = "world";
 
+  /** Click callback — called when this entity is clicked (first non-transparent pixel if pixelPerfect). */
+  onClick?: (entity: Entity) => void;
+  /** Pointer-down callback — fires on press, not release. */
+  onPointerDown?: (entity: Entity) => void;
+  /** Pointer-up callback — fires on release. */
+  onPointerUp?: (entity: Entity) => void;
+  /** Enable pixel-perfect hit detection: only non-transparent alpha pixels register clicks (default false). */
+  pixelPerfect: boolean = false;
+
   private _children: Entity[] = [];
   private _destroyed = false;
   private _zOffset = 0;
@@ -98,6 +107,9 @@ export class Entity {
     }
     if (config.alpha !== undefined) {
       this.pixiObj.alpha = config.alpha;
+    }
+    if (config.pixelPerfect !== undefined) {
+      this.pixelPerfect = config.pixelPerfect;
     }
   }
 

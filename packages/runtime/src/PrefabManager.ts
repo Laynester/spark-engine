@@ -86,8 +86,19 @@ export class PrefabManager {
     this.loadTexture = deps.loadTexture;
   }
 
-  /** Register a prefab definition. Overwrites any existing definition with the same name. */
-  define(name: string, definition: PrefabDefinition): void {
+
+
+  /** Get a registered prefab definition, or undefined if not found. */
+  getDefinition(name: string): PrefabDefinition | undefined {
+    return this.definitions.get(name);
+  }
+
+  /**
+   * Register a prefab definition, optionally scoped to a package namespace.
+   * When a namespace is provided, texture paths in parts are automatically
+   * prefixed so they resolve correctly within that package.
+   */
+  define(name: string, definition: PrefabDefinition, namespace?: string): void {
     if (!definition.name) {
       throw new Error(
         `Invalid prefab definition for "${name}": must have a "name"`,
@@ -121,12 +132,9 @@ export class PrefabManager {
         }
       }
     }
-    this.definitions.set(name, { ...definition });
-  }
-
-  /** Get a registered prefab definition, or undefined if not found. */
-  getDefinition(name: string): PrefabDefinition | undefined {
-    return this.definitions.get(name);
+    // Store a copy with namespace baked in
+    const stored = { ...definition, _namespace: namespace } as any;
+    this.definitions.set(name, stored);
   }
 
   /** All registered prefab names. */
@@ -220,8 +228,9 @@ export class PrefabManager {
     );
     const parts = this._resolveParts(resolvedVariant, stateName, def.name);
 
-    this._destroyChildren(entity);
-    this._spawnParts(entity, parts, def.name, meta.zIndex);
+    // Update children in-place instead of destroy+recreate — preserves
+    // their Pixi objects and avoids "visible=false until texture loads" issue
+    this._updateParts(entity, parts, def.name, meta.zIndex);
 
     this.instances.set(entity, {
       name: meta.name,
@@ -264,8 +273,8 @@ export class PrefabManager {
     );
     const parts = this._resolveParts(resolvedVariant, stateName, def.name);
 
-    this._destroyChildren(entity);
-    this._spawnParts(entity, parts, def.name, meta.zIndex);
+    // Update children in-place instead of destroy+recreate
+    this._updateParts(entity, parts, def.name, meta.zIndex);
 
     this.instances.set(entity, {
       name: meta.name,
@@ -278,6 +287,34 @@ export class PrefabManager {
   /** Get the current state name of a prefab instance. */
   getState(entity: Entity): string | undefined {
     return this.instances.get(entity)?.state;
+  }
+
+  /**
+   * Move a prefab instance to an absolute position.
+   * Moves the parent entity and all its child parts by the same delta.
+   */
+  moveTo(entity: Entity, x: number, y: number): void {
+    const dx = x - entity.x;
+    const dy = y - entity.y;
+    entity.x = x;
+    entity.y = y;
+    for (const child of entity.children) {
+      child.x += dx;
+      child.y += dy;
+    }
+  }
+
+  /**
+   * Move a prefab instance by a relative delta.
+   * Every child part moves by the same amount.
+   */
+  moveBy(entity: Entity, dx: number, dy: number): void {
+    entity.x += dx;
+    entity.y += dy;
+    for (const child of entity.children) {
+      child.x += dx;
+      child.y += dy;
+    }
   }
 
   /**
@@ -453,16 +490,6 @@ export class PrefabManager {
     );
   }
 
-  /** Destroy all children of an entity (for variant/state switching). */
-  private _destroyChildren(parent: Entity): void {
-    const children = [...parent.children];
-    for (const child of children) {
-      this.animations.delete(child);
-      parent.untrackChild(child);
-      this.destroyEntity(child);
-    }
-  }
-
   /** Spawn all parts as children of a parent entity. */
   private _spawnParts(
     parent: Entity,
@@ -470,8 +497,9 @@ export class PrefabManager {
     prefabName: string,
     baseZIndex: number = 0,
   ): void {
+    const def = this.definitions.get(prefabName);
     for (const part of parts) {
-      const texture = this._getInitialTexture(part);
+      const texture = this._getInitialTexture(part, def);
       if (!texture) continue;
 
       const child = this._spawnChild(parent, texture, part);
@@ -500,11 +528,136 @@ export class PrefabManager {
     }
   }
 
-  /** Get the initial texture path for a part (from texture or frames[0]). */
-  private _getInitialTexture(part: PrefabPart): string | undefined {
-    if (part.texture) return part.texture;
-    if (part.frames && part.frames.length > 0) return part.frames[0].texture;
-    return undefined;
+  /**
+   * Update a prefab's children in-place when switching variant/state.
+   * Instead of destroying and recreating all children (which causes them to
+   * start invisible until the new texture loads), this updates existing
+   * children with the new part's texture and overrides, creates extras if
+   * the new variant has more parts, and destroys excess children.
+   */
+  private _updateParts(
+    parent: Entity,
+    parts: PrefabPart[],
+    prefabName: string,
+    baseZIndex: number = 0,
+  ): void {
+    const def = this.definitions.get(prefabName);
+    const existing = [...parent.children];
+
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      const texturePath = this._getInitialTexture(part, def);
+      if (!texturePath) continue;
+
+      if (i < existing.length) {
+        // ── Update existing child in-place ──
+        const child = existing[i];
+        // Reposition to current parent position + part offset (in case parent moved)
+        child.x = parent.x + (part.x ?? 0);
+        child.y = parent.y + (part.y ?? 0);
+        this._applyPartOverrides(child, part, prefabName, baseZIndex);
+        // Swap texture — loadTexture returns cached version immediately
+        this.loadTexture(texturePath).then((tex) => {
+          if (!child.destroyed) {
+            child.setTexture(tex);
+          }
+        }).catch((err) => {
+          console.warn(`[Prefab] Failed to load texture "${texturePath}" for "${prefabName}":`, err);
+        });
+
+        // Update animation tracking if needed
+        if (part.frames && part.frames.length > 1) {
+          this._startOrUpdateAnimation(child, part, prefabName);
+        } else {
+          this.animations.delete(child);
+        }
+      } else {
+        // ── New child needed (variant has more parts) ──
+        // spawnEntity already triggers texture loading, so child will become
+        // visible once the cached texture resolves
+        const child = this._spawnChild(parent, texturePath, part);
+        if (child) {
+          this._applyPartOverrides(child, part, prefabName, baseZIndex);
+          if (part.frames && part.frames.length > 1 && part.autoPlay !== false) {
+            this._startAnimation(child, part, prefabName);
+          }
+        }
+      }
+    }
+
+    // Destroy excess children if new variant has fewer parts
+    for (let i = parts.length; i < existing.length; i++) {
+      const child = existing[i];
+      this.animations.delete(child);
+      parent.untrackChild(child);
+      this.destroyEntity(child);
+    }
+  }
+
+  /** Start a frame animation on a child entity. */
+  private _startAnimation(
+    child: Entity,
+    part: PrefabPart,
+    prefabName: string,
+  ): void {
+    const anim: ActiveAnimation = {
+      entity: child,
+      frames: part.frames!,
+      textures: new Array(part.frames!.length),
+      frameRate: part.frameRate ?? 8,
+      loop: part.loop ?? true,
+      currentFrame: 0,
+      elapsed: 0,
+      prefabName,
+      ready: false,
+    };
+    this.animations.set(child, anim);
+    this._preloadAnimationTextures(anim);
+  }
+
+  /** Start or update an existing frame animation when variant switches. */
+  private _startOrUpdateAnimation(
+    child: Entity,
+    part: PrefabPart,
+    prefabName: string,
+  ): void {
+    const existingAnim = this.animations.get(child);
+    const autoPlay = part.autoPlay !== false;
+    if (!autoPlay) {
+      this.animations.delete(child);
+      return;
+    }
+    if (existingAnim) {
+      // Reuse existing animation struct, update frames
+      existingAnim.frames = part.frames!;
+      existingAnim.textures = new Array(part.frames!.length);
+      existingAnim.frameRate = part.frameRate ?? 8;
+      existingAnim.loop = part.loop ?? true;
+      existingAnim.currentFrame = 0;
+      existingAnim.elapsed = 0;
+      existingAnim.ready = false;
+      this._preloadAnimationTextures(existingAnim);
+    } else {
+      this._startAnimation(child, part, prefabName);
+    }
+  }
+
+  /**
+   * Get the initial texture path for a part, prefixing with the prefab's
+   * namespace if available (so it resolves within the correct package).
+   */
+  private _getInitialTexture(part: PrefabPart, def?: any): string | undefined {
+    const raw = part.texture
+      ? part.texture
+      : part.frames && part.frames.length > 0
+        ? part.frames[0].texture
+        : undefined;
+    if (!raw) return undefined;
+    // If the prefab was defined from a package, prefix bare paths with namespace
+    if (def?._namespace && !raw.includes(":")) {
+      return `${def._namespace}:${raw}`;
+    }
+    return raw;
   }
 
   /** Create a single child sprite entity, rendered independently in the world layer. */

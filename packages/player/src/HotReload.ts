@@ -1,6 +1,6 @@
 export interface HotReloadOptions {
-  /** URL to poll for the .sprk file (e.g. "/HelloSpark.sprk") */
-  sprkUrl: string;
+  /** URL to poll for build heartbeat (e.g. "/__spark_build") */
+  buildUrl: string;
   /** Poll interval in milliseconds */
   interval?: number;
   /** Callback when a new package is detected */
@@ -10,7 +10,7 @@ export interface HotReloadOptions {
 export class HotReload {
   private options: HotReloadOptions;
   private timer: ReturnType<typeof setInterval> | null = null;
-  private lastModified = "";
+  private lastBuild = -1;
 
   constructor(options: HotReloadOptions) {
     this.options = {
@@ -34,26 +34,20 @@ export class HotReload {
   }
 
   private async check(): Promise<void> {
-    console.log('testing')
     try {
-      const response = await fetch(this.options.sprkUrl, { method: "HEAD" });
-      const modified = response.headers.get("last-modified") ?? "";
-      const etag = response.headers.get("etag") ?? "";
+      const response = await fetch(this.options.buildUrl, { method: "GET" });
+      const data = await response.json();
+      const build = typeof data.build === "number" ? data.build : -1;
 
-      // Use ETag or Last-Modified as the change marker
-      const marker = etag || modified;
-
-      if (marker && marker !== this.lastModified) {
-        if (this.lastModified !== "") {
-          // Changed — trigger reload
-          console.log("[Spark HotReload] Package changed, reloading...");
+      if (build !== this.lastBuild) {
+        if (this.lastBuild !== -1) {
+          console.log("[Spark HotReload] Build changed, reloading...");
           await this.options.onReload();
         }
-        this.lastModified = marker;
+        this.lastBuild = build;
       }
     } catch {
-      console.log('test?')
-      // File not available yet — skip silently
+      // Build endpoint not available yet — skip silently
     }
   }
 }

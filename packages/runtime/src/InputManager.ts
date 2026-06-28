@@ -1,9 +1,9 @@
 import { Container, FederatedPointerEvent } from "pixi.js";
 
 export interface InputHandler {
-  onClick?(id: string): void;
-  onPointerDown?(id: string): void;
-  onPointerUp?(id: string): void;
+  onClick?(id: string, localX?: number, localY?: number): void;
+  onPointerDown?(id: string, localX?: number, localY?: number): void;
+  onPointerUp?(id: string, localX?: number, localY?: number): void;
 }
 
 export class InputManager {
@@ -18,7 +18,8 @@ export class InputManager {
     const target = event.target as Container | null;
     const entityId = target?.label;
     if (entityId && entityId !== "spark-stage") {
-      this.handler.onPointerDown?.(entityId);
+      const localPos = event.getLocalPosition(target!);
+      this.handler.onPointerDown?.(entityId, localPos.x, localPos.y);
     }
   };
 
@@ -28,8 +29,9 @@ export class InputManager {
     const target = event.target as Container | null;
     const entityId = target?.label;
     if (entityId && entityId !== "spark-stage") {
-      this.handler.onPointerUp?.(entityId);
-      this.handler.onClick?.(entityId);
+      const localPos = event.getLocalPosition(target!);
+      this.handler.onPointerUp?.(entityId, localPos.x, localPos.y);
+      this.handler.onClick?.(entityId, localPos.x, localPos.y);
     }
   };
 

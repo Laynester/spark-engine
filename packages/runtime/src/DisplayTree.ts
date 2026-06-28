@@ -35,15 +35,26 @@ export class DisplayTree {
     const width = config.width ?? (parent ? parent.clientWidth : 800);
     const height = config.height ?? (parent ? parent.clientHeight : 600);
 
+    const antialias = config.antialias ?? true;
+
+    // For pixel art, use 1:1 resolution (no device-pixel upscaling)
+    const isPixelArt = !antialias;
+
     await this.app.init({
       canvas,
       width,
       height,
       background: config.backgroundColor ?? 0x1a1a2e,
-      antialias: true,
-      resolution: window.devicePixelRatio || 1,
-      autoDensity: true,
+      antialias,
+      roundPixels: isPixelArt,
+      resolution: isPixelArt ? 1 : (window.devicePixelRatio || 1),
+      autoDensity: !isPixelArt,
     });
+
+    // Apply pixel-art CSS rendering
+    if (isPixelArt) {
+      canvas.style.imageRendering = "pixelated";
+    }
 
     this.canvas = canvas;
 
@@ -74,6 +85,23 @@ export class DisplayTree {
 
   setBackgroundColor(color: number): void {
     this.app.renderer.background.color = color;
+  }
+
+  /**
+   * Toggle anti-aliasing at runtime.
+   *
+   * Because antialias and roundPixels are WebGL/WebGPU context creation
+   * parameters that cannot be changed after init, this only controls CSS
+   * `image-rendering` on the canvas:
+   *
+   * - `true`  → `auto` (smooth scaling, default browser behavior)
+   * - `false` → `pixelated` (nearest-neighbor, crisp pixel edges)
+   *
+   * For full pixel-art rendering (antialias off, roundPixels on, resolution 1),
+   * set `antialias: false` in SparkConfig at init time.
+   */
+  setAntialias(enabled: boolean): void {
+    this.canvas.style.imageRendering = enabled ? "auto" : "pixelated";
   }
 
   get view(): HTMLCanvasElement {

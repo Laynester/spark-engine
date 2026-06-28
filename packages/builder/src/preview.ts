@@ -11,6 +11,10 @@ import type { SparkConfig } from "./types.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLAYER_DIR = resolve(__dirname, "../../player");
 
+// Build heartbeat — incremented on every rebuild so the player can detect
+// changes regardless of which project was rebuilt.
+let _buildCount = 0;
+
 /** Open a URL in the default browser. */
 function openBrowser(url: string): void {
   const cmd = process.platform === "darwin" ? "open"
@@ -78,6 +82,20 @@ export async function preview(
         configureServer(server) {
           server.middlewares.use((req, res, next) => {
             const url = req.url ?? "";
+
+            // ── Build heartbeat endpoint ──
+            if (url === "/__spark_build") {
+              const body = JSON.stringify({ build: _buildCount });
+              res.writeHead(200, {
+                "Content-Type": "application/json",
+                "Cache-Control": "no-cache",
+                "Access-Control-Allow-Origin": "*",
+              });
+              res.end(body);
+              return;
+            }
+
+            // ── .sprk file serving ──
             if (!url.endsWith(".sprk")) return next();
 
             const filename = url.startsWith("/") ? url.slice(1) : url;
@@ -147,38 +165,14 @@ export async function preview(
 
     const { watch } = await import("chokidar");
 
-    // Determine watch patterns: auto-discover projects or single project
-    let watchPatterns: string[] = [];
+    // Watch the entire workspace directory recursively — simpler and more
+    // reliable than maintaining per-project patterns, and projects are small.
+    console.log(`  Watching: ${projectDir}`);
 
-    const discovered = workspaceManifest ? await findProjects(projectDir) : [];
-
-    if (workspaceManifest && discovered.length > 0) {
-      for (const name of discovered) {
-        const projDir = resolve(projectDir, name);
-        const cfgPath = join(projDir, "spark.config.json");
-        const config = loadConfig(cfgPath);
-        watchPatterns.push(
-          ...config.entryScripts.map((s) => resolve(projDir, s)),
-          ...config.assetDirs.map((d) => resolve(projDir, d, "**/*")),
-          cfgPath,
-        );
-      }
-      watchPatterns.push(resolve(projectDir, "spark-workspace.json"));
-    } else {
-      const cfgPath = resolve(projectDir, "spark.config.json");
-      if (existsSync(cfgPath)) {
-        const config = loadConfig(cfgPath);
-        watchPatterns = [
-          ...config.entryScripts.map((s) => resolve(projectDir, s)),
-          ...config.assetDirs.map((d) => resolve(projectDir, d, "**/*")),
-          cfgPath,
-        ];
-      }
-    }
-
-    const watcher = watch(watchPatterns, {
+    const watcher = watch(projectDir, {
       ignoreInitial: true,
       persistent: true,
+      ignored: /(^|[/\\])node_modules[/\\]|\.git[/\\]|\.sprk$/,  // skip noise
     });
 
     let rebuildTimer: ReturnType<typeof setTimeout> | null = null;
@@ -191,8 +185,10 @@ export async function preview(
 
       try {
         await buildWorkspace(projectDir);
-        console.log(`  Rebuild complete.\n`);
+        _buildCount++;
+        console.log(`  Rebuild complete. (build #${_buildCount})\n`);
       } catch (err) {
+        _buildCount++;
         console.error(`  ✗ Build failed:`, (err as Error).message);
       }
     };

@@ -10,12 +10,14 @@ const container = document.getElementById("spark-container")!;
 const canvas = document.createElement("canvas");
 canvas.id = "spark-canvas";
 container.appendChild(canvas);
-canvas.width = parseInt(params.get("width") ?? "")
+canvas.style.width = params.get("width") + "px"
+canvas.style.height = params.get("height") + "px"
 
 const runtime = new SparkRuntime({
   view: canvas,
   width: parseInt(params.get("width") ?? ""),
   height: parseInt(params.get("height") ?? ""),
+  antialias: false
 });
 
 const debug = new DebugPanel();
@@ -63,8 +65,8 @@ if (sprkUrl) {
   })();
 
   const hotReload = new HotReload({
-    sprkUrl,
-    interval: 1500,
+    buildUrl: "/__spark_build",
+    interval: 500,
     onReload: async () => {
       console.log("Change detected, reloading...");
       location.reload();
