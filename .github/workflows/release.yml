@@ -1,0 +1,145 @@
+# Auto-release: every master push whose CI run succeeds becomes the next
+# patch release (v0.1.0 -> v0.1.1 -> ...). The workflow computes the next
+# version, bumps the workspace versions, builds the distributables, tags, and
+# attaches them to a GitHub Release.
+#
+# No manual tags needed. The version-bump commit is pushed with the
+# repository's GITHUB_TOKEN, and events triggered by that token do not start
+# new workflow runs, so each push produces exactly one release.
+#
+# Publishing destinations (npm / Open VSX / Marketplace) stay optional: each
+# step is skipped when its secret isn't configured, but the artifacts are
+# always built and attached to the Release.
+name: Release
+
+on:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
+    branches: [master]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # Compute the next version up front; only runs when the triggering CI run
+  # actually succeeded (the release job then only runs when there is
+  # something to release — HEAD not already tagged).
+  compute-version:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    outputs:
+      next: ${{ steps.version.outputs.next }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: version
+        run: |
+          if git describe --tags --exact-match HEAD >/dev/null 2>&1; then
+            echo "HEAD is already tagged -- nothing to release"
+            echo "next=" >> "$GITHUB_OUTPUT"
+          else
+            echo "next=$(node .github/scripts/next-version.mjs)" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    needs: compute-version
+    if: ${{ needs.compute-version.outputs.next != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      NEXT: ${{ needs.compute-version.outputs.next }}
+    steps:
+      # Work from current master (fetch-depth 0 for tag history). The event's
+      # head_sha can be stale if a newer push landed while this job queued;
+      # the concurrency group serializes releases so each push releases once.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        run: npm ci
+
+      - name: Bump workspace versions
+        run: node .github/scripts/bump-versions.mjs "${NEXT#v}"
+
+      - name: Build all workspaces
+        run: npm run build
+
+      - name: Typecheck + test the release state
+        run: npm run typecheck && npm test
+
+      # 1) Runtime browser bundle -------------------------------------------
+      - name: Bundle runtime (IIFE, global `Spark`)
+        run: npm run bundle -w @habbo/runtime
+
+      # 2) Bundler: npm package + a single-file CLI -------------------------
+      - name: Bundle bundler CLI (single-file)
+        run: npm run bundle -w @spark/bundler
+
+      - name: Pack bundler tarball
+        run: mkdir -p release && npm pack -w @spark/bundler --pack-destination ./release
+
+      - name: Publish bundler to npm
+        if: env.NPM_TOKEN != ''
+        run: npm publish -w @spark/bundler --access public
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # 3) LSP extension (.vsix) --------------------------------------------
+      - name: Package extension (.vsix)
+        run: npm run package -w lingo-vscode
+
+      - name: Publish extension to Open VSX
+        if: env.OPEN_VSX_TOKEN != ''
+        working-directory: apps/lingo-vscode
+        run: npx ovsx publish *.vsix -p "$OPEN_VSX_TOKEN"
+        env:
+          OPEN_VSX_TOKEN: ${{ secrets.OPEN_VSX_TOKEN }}
+
+      - name: Publish extension to VS Code Marketplace
+        if: env.VSCE_PAT != ''
+        working-directory: apps/lingo-vscode
+        run: npx vsce publish --no-dependencies -p "$VSCE_PAT"
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      # Version-bump commit + tag. Pushed with GITHUB_TOKEN, which does not
+      # re-trigger CI or this workflow (no release loop).
+      - name: Commit version + tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/*/package.json apps/lingo-vscode/package.json package-lock.json
+          if git diff --cached --quiet; then
+            echo "no version changes to commit (versions already at ${NEXT})"
+          else
+            git commit -m "chore(release): ${NEXT}"
+          fi
+          git tag "${NEXT}"
+          git push origin HEAD:master
+          git push origin "${NEXT}"
+
+      # Attach everything to the GitHub Release for manual downloads ---------
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${NEXT}" --generate-notes --title "${NEXT}" \
+            packages/runtime/dist/lingo-runtime.iife.js \
+            packages/runtime/dist/lingo-runtime.iife.min.js \
+            packages/bundler/dist/bundler.js \
+            release/*.tgz \
+            apps/lingo-vscode/*.vsix

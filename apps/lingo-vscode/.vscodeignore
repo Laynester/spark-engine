@@ -1,0 +1,15 @@
+# Source + build tooling — only the compiled artifacts ship.
+src/**
+scripts/**
+tsconfig.json
+
+# Everything is bundled (client + server), so no node_modules ships.
+node_modules/**
+**/*.map
+
+# VCS / editor noise
+.git/**
+.gitignore
+.vscode/**
+.vscode-test/**
+**/test/**

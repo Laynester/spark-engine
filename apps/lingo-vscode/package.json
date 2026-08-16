@@ -1,0 +1,59 @@
+{
+  "name": "lingo-vscode",
+  "displayName": "Lingo (Director)",
+  "description": "Lingo language support — syntax highlighting, diagnostics, completions and hover via a language server that reuses the Habbo runtime's own parser.",
+  "version": "0.1.0",
+  "publisher": "habbo-sw",
+  "license": "MIT",
+  "type": "commonjs",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "lingo",
+        "aliases": [
+          "Lingo",
+          "lingo"
+        ],
+        "extensions": [
+          ".ls"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "lingo",
+        "scopeName": "source.lingo",
+        "path": "./syntaxes/lingo.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "lingo.restartServer",
+        "title": "Lingo: Restart Language Server"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "npm run build -w @habbo/runtime && npm run build -w @habbo/lingo-lsp && node scripts/gen-grammar.mjs && node scripts/bundle-server.mjs && node scripts/bundle-client.mjs",
+    "typecheck": "tsc --noEmit -p .",
+    "vscode:prepublish": "npm run build",
+    "package": "vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^2.24.0",
+    "esbuild": "^0.21.0",
+    "typescript": "^5.5.0"
+  }
+}

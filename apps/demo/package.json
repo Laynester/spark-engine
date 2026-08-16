@@ -1,0 +1,19 @@
+{
+  "name": "demo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run build:spark && vite build",
+    "build:spark": "vite build --config vite.config.spark.ts",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@habbo/runtime": "^0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vite": "^6.0.0"
+  }
+}

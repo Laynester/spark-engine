@@ -1,0 +1,23 @@
+{
+  "name": "habbo-sw-js",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @spark/bundler && npm run build -w @habbo/runtime && npm run build -w @habbo/lingo-lsp && npm run build -w lingo-vscode",
+    "typecheck": "npm run typecheck -ws --if-present",
+    "test": "npm run build -w @spark/bundler && npm run test -w @spark/bundler && npm run test -w @habbo/runtime",
+    "bundle:demo": "node packages/bundler/dist/cli.js --root exported ./exported --out-dir apps/demo/public/casts --ext spark",
+    "bundle:casts": "node packages/bundler/dist/cli.js --root exported --casts hh_interface,hh_patch_uk,hh_people_1,hh_people_2,hh_shared,hh_entry,hh_messenger,hh_registrat,hh_kiosk_room,hh_room_utils,hh_human,hh_furni_classes,hh_room,hh_club,hh_photo,hh_entry_uk,hh_navigator,hh_purse,hh_buffer,hh_dynamic_downloader,hh_recycler,hh_soundmachine,hh_poll --out-dir apps/demo/public/casts --ext spark",
+    "bundle:browser": "npm run bundle -w @habbo/runtime",
+    "dev:demo": "npm run dev -w demo"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}

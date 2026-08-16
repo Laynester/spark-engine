@@ -1,0 +1,102 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Lingo",
+  "scopeName": "source.lingo",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#handler-def"
+    },
+    {
+      "include": "#the-props"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#builtins"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#symbols"
+    },
+    {
+      "include": "#numbers"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.lingo",
+          "begin": "--\\[\\[",
+          "end": "\\]\\]"
+        },
+        {
+          "name": "comment.line.double-dash.lingo",
+          "match": "--.*$"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.lingo",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.lingo",
+          "match": "\"\""
+        }
+      ]
+    },
+    "handler-def": {
+      "match": "^\\s*(\\bon\\b)(\\s+)([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": {
+          "name": "keyword.control.lingo"
+        },
+        "3": {
+          "name": "entity.name.function.lingo"
+        }
+      }
+    },
+    "the-props": {
+      "match": "(\\bthe\\b)(\\s+)(mouseLoc|mouseH|mouseV|mouseDown|mouseUp|clickLoc|clickOn|key|keyCode|keyDown|stillDown|shiftDown|controlDown|optionDown|commandDown|doubleClick|frame|frameLabel|frameRate|tempo|timer|ticks|milliseconds|date|time|day|month|year|moviePath|movieName|movieFile|movieTime|soundEnabled|beepOn|floatPrecision|colorDepth|exitLock|idleHandlerPeriod|loc|locH|locV|width|height|regpoint|rotation|flipH|flipV|ink|blend|visible|member|castNum|castLibNum|scriptNum|puppet|constraint|name|number|type|text|color|bgColor|hiliteColor|palette|rect|top|left|bottom|right|font|fontSize|fontStyle|lineHeight|alignment|wordWrap|editable|boxType|autoTab|spriteNum|foreColor|backColor|castLib)\\b",
+      "captures": {
+        "1": {
+          "name": "keyword.control.lingo"
+        },
+        "3": {
+          "name": "support.variable.lingo"
+        }
+      }
+    },
+    "keywords": {
+      "match": "\\b(?:if|then|else|end|case|otherwise|repeat|with|in|while|exit|next|return|put|into|after|before|delete|set|to|global|go|on|not|and|or|mod|the|of|new|me|down|char|word|line|item|paragraph)\\b",
+      "name": "keyword.control.lingo"
+    },
+    "builtins": {
+      "match": "\\b(?:abs|sqrt|sqr|power|integer|float|value|string|length|min|max|random|randomSeed|sin|cos|tan|atan|ln|log|exp|round|trunc|charToNum|numToChar|offset|contains|starts|ends|chunkCount|count|list|propList|add|addAt|append|deleteAt|deleteOne|getAt|getOne|getPos|getProp|getPropAt|getaProp|setAt|setProp|setaProp|duplicate|ilk|listP|stringP|integerP|floatP|objectP|voidP|symbolP|point|rect|color|rgb|paletteIndex|image|copyPixels|fill|setPixel|getPixel|createMask|puppetsprite|puppettempo|puppetsound|puppetpalette|startTimer|rollover|keyPressed|beep|alert|member|script|sprite|castlib|window|timeout|xtra|new|getpref|setpref|externalParamValue|externalParamCount|externalParamName|netID|netDone|netError|netTextResult|netLastModDate|preloadNetThing|importFileInto|getNetText|playFile|closeXlib|openXlib|showXlib|bitand|bitor|bitxor|bitnot|updatestage|cursor|dontpassevent|starttimer|gotonetpage|callancestor|symbol|chartonum|numtochar|voidp|objectp|stringp|integerp|floatp|symbolp|listp|pointp|memberp|date|time|chars|union|intersect|paletteindex|externalparamvalue|externalparamcount|externalparamname|param|createmember|field|deletepref|pass|stopevent|go|gotoloop|gonext|goprevious|sound|queuesound|startsoundchannel|stopsoundchannel|playsoundinchannel|movetofront|movetoback|moveforward|movebackward|getnettext|netdone|getstreamstatus|neterror|nettextresult|netabort|preloadnetthing|downloadnetthing|importfileinto|getvariable|getvariablevalue|setvariable|getintvariable|variableexists|dumpvariablefield|dumptextfield|gettext|getobject|objectexists|removeobject|newobject|getuniqueid|executemessage|createwindow|removewindow|windowexists|error|warning|getconnection|connectionexists|removeconnection|registerlistener|registercommands|unregisterlistener|setrollover|connectionsend|sort|getat|getaprop|setaprop|addaprop|deleteaprop|countaprop|getpropat|inside|getwindowidlist|stopclient|noop|setcallback|unloadcast|loadcast|stoptimer|setcursor|pauseupdate|nothing|delay|quit|halt|restart)\\b",
+      "name": "support.function.lingo"
+    },
+    "constants": {
+      "match": "\\b(?:TRUE|FALSE|VOID|PI|E)\\b",
+      "name": "support.constant.lingo"
+    },
+    "symbols": {
+      "match": "#[A-Za-z0-9_.-]+",
+      "name": "constant.other.symbol.lingo"
+    },
+    "numbers": {
+      "match": "\\b(?:\\d+(?:\\.\\d+)?|\\.\\d+)\\b",
+      "name": "constant.numeric.lingo"
+    }
+  }
+}

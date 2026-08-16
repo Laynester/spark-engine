@@ -1,0 +1,24 @@
+{
+  "name": "@habbo/lingo-lsp",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Lingo language server — reuses the runtime's tokenizer/parser for diagnostics, completions, hover and semantic tokens.",
+  "main": "dist/server.js",
+  "types": "dist/server.d.ts",
+  "bin": {
+    "lingo-lsp": "dist/server.js"
+  },
+  "scripts": {
+    "build": "npm run build -w @habbo/runtime && tsc",
+    "typecheck": "npm run build -w @habbo/runtime && tsc --noEmit"
+  },
+  "dependencies": {
+    "@habbo/runtime": "*",
+    "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.12"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}

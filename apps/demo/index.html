@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" href="data:," />
+  <title>habbo-sw-js — runtime demo</title>
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+
+<body>
+  <header class="bar">
+    <span class="logo-text">habbo-sw-js</span>
+    <span class="badge">&lt;spark-player&gt; embed</span>
+  </header>
+  <main id="stage-host">
+    <!--
+        The whole movie boots from this one tag: the bundle's prepareMovie
+        -> Init (polls netDone()) -> startClient() -> FUSE bootstrap chain.
+        sw1 is a ;-separated list of key=value external params; the
+        "external.variables.txt" one is the URL the movie downloads and dumps
+        into its Variable Manager (see exported/fuse_client/Core_Thread).
+      -->
+    <!--
+        The whole movie boots from this one tag. sw params are ;-separated
+        key=value bundles (the classic v14 hotel embed). Core_Thread parses
+        them: sw5's external.variables.txt is the URL it downloads and dumps
+        into the Variable Manager; the connection/sw vars get registered too.
+      -->
+    <spark-player movie="/casts/14/habbo.spark" sw1="site.url=http://www.habbo.ch;url.prefix=http://www.habbo.ch"
+      sw2="connection.info.host=localhost;connection.info.port=3003" sw3="client.reload.url=http://localhost/"
+      sw4="connection.mus.host=localhost;connection.mus.port=3004"
+      sw5="external.variables.txt=/external_vars_14.txt;external.texts.txt=http://localhost/v14/stuff/gamedata/external_texts.txt"
+      sw6="use.sso.ticket=0;sso.ticket=test-sso" log="#log"></spark-player>
+
+    <!-- <spark-player movie="/casts/habbo.spark" sw1="site.url=http://www.habbo.ch;url.prefix=http://www.habbo.ch"
+      sw2="connection.info.host=localhost;connection.info.port=3000" sw3="client.reload.url=http://localhost/"
+      sw4="connection.mus.host=localhost;connection.mus.port=3004"
+      sw5="external.variables.txt=/external_vars_31.txt?;external.texts.txt=http://localhost/v31/stuff/gamedata/external_texts.txt?"
+      sw6="use.sso.ticket=1;sso.ticket=test-sso" log="#log"></spark-player> -->
+  </main>
+  <pre id="log" class="log">waiting for spark…</pre>
+  <!-- Loaded as a module so Vite compiles spark.ts + the @habbo/runtime TS
+       source on the fly — edit packages/runtime/src/** and the page
+       hot-reloads, no rebuild needed. (public/spark.js is still built for
+       external embedders.) -->
+  <script type="module" src="/src/spark.ts"></script>
+</body>
+
+</html>
