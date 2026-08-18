@@ -61,6 +61,20 @@ export function walkFiles(dir: string, fs: FileSystemLike): string[] {
  *  top level — only sub-directories that are themselves casts. */
 const CAST_MEMBER_DIRS = new Set(['bitmaps', 'scripts', 'palettes', 'texts', 'shapes', 'sounds', 'fonts', 'other']);
 
+/** True when a member-category directory really is a cast's member dir: it
+ *  holds member FILES directly. A dir that holds only subdirectories (e.g.
+ *  the v31 export's `hof_furni/sounds/`, which contains hundreds of
+ *  sound-set casts) is a container grouping, and its parent is a container,
+ *  not a cast. */
+function isMemberDir(dir: string, fs: FileSystemLike): boolean {
+  const entries = fs.listDir(dir);
+  if (entries.length === 0) return true; // empty member dir: keep old behaviour
+  for (const entry of entries) {
+    if (fs.isDir(entry)) return false; // a sub-cast: parent is a container
+  }
+  return true;
+}
+
 /** True when `dir` looks like a single Director cast — member subdirectories,
  *  control files (movie.txt/casts.txt/fonts.txt/linked_casts.txt) or
  *  member-prefixed files at its top level — rather than a container of casts. */
@@ -68,7 +82,7 @@ export function isCastDir(dir: string, fs: FileSystemLike = nodeFs): boolean {
   for (const entry of fs.listDir(dir)) {
     const name = entry.split(/[\\/]/).pop()!;
     if (fs.isDir(entry)) {
-      if (CAST_MEMBER_DIRS.has(name.toLowerCase())) return true;
+      if (CAST_MEMBER_DIRS.has(name.toLowerCase()) && isMemberDir(entry, fs)) return true;
     } else {
       const lower = name.toLowerCase();
       if (lower === 'fonts.txt' || lower === 'movie.txt' || lower === 'casts.txt' || lower === 'linked_casts.txt') {
