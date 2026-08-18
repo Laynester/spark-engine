@@ -2395,6 +2395,100 @@ test('rasterizeTextMember: boxType-unset Writer members are content-tight (purse
   }
 });
 
+test('auto-size text members grow their zero-height hint rect to the laid-out content (Writer fakeAlphaRender)', () => {
+  // Friend List View Base getViewImage sizes the empty-category message via
+  // `tFont.setaProp(#rect, rect(0, 0, tWidth, 0))` — a width hint with NO
+  // height. Writer::define copies that rect onto the scratch text member and
+  // render -> fakeAlphaRender copies `pMember.image` through `pMember.rect`.
+  // Director auto-grows (adjust-to-fit) the member box to the text; with the
+  // rect left at height 0 the ink-8 copy was a no-op, the mask stayed
+  // all-white, and setAlpha flooded the buffer opaque — the empty-category
+  // text rendered as a solid black bar. The engine must grow the box (only)
+  // when the content is taller than the hint.
+  const { document } = globalThis as { document?: unknown };
+  const draws: Array<[string, number, number]> = [];
+  const ctxMock = {
+    font: '', fillStyle: '', textAlign: '', textBaseline: '',
+    // 5px/char keeps "No friends online in this category." (37 chars = 185px)
+    // on ONE 190px line, like Volter 9px in the real client.
+    measureText: (s: string) => ({ width: s.length * 5, fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2 }),
+    fillRect: () => undefined,
+    fillText: (t: string, x: number, y: number) => { draws.push([t, x, y]); },
+    // Paint each drawn run as opaque black glyph cells (5px wide, 8px tall)
+    // so the rasterized image carries real glyph pixels for the mask check.
+    getImageData: (_x: number, _y: number, w: number, h: number) => {
+      const data = new Uint8ClampedArray(w * h * 4);
+      for (const [t, x, y] of draws) {
+        for (let c = 0; c < t.length; c++) {
+          for (let r = 0; r < 8; r++) {
+            const px = Math.round(x) + c * 5;
+            const py = Math.round(y) + r;
+            if (px >= 0 && px < w && py >= 0 && py < h) {
+              const o = (py * w + px) * 4;
+              data[o] = 0; data[o + 1] = 0; data[o + 2] = 0; data[o + 3] = 255;
+            }
+          }
+        }
+      }
+      return { data };
+    },
+  };
+  (globalThis as Record<string, unknown>).document = {
+    createElement: () => ({ width: 0, height: 0, getContext: () => ctxMock }),
+  };
+  try {
+    const e = new DirectorEngine();
+    // A fresh engine has no casts — getCastLib('x') creates one (Internal),
+    // which the Resource Manager's createMember(#text) would do at runtime.
+    e.getCastLib('Internal');
+    e.textRasterizer = rasterizeTextMember;
+    const gNum = e.createNamedMember('writer_empty_list', 'text', 1);
+    const ref = new LMemberRef(gNum & 0xffff, 'writer_empty_list', 'text', gNum >> 16, e);
+    // Writer::define from struct.font.plain + the getViewImage hint rect.
+    e.setMemberProp(ref, 'rect', new LRect(0, 0, 190, 0));
+    e.setMemberProp(ref, 'font', 'Volter');
+    e.setMemberProp(ref, 'fontsize', 9);
+    e.setMemberProp(ref, 'fixedlinespace', 9);
+    e.setMemberProp(ref, 'wordwrap', 1);
+    e.setMemberProp(ref, 'topspacing', 1);
+    e.setMemberProp(ref, 'text', 'No friends online in this category.');
+
+    const member = e.memberFor(ref)!;
+    assert.ok(member.rect, 'rect set');
+    assert.equal(member.rect.height, 0, 'hint rect is zero-height (pre-fix repro)');
+
+    // render reads `the image of` first — the rasterize pass must grow the box.
+    const img = e.getMemberProp(ref, 'image');
+    assert.ok(img instanceof LImage, 'image rasterizes');
+    assert.ok(img.height > 0);
+    assert.equal(member.rect.height, img.height, 'adjust-to-fit grows the rect to the content');
+    assert.equal(member.rect.height, 11, 'one 9px line at lineH 10 + glyph overhang = 11 (Volter 9px)');
+
+    // fakeAlphaRender's ink-8 copy through the (now grown) rect must produce a
+    // mask with BOTH white background and dark glyphs — not all-white.
+    // image(w,h,8) prefills opaque white (U122); a raw LImage starts
+    // transparent, so prefill it the way the builtin does.
+    const fakeAlpha = new LImage(190, 11);
+    fakeAlpha.depth = 8;
+    fakeAlpha.ensure().fill(0xff); // opaque white
+    fakeAlpha.copyPixels(img, new LRect(0, 0, 190, 11), new LRect(0, 0, 190, 11), 8);
+    const m = fakeAlpha.ensure();
+    let white = 0;
+    let dark = 0;
+    for (let i = 0; i < 190 * 11; i++) {
+      const o = i * 4;
+      const luma = ((77 * m[o] + 150 * m[o + 1] + 29 * m[o + 2]) >> 8) & 0xff;
+      if (luma >= 250) white++;
+      else dark++;
+    }
+    assert.ok(white > 0, 'mask has a white background');
+    assert.ok(dark > 0, 'mask has dark glyph pixels (ink-8 copy was not a no-op)');
+  } finally {
+    if (document) (globalThis as Record<string, unknown>).document = document;
+    else delete (globalThis as Record<string, unknown>).document;
+  }
+});
+
 test('rasterizeTextMember: fixed-line members bottom-sit glyphs in the line box (U143 dropdown text)', () => {
   // The DropDown class sets tTextMember.fixedLineSpace = pLineHeight (the
   // window-def row height, e.g. 18) with NO topSpacing. Em-box centering

@@ -3783,6 +3783,19 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         if (img) {
           member.image = img;
           this.imageOwners.set(img, member);
+          // Director "adjust to fit" (boxType unset = auto-size): the text
+          // box grows to the laid-out content. Writer scratch members are
+          // created with a width-hint rect(0,0,w,0) (Friend List View Base
+          // getViewImage: `tFont.setaProp(#rect, rect(0, 0, tWidth, 0))`),
+          // and fakeAlphaRender copies `pMember.image` through
+          // `pMember.rect` — a zero-height source rect made the ink-8 copy a
+          // no-op, the mask stayed all-white, and setAlpha flooded the whole
+          // buffer opaque (the empty-category message rendered as a solid
+          // black bar). Grow only, never shrink, so explicit hint rects keep
+          // their box.
+          if (member.rect && member.text && !member.textProps?.has('boxtype') && img.height > member.rect.height) {
+            member.rect.bottom = member.rect.top + img.height;
+          }
           return img;
         }
       }
