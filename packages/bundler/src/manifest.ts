@@ -83,7 +83,8 @@ export function isCastDir(dir: string, fs: FileSystemLike = nodeFs): boolean {
 export interface CastUnit {
   /** Cast name (the manifest name and bundle basename), e.g. "hh_furni_xx_TableH". */
   name: string;
-  /** Container directory name for nested casts; undefined for top-level casts. */
+  /** Slash-joined container path for nested casts (e.g. "14/hof_furni");
+   *  undefined for top-level casts. */
   group?: string;
   /** Absolute path to the cast directory. */
   path: string;
@@ -92,9 +93,11 @@ export interface CastUnit {
 /**
  * Enumerate every cast under the export root. Top-level directories that look
  * like casts are returned as-is; directories that are containers (e.g.
- * `hof_furni`, which holds hundreds of furniture casts) are expanded so each
- * sub-directory becomes its own cast unit grouped under the container name.
- * A filter may name a cast, a container (all of its casts), or `group/name`.
+ * `14`, which holds a client version's casts, or `hof_furni` inside it, which
+ * holds hundreds of furniture casts) are expanded recursively so each cast
+ * becomes its own unit grouped under the full container path (`14/hof_furni`).
+ * A filter may name a cast, a container (all of its casts), or a full
+ * `group/name` path.
  */
 export function listCastUnits(
   exportRoot: string,
@@ -103,33 +106,35 @@ export function listCastUnits(
 ): CastUnit[] {
   const units: CastUnit[] = [];
   const filter = castFilter ? new Set(castFilter) : null;
-  for (const castPath of fs.listDir(exportRoot).sort()) {
-    if (!fs.isDir(castPath)) continue;
-    const name = castPath.split(/[\\/]/).pop()!;
-    if (isCastDir(castPath, fs)) {
-      if (filter && !filter.has(name)) continue;
-      units.push({ name, path: castPath });
-      continue;
-    }
-    // Container of nested casts: expand one level. A nested cast is selected
-    // by its `group/name` path or by naming the whole container — a bare sub
-    // name is not matched, since it would also pull in any same-named
-    // top-level cast (hh_furni_classes exists in both places).
-    const includeAll = !filter || filter.has(name);
-    for (const subPath of fs.listDir(castPath).sort()) {
+
+  // Descend `dir` collecting cast units. `group` is the slash-joined container
+  // path leading here (undefined at the root); `includeAll` is set once a
+  // container is selected by name so every cast below it is taken. A bare sub
+  // name is never matched at depth, since it would also pull in any same-named
+  // cast at another level (hh_furni_classes exists in several places).
+  const visit = (dir: string, group: string | undefined, includeAll: boolean): void => {
+    for (const subPath of fs.listDir(dir).sort()) {
       if (!fs.isDir(subPath)) continue;
-      const sub = subPath.split(/[\\/]/).pop()!;
-      if (!includeAll && !filter.has(`${name}/${sub}`)) continue;
-      units.push({ group: name, name: sub, path: subPath });
+      const name = subPath.split(/[\\/]/).pop()!;
+      if (isCastDir(subPath, fs)) {
+        if (!includeAll && filter && !filter.has(group ? `${group}/${name}` : name)) continue;
+        units.push(group ? { group, name, path: subPath } : { name, path: subPath });
+        continue;
+      }
+      // Container: descend one level with the path carried as the group.
+      const subGroup = group ? `${group}/${name}` : name;
+      const subIncludeAll = includeAll || !filter || filter.has(subGroup);
+      visit(subPath, subGroup, subIncludeAll);
     }
-  }
+  };
+  visit(exportRoot, undefined, !filter);
   return units;
 }
 
 /** Build one cast's manifest entry from its directory. Nested casts (group set)
  *  keep a `<group>/<name>` bundle prefix so they can live under a container
  *  directory next to top-level casts without path collisions. */
-function buildCastManifest(
+export function buildCastManifest(
   unit: CastUnit,
   fs: FileSystemLike,
 ): { cast: CastManifest; files: string[] } | null {

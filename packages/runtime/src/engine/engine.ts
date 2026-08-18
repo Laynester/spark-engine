@@ -18,6 +18,38 @@ import { CastLib, Member, normalizeTextLines, parsePaletteBytes, parseShapeText,
 import { decodePng } from './png.js';
 import { decodeGif } from './gif.js';
 
+/** Browser keyCode → Director/Shockwave keyCode. Director uses its own
+ *  internal key code system (BACKSPACE=51, RETURN=36, TAB=48, SPACE=49,
+ *  arrows=123-126, etc.) which differs entirely from the web KeyboardEvent
+ *  keyCode values. Without this translation, typing the letter 'l' (web 76)
+ *  matches Director's Return code 76 in chat handlers — every 'l' keystroke
+ *  sends the current chat text. Mapping sourced from DirPlayer's
+ *  keyboard_map.rs (get_keyboard_key_map_js_to_sw). */
+const WEB_TO_DIRECTOR_KEYCODE: Record<number, number> = {
+  8: 51,    // Backspace
+  9: 48,    // Tab
+  13: 36,   // Enter/Return
+  16: 56,   // Shift
+  17: 55,   // Ctrl
+  18: 58,   // Alt
+  20: 57,   // CapsLock
+  27: 53,   // Escape
+  32: 49,   // Space
+  37: 123,  // ArrowLeft
+  38: 126,  // ArrowUp
+  39: 124,  // ArrowRight
+  40: 125,  // ArrowDown
+  48: 29, 49: 18, 50: 19, 51: 20, 52: 21, 53: 23, 54: 22, 55: 26, 56: 28, 57: 25, // 0-9
+  65: 0, 66: 11, 67: 8, 68: 2, 69: 14, 70: 3, 71: 5, 72: 4, 73: 34, 74: 38,
+  75: 40, 76: 37, 77: 46, 78: 45, 79: 31, 80: 35, 81: 12, 82: 15, 83: 1,
+  84: 17, 85: 32, 86: 9, 87: 13, 88: 7, 89: 16, 90: 6, // A-Z
+  97: 83, 98: 84, 99: 85, 100: 86, 101: 87, 102: 88, 103: 89, 104: 91, 105: 92, // numpad 1-9
+  112: 122, 113: 120, 114: 99, 115: 118, 116: 96, 117: 97, 118: 98, 119: 100,
+  120: 101, 121: 109, 122: 111, 123: 110, // F1-F12
+  186: 41, 187: 24, 188: 43, 189: 27, 190: 47, 191: 44, 192: 50, // punctuation
+  219: 33, 220: 42, 221: 30, 222: 39,
+};
+
 /** Director's built-in "Grayscale" palette: index 0 = WHITE descending to
  *  black at 255 (Mac convention, matching DirPlayer). Window layouts use
  *  `#palette: #grayscale` for button/loading art; the PC convention (index 0 =
@@ -126,6 +158,11 @@ export interface StageAdapter {
   refreshChannel(channel: number): void;
   /** Resize the canvas to match the movie's stage dims (movie.txt). */
   resize(width: number, height: number): void;
+  /** Render the current composited scene and return its stage-sized RGBA
+   *  pixels, or null when capture is unavailable. Backs `(the stage).image`
+   *  READS — the FUSE screen camera crop and the Photo Interface camera shot
+   *  need the actual displayed scene, not the Lingo paint surface. */
+  captureStage?(): Uint8Array | null;
 }
 
 interface WindowData {
@@ -496,6 +533,12 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   lastKey = '';
   lastKeyCode = 0;
   keyDownActive = false;
+  /** Director `the keyPressed` — the key currently held down (most recently
+   *  pressed of the still-down keys), EMPTY when nothing is held. The pool
+   *  diving game's Pelle KeyDown Class polls it every ~100ms to drive the jump
+   *  input (`if the keyPressed <> EMPTY` then MykeyDown(the key...)). */
+  keyPressed = '';
+  private heldKeys: string[] = [];
   /** Director `the floatPrecision` — digits kept when formatting floats
    *  (DirPlayer float_precision, default 4). Room Geometry getScreenCoordinate
    *  does `set the floatPrecision to 2` around its tile math. */
@@ -517,6 +560,12 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   stageBackground = 0x0d0d18;
   /** Persistent stage drawing surface backing `(the stage).image`. */
   private _stageImage: LImage | null = null;
+  /** Cached composite of the RENDERED scene, refreshed on demand from the
+   *  adapter (`(the stage).image` reads: FUSE screen cameraCrop, Photo
+   *  Interface camera shot). Distinct from _stageImage — the paint surface
+   *  (Loading Bar fills it) is shown BEHIND the channels, so overwriting it
+   *  with the composite would double-render the scene. */
+  private _stageComposite: LImage | null = null;
   /** Parsed movie.txt config of the loaded movie. */
   movieConfig: MovieConfig | null = null;
   /** Parsed casts.txt registry (Director castLib order), or null when absent. */
@@ -1603,6 +1652,22 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     this._stopEventPending = false;
   }
 
+  /** Web key event → the character Director's `the key` reports: control
+   *  chars for Enter/Backspace/Tab, '' for Esc, Director's arrow char codes
+   *  (numToChar(28-31)) for the arrows, otherwise the printable character.
+   *  Mirrors DirPlayer keyboard.rs (mapped_key + director_char_for). */
+  private directorKeyChar(key: string, keyCode: number): string {
+    if (keyCode === 13) return '\r';
+    if (keyCode === 8) return '\b';
+    if (keyCode === 9) return '\t';
+    if (keyCode === 27) return '';
+    if (key === 'ArrowUp') return '\x1E';
+    if (key === 'ArrowDown') return '\x1F';
+    if (key === 'ArrowLeft') return '\x1C';
+    if (key === 'ArrowRight') return '\x1D';
+    return key;
+  }
+
   /** Dispatch a keyboard event. Director routes keys to `the
    *  keyboardFocusSprite` (Field Wrapper setFocus sets it on field click): the
    *  focused sprite's behaviors get keyDown/keyUp, and an EDITABLE text member
@@ -1617,16 +1682,25 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     const down = type === 'keyDown';
     this._stopEventPending = false;
     // Director `the key`: Enter/Backspace/Tab/Esc surface as control chars
-    // (CHAR(13)/CHAR(8)/CHAR(9)/CHAR(27)) for keyDown handlers that branch on
-    // them; the native-editing branch below keys off keyCode instead.
-    this.lastKey =
-      keyCode === 13 ? '\r' :
-      keyCode === 8 ? '\b' :
-      keyCode === 9 ? '\t' :
-      keyCode === 27 ? '' :
-      key;
-    this.lastKeyCode = keyCode;
+    // (CHAR(13)/CHAR(8)/CHAR(9)/CHAR(27)) and the arrows as Director's arrow
+    // char codes (28-31) for keyDown handlers that branch on them; the
+    // native-editing branch below keys off keyCode instead.
+    const dKey = this.directorKeyChar(key, keyCode);
+    this.lastKey = dKey;
+    this.lastKeyCode = WEB_TO_DIRECTOR_KEYCODE[keyCode] ?? keyCode;
     this.keyDownActive = down;
+    // `the keyPressed` = the most recently pressed of the keys still held
+    // (DirPlayer keyboard_manager key_pressed: last of down_keys, EMPTY when
+    // none). Control chars that map to '' (Esc) are never "held" for this
+    // property, matching DirPlayer's key_pressed over an empty list.
+    if (down) {
+      if (dKey !== '' && !this.heldKeys.includes(dKey)) this.heldKeys.push(dKey);
+      this.keyPressed = this.heldKeys.length ? this.heldKeys[this.heldKeys.length - 1] : '';
+    } else {
+      const idx = this.heldKeys.lastIndexOf(dKey);
+      if (idx >= 0) this.heldKeys.splice(idx, 1);
+      this.keyPressed = this.heldKeys.length ? this.heldKeys[this.heldKeys.length - 1] : '';
+    }
     const focus = this.keyboardFocusSprite;
     if (focus <= 0 || focus >= this.channels.length) return;
     this.dispatchToChannelHandlers(focus, down ? 'keydown' : 'keyup', []);
@@ -1709,19 +1783,18 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     return this.membersByGlobal.get(this.memberGlobalNum(ref.castLibNumber, ref.number)) ?? null;
   }
 
-  /** Ink 9 (Mask): the sprite renders through a mask bitmap. Room authors
-   *  named masks "vesi" -> "vesimask" in the SAME cast (vesi1 -> vesimask1),
-   *  which holds for every ink-9 room; Director's generic rule is "the next
-   *  cast member", used as the fallback. Null when neither finds a bitmap —
-   *  the sprite renders unmasked. */
+  /** Ink 9 (Mask): the sprite renders through a mask bitmap. Director's rule
+   *  (DirPlayer rendering.rs:1283, LibreShockwave SpriteBaker
+   *  resolveMaskMember) is simply "the next cast member": member + 1 in the
+   *  same cast, used as a grayscale alpha mask. No name convention exists in
+   *  the references. The dumper re-exports members under their REAL Lingo
+   *  member numbers (the CAS* map), so adjacency holds exactly as the room
+   *  authors laid it out — the pool water pairs (vesi1->vesimask1,
+   *  vesi2->vesimask2, dew_vesi1->dew_vesimask1) are all member+1. Null when
+   *  the next member isn't a bitmap — the sprite renders unmasked. */
   private ink9MaskFor(member: Member): Member | null {
     const cast = this.casts[member.castLibNumber - 1];
     if (!cast) return null;
-    const maskName = member.name.toLowerCase().replace('vesi', 'vesimask');
-    if (maskName !== member.name.toLowerCase()) {
-      const byName = cast.byName.get(maskName);
-      if (byName && byName.kind === 'bitmap' && byName.raw) return byName;
-    }
     const next = cast.members.get(member.number + 1);
     if (next && next.kind === 'bitmap' && next.raw) return next;
     return null;
@@ -1995,6 +2068,23 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     return this._stageImage;
   }
 
+  /** The COMPOSITED scene as an image, refreshed from the adapter's renderer
+   *  readback on every call. Director's `(the stage).image` is the displayed
+   *  stage — the FUSE screen camera and the photo camera crop/copy regions of
+   *  it. Returns null when no adapter or capture fails (callers fall back to
+   *  the paint surface, which is what they get headless). */
+  stageComposite(): LImage | null {
+    if (!this.adapter?.captureStage) return null;
+    if (!this._stageComposite) this._stageComposite = new LImage(this.stageWidth, this.stageHeight);
+    const img = this._stageComposite;
+    const px = this.adapter.captureStage();
+    if (!px) return null;
+    const buf = img.ensure();
+    buf.set(px.length >= buf.length ? px.subarray(0, buf.length) : px);
+    img.dirty = false; // read-only source — never uploaded as a surface
+    return img;
+  }
+
   /** Stage background as an LColor (Director `(the stage).bgColor`). */
   stageBgColor(): LVal {
     return intColor(this.stageBackground);
@@ -2038,6 +2128,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         case 'mouseloc': return new LPointClass(this.mouseH, this.mouseV);
         case 'keyboardfocussprite': return this.keyboardFocusSprite;
         case 'key': return this.lastKey;
+        case 'keypressed': return this.keyPressed;
         case 'keycode': return this.lastKeyCode;
         case 'keydown': return this.keyDownActive ? 1 : 0;
         case 'keyup': return this.keyDownActive ? 0 : 1;
@@ -2516,6 +2607,34 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     return VOID;
   }
 
+  /** First line's glyph top in the member's coordinate space, mirroring
+   *  rasterizeTextMember's LibreShockwave bottom-sit layout so
+   *  charPosToLoc/locToCharPos agree with painted pixels. Headless (or an
+   *  unmetered face) falls back to fontLH = size + 1 — the Volter faces
+   *  measure ascent + descent = size + 1 (9px -> 10). */
+  private textLineTop(member: Member, fixed: number, topSpacing: number, size: number): number {
+    let fontLH = size + 1;
+    if (typeof document !== 'undefined' && measureCtx) {
+      try {
+        const { family, weight } = cssFontFor(member.font);
+        const style = fontStyleFlags(member.fontStyle);
+        const effWeight = style.bold ? '700' : weight;
+        measureCtx.font = `${style.italic ? 'italic ' : ''}${effWeight} ${size}px ${family}`;
+        const bbA = (measureCtx.measureText('M') as { fontBoundingBoxAscent?: number }).fontBoundingBoxAscent;
+        const bbD = (measureCtx.measureText('M') as { fontBoundingBoxDescent?: number }).fontBoundingBoxDescent;
+        if (typeof bbA === 'number' && isFinite(bbA) && bbA > 0) {
+          fontLH = Math.round(bbA + (typeof bbD === 'number' && isFinite(bbD) ? bbD : 0));
+        }
+      } catch {
+        /* fall back */
+      }
+    }
+    const leading = Math.max(0, fixed - fontLH);
+    const vOverflow = Math.max(0, fontLH - fixed);
+    const lineStart0 = topSpacing + (topSpacing > 1 ? 1 : 0);
+    return Math.max(0, lineStart0 + leading - vOverflow);
+  }
+
   /** Director `member(n).charPosToLoc(i)` — the 1-based char position's point
    *  in the member's coordinate space. Text Wrapper sizes centered text with
    *  `charPosToLoc(char.count).locH + 16`, so this must return the real
@@ -2557,10 +2676,12 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     let startX = 0;
     if (align === 'center' && rectW > 0) startX = Math.max(0, (rectW - lineW) / 2);
     else if (align === 'right' && rectW > 0) startX = Math.max(0, rectW - lineW);
-    // v matches the rasterizer's vertical glyph inset so the location API and
-    // painted pixels agree.
-    const topInset = topSpacing > 0 ? topSpacing : Math.max(1, Math.round((lineH - size) / 2));
-    return new LPointClass(Math.round(startX + prefixW), topInset + lineIdx * lineH);
+    // v matches the rasterizer's vertical glyph position so the location API
+    // and painted pixels agree (fixed members bottom-sit per LibreShockwave).
+    const lineTop = fixed > 0
+      ? this.textLineTop(member, fixed, topSpacing, size)
+      : (topSpacing > 0 ? topSpacing : Math.max(1, Math.round((lineH - size) / 2)));
+    return new LPointClass(Math.round(startX + prefixW), lineTop + lineIdx * lineH);
   }
 
   /** Director `member(n).locToCharPos(point)` — 1-based char index at a
@@ -2577,9 +2698,11 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     const pt = args[0] instanceof LPointClass ? args[0] : null;
     const targetX = pt ? pt.locH : 0;
     const targetY = pt ? pt.locV : 0;
-    const topInset = topSpacing > 0 ? topSpacing : Math.max(1, Math.round((lineH - size) / 2));
+    const lineTop = fixed > 0
+      ? this.textLineTop(member, fixed, topSpacing, size)
+      : (topSpacing > 0 ? topSpacing : Math.max(1, Math.round((lineH - size) / 2)));
     const lines = text.split(/\r\n|\r|\n/);
-    const lineIdx = Math.min(Math.max(0, Math.floor((targetY - topInset) / lineH)), lines.length - 1);
+    const lineIdx = Math.min(Math.max(0, Math.floor((targetY - lineTop) / lineH)), lines.length - 1);
     const line = lines[lineIdx] ?? '';
     // count chars until the running width reaches targetX
     let chars = 0;
@@ -2748,15 +2871,27 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   }
 
   paletteColor(index: number): LColor {
-    const pal = this.currentPalette;
-    const i = index & 0xff;
-    if (pal && pal[i]) {
-      const [r, g, b] = pal[i];
-      return new LColor(r, g, b);
+    const raw = Math.round(index);
+    if (raw >= 0 && raw <= 255) {
+      const pal = this.currentPalette;
+      const i = raw & 0xff;
+      if (pal && pal[i]) {
+        const [r, g, b] = pal[i];
+        return new LColor(r, g, b);
+      }
+      // No palette loaded yet — neutral gray (keeps bbinterface/catalogue fill()
+      // calls off VOID without asserting a wrong color).
+      return new LColor(128, 128, 128);
     }
-    // No palette loaded yet — neutral gray (keeps bbinterface/catalogue fill()
-    // calls off VOID without asserting a wrong color).
-    return new LColor(128, 128, 128);
+    // Out of palette range: Director treats the integer as a 0xRRGGBB color
+    // value (LibreShockwave int->color resolution: only 0..255 is a palette
+    // index, larger values fall through to imageColorArgb). The catalogue's
+    // "*ffffff" no-color marker is `paletteIndex(integer("*ffffff"))` =
+    // paletteIndex(0xFFFFFF) and must resolve to WHITE — the old &0xFF mask
+    // gave palette entry 255 (black in the radiator/mini-bar palettes), so
+    // ink-36 previews keyed the furni's dark pixels away and ink-8 previews
+    // tinted the gray body black.
+    return new LColor((raw >> 16) & 0xff, (raw >> 8) & 0xff, raw & 0xff);
   }
 
   /** DirPlayer get_sprite_at parity — the rollover resolves FRESH at the
@@ -3610,6 +3745,24 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
    *  source of each element. */
   private imageOwners = new WeakMap<LImage, Member>();
 
+  /** InterpreterHost: Lingo painted into this image. If it's a member's
+   *  surface, mark the member painted so a plain bitmap member (no ink-9
+   *  mask) displays its live painted surface instead of the original raw
+   *  bytes — the FUSE screen camera copies the cropped stage into
+   *  member("fuse_screen").image every frame. Only the FIRST mutation
+   *  rebuilds the channel (raw -> image visual); later paints just set the
+   *  surface dirty and the adapter's per-tick sync re-uploads it. */
+  imageMutated(img: LImage): void {
+    const member = this.imageOwners.get(img);
+    if (!member) return;
+    if (member.imagePainted) return;
+    member.imagePainted = true;
+    for (let n = 1; n < this.channels.length; n++) {
+      const ch = this.channels[n];
+      if (ch.member === member) this.notifyChannel(ch);
+    }
+  }
+
   /** U66 debug (InterpreterHost): "<cast>#<n> \"<name>\"" or "". */
   debugCopyOwner(img: unknown): string {
     if (img instanceof LImage) {
@@ -3795,6 +3948,11 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     };
     if (p === 'text') {
       member.text = toLingoString(value);
+      // Director attaches chunk formatting to the TEXT: assigning new text
+      // drops old char-range styles (the balloon text member is reused across
+      // messages with different names — a stale range would bold the wrong
+      // prefix of the next message).
+      member.chunkStyles = undefined;
       invalidateTextImage();
       rebuildChannels();
       return;
@@ -3820,6 +3978,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       return;
     }
     if (p === 'wordwrap' || p === 'fixedlinespace') {
+
       member.wordWrap = p === 'wordwrap' ? value : member.wordWrap;
       member.fixedLineSpace = p === 'fixedlinespace' ? value : member.fixedLineSpace;
       invalidateTextImage();
@@ -3924,6 +4083,21 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         member.image.depth = value.depth;
         member.image.dirty = true;
         this.imageOwners.set(member.image, member);
+        // Director auto-centers the regPoint whenever `member.image =` is
+        // assigned (DirPlayer bitmap.rs member.image setter: reg = (w/2, h/2);
+        // its Tetris/avatar-preview repros depend on it). The corpus is
+        // written against it: Balloon Manager showNewBalloon does
+        // `tmember.image = createballoonImg(...)` then
+        // `tmember.regPoint = tmember.regPoint + point(0, image.height/2)` —
+        // the centering + shift lands the bubble's bottom-CENTER on the
+        // character's head X (left-edge anchor would float it half a width to
+        // the right); Common Button explicitly saves member.regPoint, assigns
+        // image, then restores it, because the assignment would move it. Any
+        // member that sets regPoint explicitly afterwards wins (avatar/flip
+        // canvases all do). Re-assignment re-centers from scratch, so pooled
+        // members never accumulate offsets.
+        member.regX = Math.round(value.width / 2);
+        member.regY = Math.round(value.height / 2);
       }
       return;
     }
@@ -4292,6 +4466,13 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         // releaseSprite() clean (FUSE resets cursor on release).
         changed = false;
         break;
+      case 'editable':
+        // Field Wrapper setEdit mirrors the member flag onto the sprite
+        // (`me.pSprite.editable = tBool`); the member-level `editable` prop is
+        // what gates engine field editing, so accept the sprite copy silently
+        // (Director has a real sprite.editable; here the member carries it).
+        changed = false;
+        break;
       default:
         this.warn(`set sprite(${s.channel}).${prop}: unsupported`);
         return;
@@ -4376,7 +4557,14 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
 
   private buildChannelVisual(ch: Channel): void {
     if (!this.adapter) return;
-    if (ch.member?.kind === 'bitmap' && ch.member.raw) {
+    // A bitmap member whose image Lingo has painted into (the FUSE screen
+    // camera copies the cropped stage into member("fuse_screen").image every
+    // frame) displays the LIVE surface, not the original raw PNG bytes.
+    // Ink-9 masked members (pool water vesi1/vesimask1) KEEP the raw+mask
+    // path — flipping them to a bare surface would drop the mask.
+    const painted =
+      ch.member?.kind === 'bitmap' && !!ch.member.image && ch.member.imagePainted && ch.ink !== 9;
+    if (ch.member?.kind === 'bitmap' && ch.member.raw && !painted) {
       // Ink 9 (Mask): Director uses the NEXT cast member's bitmap as the
       // sprite's grayscale alpha mask. The pool water (vesi1) is masked by
       // vesimask1 — the very next member in hh_room_pool's cast order. Pass
@@ -4601,6 +4789,54 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     const data = this.windows.get(w.id);
     if (data) data.props.set(prop, value);
   }
+
+  /** `member.char[1..n].font = v` (and fontStyle/color/fontSize): Director
+   *  applies the property to that character range of a text member — the
+   *  Balloon Manager bolds the speaker name with
+   *  `tmember.char[1..tName.length + 1].font = tBoldStruct.getaProp(#font)`.
+   *  Ranges are 1-based inclusive; the same range coalesces into one entry so
+   *  font/fontStyle/color land together. The style is stored on the member
+   *  and consumed by rasterizeTextMember (which draws styled runs). Cleared
+   *  on member.text assignment, like Director. Non-char chunks map to their
+   *  char span (best effort). */
+  setMemberChunkProp(m: LMemberRef, chunk: string, from: number | undefined, to: number | undefined, prop: string, value: LVal): void {
+    const member = this.memberFor(m);
+    if (!member || member.kind !== 'text') return;
+    const p = prop.toLowerCase();
+    if (p !== 'font' && p !== 'fontstyle' && p !== 'color' && p !== 'fontsize') return;
+    if (!from || from < 1) return;
+    const text = member.text ?? '';
+    const lo = Math.round(from);
+    const hi = Math.round(to ?? lo);
+    let start: number;
+    let end: number;
+    if (chunk === 'char') {
+      start = lo;
+      end = hi;
+    } else {
+      const sep = chunk === 'word' ? /\s+/ : chunk === 'item' ? this.itemDelim : /\r?\n/;
+      const parts = text.split(sep);
+      const a = Math.max(1, Math.min(lo, parts.length));
+      const b = Math.max(a, Math.min(hi, parts.length));
+      const join = chunk === 'word' ? ' ' : chunk === 'item' ? this.itemDelim : '\n';
+      const seg = parts.slice(a - 1, b).join(join);
+      const idx = text.indexOf(seg);
+      if (idx < 0) return;
+      start = idx + 1;
+      end = idx + seg.length;
+    }
+    start = Math.max(1, start);
+    end = Math.min(text.length, Math.max(start, end));
+    if (start > text.length) return;
+    member.chunkStyles ??= [];
+    const field = p === 'fontstyle' ? 'fontStyle' : p === 'fontsize' ? 'fontSize' : p === 'color' ? 'color' : 'font';
+    const existing = member.chunkStyles.find((s) => s.from === start && s.to === end);
+    if (existing) {
+      (existing as Record<string, LVal | undefined>)[field] = value;
+      return;
+    }
+    member.chunkStyles.push({ from: start, to: end, [field]: value } as NonNullable<Member['chunkStyles']>[number]);
+  }
 }
 
 /** MemberHost re-export (interface declared here for values.ts compatibility). */
@@ -4613,6 +4849,7 @@ export type MemberHostApi = {
   setCastLibProp(c: LCastLibRef, prop: string, value: LVal): void;
   getWindowProp(w: LWindowRef, prop: string): LVal;
   setWindowProp(w: LWindowRef, prop: string, value: LVal): void;
+  setMemberChunkProp(m: LMemberRef, chunk: string, from: number | undefined, to: number | undefined, prop: string, value: LVal): void;
 };
 
 /** Helper to create a cast manifest from raw entries (tests/demo). */

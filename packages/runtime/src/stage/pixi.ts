@@ -1,4 +1,12 @@
-import { Application, BufferImageSource, Container, Graphics, Sprite, Text, Texture, type BLEND_MODES } from 'pixi.js';
+import { Application, BufferImageSource, Container, Graphics, Rectangle, Sprite, Text, Texture, type BLEND_MODES } from 'pixi.js';
+// pixi v8 ships LIGHTEST/LIGHTEN/DARKEST/SUBTRACT etc. as *advanced* blend
+// modes that only exist after this side-effect import registers them (the
+// package's exports map this path to advanced-blend-modes/init.mjs, which
+// extensions.add()s every mode). Without it, `blendMode = 'lighten'` silently
+// falls back to normal compositing — the messenger console scrollbar's
+// ink-37 (LIGHTEST) black track rendered opaque over the grey console bg
+// instead of max-blending into it (i.e. looking transparent).
+import 'pixi.js/advanced-blend-modes';
 import { alignmentName, type ChannelVisual, type DirectorEngine, type StageAdapter } from '../engine/engine.js';
 import type { Channel } from '../engine/sprites.js';
 import { LImage, LList, LObject, LPoint, LPropList, LSpriteRef, LSymbol } from '../lingo/values.js';
@@ -495,6 +503,38 @@ export class PixiStage implements StageAdapter {
       this.stageTexture.source.update();
     }
     img.dirty = false;
+  }
+
+  /** Render the composited scene (background + stage paint surface + channel
+   *  sprites) and return its stage-sized RGBA pixels. This is what Director's
+   *  `(the stage).image` READS return — the FUSE screen camera crops it per
+   *  frame and the Photo Interface copies it for the camera shot. extract
+   *  re-renders the container (one extra render per capture), which is the
+   *  price of a real readback; a null return makes callers fall back. */
+  captureStage(): Uint8Array | null {
+    if (!this.app?.renderer || !this.app.stage) return null;
+    try {
+      // WITHOUT a frame, generateTexture sizes the readback from the stage's
+      // LOCAL BOUNDS — a sprite parked at a huge coordinate (off-stage UI
+      // members keep their movie coords) inflates that to a gigantic texture
+      // and getPixels throws "Invalid typed array length" (seen: 66 GB for a
+      // 720x540 stage). Clamp to the visible screen rect so the readback is
+      // always stage-sized.
+      const screen = this.app.screen;
+      const out = this.app.renderer.extract.pixels({
+        target: this.app.stage,
+        frame: new Rectangle(screen.x, screen.y, screen.width, screen.height),
+      });
+      // pixi 8.19 returns { pixels: Uint8ClampedArray, width, height } — grab
+      // the buffer and hand it back as a plain Uint8Array view.
+      const px = ArrayBuffer.isView(out) ? out : out && out.pixels;
+      if (!px) return null;
+      const buf = px as unknown as Uint8Array | Uint8ClampedArray;
+      if (!buf.length) return null;
+      return buf instanceof Uint8Array ? buf : new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+    } catch {
+      return null;
+    }
   }
 
   setBackground(color: number): void {

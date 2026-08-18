@@ -628,6 +628,23 @@ export class LImage {
       const so = (y * srcW + rc.x1) * 4;
       dst.set(this.data.subarray(so, so + row), (y - rc.y1) * row);
     }
+    // A crop of an indexed/paletted image keeps the source's palette and
+    // index grid (Director semantics — image.crop returns an image with the
+    // same palette). The navigator does `member.image.trimWhiteSpace()`
+    // (crop) then pastes the result with ink 8: the matte must still key
+    // palette index 0. The thumbnail palettes put WHITE at index 0, which
+    // resolves a matte that no pixel matches -> no mask -> the black border
+    // frame survives. Dropping the palette here fell back to the (0,0)-pixel
+    // key, which keyed the black border itself and "clipped" it off.
+    out.palette = this.palette;
+    const srcH = Math.max(0, Math.round(this.height));
+    if (this.indices && this.indices.length >= srcW * srcH) {
+      const oi = new Uint8Array(out.width * out.height);
+      for (let y = rc.y1; y < rc.y2; y++) {
+        oi.set(this.indices.subarray(y * srcW + rc.x1, y * srcW + rc.x2), (y - rc.y1) * out.width);
+      }
+      out.indices = oi;
+    }
     return out;
   }
 }
@@ -696,11 +713,20 @@ function applyInkPixel(
   // copyPixels, near-grayscale source pixels (channel span <= 16) are lerped
   // along the gray->(fg,bg) ramp — black becomes #color, white becomes
   // #bgColor — while colored detail pixels keep their RGB. This tints window
-  // title text into the layout's header colors and the catalog's gray icons.
-  // Pixels already within 24 gray of the foreground are left alone (the
-  // rasterizer draws text glyphs in member.color; they must not be re-lerped).
+  // title text into the layout's header colors. Pixels already within 24 gray
+  // of the foreground are left alone (the rasterizer draws text glyphs in
+  // member.color; they must not be re-lerped).
+  //
+  // The ramp applies to INK 0 ONLY. Ink 8 (MATTE) tints on an explicit
+  // #color alone — bgColor is inert there (DirPlayer drawing.rs: the ink-8
+  // path multiplies by foreColor; bgColor belongs to ink 0 / ink 36). The
+  // catalog Product Preview passes [#ink: 8, #bgColor: paletteIndex(...)] and
+  // the "*ffffff" no-color marker resolves to the last palette entry (black
+  // in the radiator's palette) — tinting by it turned the grunge radiator's
+  // native gray art BLACK. Native art must survive an ink-8 copy that passes
+  // only #bgColor.
   const srcRgb = (sr << 16) | (sg << 8) | sb;
-  if ((fgExplicit || bgExplicit) && (ink === 0 || ink === 8)) {
+  if ((ink === 0 && (fgExplicit || bgExplicit)) || (ink === 8 && fgExplicit)) {
     const maxC = Math.max(sr, sg, sb);
     const minC = Math.min(sr, sg, sb);
     if (maxC - minC <= 16) {
@@ -864,6 +890,9 @@ export interface MemberHost {
   setCastLibProp(c: LCastLibRef, prop: string, value: LVal): void;
   getWindowProp(w: LWindowRef, prop: string): LVal;
   setWindowProp(w: LWindowRef, prop: string, value: LVal): void;
+  /** `member.char[1..n].font = v` — apply a property to a char range of a
+   *  text member (Balloon Manager bolds the speaker name). */
+  setMemberChunkProp(m: LMemberRef, chunk: string, from: number | undefined, to: number | undefined, prop: string, value: LVal): void;
   /** The Script behind a script-type cast member ref (`script(member(...))`), or null. */
   memberScript(m: LMemberRef): Script | null;
 }
@@ -901,7 +930,14 @@ export function lingoEquals(a: LVal, b: LVal): boolean {
     return false;
   }
   if (typeof a === 'number' && typeof b === 'number') return a === b;
-  if (typeof a === 'string' && typeof b === 'string') return a === b;
+  if (typeof a === 'string' && typeof b === 'string') {
+    // Director string equality ignores case (compareLingo below already
+    // lowercases for < >). The pool diving game's swimjump.key.list is
+    // UPPERCASE ("A","D") while `the key` reports the lowercase char from
+    // the browser — translateKey's `tPelleKey = pPelleKeys[i]` needs
+    // `'a' = "A"` to be true for the run keys to work.
+    return a.toLowerCase() === b.toLowerCase();
+  }
   if (a instanceof LSymbol && b instanceof LSymbol) return a.name === b.name;
   if (a instanceof LSymbol && typeof b === 'string') return a.name === b;
   if (typeof a === 'string' && b instanceof LSymbol) return a === b.name;

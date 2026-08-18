@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildManifest, nodeFs } from './manifest.js';
+import { buildCastManifest, buildManifest, nodeFs } from './manifest.js';
+import type { CastUnit } from './manifest.js';
 import type { BundleManifest } from './types.js';
 import { buildZip, isTextPath, buildSpark, isSparkBytes, readSpark, SPARK_MAGIC } from './zip.js';
 import { encodePalette } from './pal.js';
@@ -15,6 +16,22 @@ export { buildZip, isTextPath, buildSpark, isSparkBytes, readSpark, SPARK_MAGIC 
 export interface BundleResult {
   zip: Uint8Array;
   manifest: BundleManifest;
+}
+
+/**
+ * Build ONE cast's bundle straight from its unit, without re-enumerating the
+ * export tree. The per-cast CLI path (bundleAll) enumerates units once up
+ * front and then calls this per cast — re-running `buildSparkBundle` there
+ * would re-walk every directory under the root for every cast (O(casts^2)
+ * stat calls; with deep containers like hof_furni that is minutes of pure
+ * fs churn). Returns null when the cast directory has no files.
+ */
+export function buildCastSparkBundle(exportRoot: string, unit: CastUnit): SparkBundleResult | null {
+  const built = buildCastManifest(unit, nodeFs);
+  if (!built) return null;
+  const { cast, files: castFiles } = built;
+  const manifest: BundleManifest = { version: 1, casts: [cast], files: castFiles };
+  return { spark: buildSpark(collectEntries(exportRoot, manifest)), manifest };
 }
 
 export interface SparkBundleResult {

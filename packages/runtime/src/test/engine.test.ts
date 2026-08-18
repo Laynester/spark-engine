@@ -2307,10 +2307,13 @@ test('rasterizeTextMember: boxType-unset Writer members are content-tight (purse
 
     const tight = rasterizeTextMember(m);
     assert.ok(tight);
-    // Content-tight: width stays >= the rect 50, height = topSpacing +
-    // 1 line * (fixedLineSpace 21 + topSpacing 3) = 27, not 480.
+    // Content-tight: width stays >= the rect 50. Height follows the
+    // LibreShockwave line-box model: the first line box starts at
+    // topSpacing + 1 = 4 and holds 1 line of (fixedLineSpace 21 + topSpacing
+    // 3) = 24, so the box is 28 (the glyph cell overhang leaves the
+    // first-line box 4 + 24 = 28 — not 480).
     assert.equal(tight.width, 50);
-    assert.equal(tight.height, 27);
+    assert.equal(tight.height, 28);
 
     // An element text member with boxType SET keeps the rect box (the
     // corpus's Text Wrapper sets #adjust explicitly; the window display path
@@ -2326,6 +2329,48 @@ test('rasterizeTextMember: boxType-unset Writer members are content-tight (purse
     const empty = rasterizeTextMember(m);
     assert.ok(empty);
     assert.equal(empty.height, 480);
+  } finally {
+    if (document) (globalThis as Record<string, unknown>).document = document;
+    else delete (globalThis as Record<string, unknown>).document;
+  }
+});
+
+test('rasterizeTextMember: fixed-line members bottom-sit glyphs in the line box (U143 dropdown text)', () => {
+  // The DropDown class sets tTextMember.fixedLineSpace = pLineHeight (the
+  // window-def row height, e.g. 18) with NO topSpacing. Em-box centering
+  // ((lineH - fontSize) / 2) rode the glyphs high in the bar; LibreShockwave
+  // renderWithBitmapFont bottom-sits each line's glyph cell — the extra line
+  // height (lineH - fontLineHeight) goes ABOVE the glyphs. Volter 9px
+  // measures fontBoundingBox ascent 8 + descent 2 = 10, so the glyphs start
+  // at 18 - 10 = 8 (not 5) and the content box is exactly one 18px line (not
+  // 23) — pasted at marginTop -2 the glyphs sit centered in the 20px bar.
+  const { document } = globalThis as { document?: unknown };
+  const draws: Array<[string, number, number]> = [];
+  const ctxMock = {
+    font: '', fillStyle: '', textAlign: '', textBaseline: '',
+    measureText: () => ({ width: 40, fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2 }),
+    fillRect: () => undefined,
+    fillText: (t: string, x: number, y: number) => { draws.push([t, x, y]); },
+    getImageData: (_x: number, _y: number, w: number, h: number) => ({ data: new Uint8ClampedArray(w * h * 4) }),
+  };
+  (globalThis as Record<string, unknown>).document = {
+    createElement: () => ({ width: 0, height: 0, getContext: () => ctxMock }),
+  };
+  try {
+    const m = new Member(1, 1, 'dropdown.button.text', 'text');
+    m.text = 'Say';
+    m.font = 'Volter';
+    m.fontSize = 9;
+    m.fixedLineSpace = 18;
+    m.color = new LColor(0, 0, 0);
+    m.rect = new LRect(0, 0, 80, 20);
+    const img = rasterizeTextMember(m);
+    assert.ok(img);
+    assert.equal(img!.width, 80, 'rect width box');
+    // LSW bottom-sit: glyphs start at fixedLineSpace 18 - fontLH 10 = 8.
+    assert.equal(draws[0][2], 8, `first line glyph top = 8 (bottom-sit), got ${draws[0][2]}`);
+    // Content height: one 18px line (the glyphs 8..18 fit inside it).
+    assert.equal(img!.height, 18, `content height = 18 (one line), got ${img!.height}`);
   } finally {
     if (document) (globalThis as Record<string, unknown>).document = document;
     else delete (globalThis as Record<string, unknown>).document;
@@ -3204,6 +3249,55 @@ test('(the stage).image / .bgColor resolve (Loading Bar pBuffer path)', () => {
   assert.ok(e.logs.length >= 0);
 });
 
+test('(the stage).image READS use the composited scene (FUSE screen camera / photo shot)', () => {
+  // The FUSE screen cameraCrop does `(the stage).image.crop(tCropRect)` and
+  // the Photo Interface copies `(the stage).image` — Director's stage image IS
+  // the displayed scene. Our stageImage() is a Lingo paint surface (the
+  // Loading Bar fills it, shown behind the channels), so SOURCE reads must
+  // substitute the adapter's renderer readback. Mock a red scene and prove
+  // crop + copyPixels see it while the paint surface stays untouched.
+  const w = 720;
+  const h = 540;
+  const redScene = new Uint8Array(w * h * 4);
+  for (let i = 0; i < redScene.length; i += 4) {
+    redScene[i] = 255;
+    redScene[i + 1] = 0;
+    redScene[i + 2] = 0;
+    redScene[i + 3] = 255;
+  }
+  let captures = 0;
+  const mockAdapter: import('../engine/engine.js').StageAdapter = {
+    setBackground: () => {},
+    setChannel: () => {},
+    refreshChannel: () => {},
+    resize: () => {},
+    captureStage: () => {
+      captures++;
+      return redScene;
+    },
+  };
+  const e = new DirectorEngine(mockAdapter);
+  // Paint surface stays a Lingo surface (Loading Bar path): paint blue, the
+  // readback must still be the red scene.
+  e.interp.evalExpressionString('(the stage).image.fill(rect(0, 0, 5, 5), rgb(0, 0, 255))');
+  // crop of `(the stage).image` = the composited scene, not the paint.
+  const cropped = e.interp.evalExpressionString('(the stage).image.crop(rect(10, 10, 20, 20))') as { data: Uint8Array | null };
+  assert.ok(captures >= 1, 'composite must be captured for a stage-image crop');
+  assert.equal(cropped.data![0], 255, 'crop pixel red from the composite');
+  assert.equal(cropped.data![1], 0);
+  // copyPixels with `(the stage).image` as the SOURCE also substitutes.
+  e.addScriptMember(
+    'CamShot',
+    'movie',
+    ['on run me', '  tImg = image(10, 10, 24)', '  tImg.copyPixels((the stage).image, rect(0, 0, 10, 10), rect(0, 0, 10, 10))', '  return tImg', 'end'].join('\n'),
+  );
+  const cs = e.resolveScript('CamShot')!;
+  const csRun = cs.handlers.find((hh) => hh.name.toLowerCase() === 'run')!;
+  const shot = e.interp.callHandler(cs, csRun, [], null, new Set()) as { data: Uint8Array | null };
+  assert.equal(shot.data![0], 255, 'copyPixels src is the red composite');
+  assert.equal(shot.data![1], 0);
+});
+
 test('member.image is a persistent surface across reads (fill sticks)', () => {
   const e = new DirectorEngine();
   const m = e.addScriptMember('Bmp', 'unknown', '');
@@ -3266,6 +3360,67 @@ test('debugCopyOwner names the member behind an LImage (U66 copyPixels source lo
   assert.equal(e.debugCopyOwner(img2), `1#${ref2.number} "mes_test2"`);
   // an orphan LImage (image() builtin result, never assigned to a member) is unnamed
   assert.equal(e.debugCopyOwner(new LImage(1, 1)), '');
+});
+
+test('member image painted via copyPixels flips plain bitmap channel to live surface, keeps ink-9 mask path', () => {
+  // The FUSE screen camera does `member("fuse_screen").image.copyPixels(...)`
+  // every frame. A bitmap member with raw PNG bytes must switch from the raw
+  // static visual to a kind:'image' visual carrying the painted surface once
+  // Lingo writes into it — otherwise the screen shows the original logo bitmap
+  // forever. Ink-9 masked members (pool water vesi1/vesimask1) must KEEP the
+  // raw+mask path: flipping them to a bare surface drops the mask.
+  const calls: { ch: number; kind: string; image?: unknown }[] = [];
+  const adapter = {
+    setBackground() {},
+    resize() {},
+    refreshChannel() {},
+    setChannel(ch: number, v: { kind: string; image?: unknown } | null) {
+      calls.push(v ? { ch, kind: v.kind, image: v.image } : { ch, kind: 'null' });
+    },
+  };
+  const e = new DirectorEngine(adapter as never);
+  e.addScriptMember('Setup', 'score', 'on exitFrame\nend'); // establish cast 1
+  const rawMember = (name: string): { mem: import('../engine/members.js').Member; ref: import('../lingo/values.js').LMemberRef } => {
+    const num = e.createNamedMember(name, 'bitmap', 1);
+    const ref = e.getMemberByName(name)! as import('../lingo/values.js').LMemberRef;
+    const mem = e.memberFor(ref)!;
+    const png = new Uint8Array(8);
+    png[0] = 0x89; png[1] = 0x50; png[2] = 0x4e; png[3] = 0x47; // PNG magic
+    mem.raw = png;
+    return { mem, ref };
+  };
+  // Plain member (FUSE screen) on channel 9.
+  const a = rawMember('fuse_screen');
+  e.setMemberProp(a.ref, 'image', new LImage(2, 2));
+  e.setSpriteProp(e.getSprite(9), 'member', (a.mem.castLibNumber << 16) | a.mem.number);
+  // Ink-9 masked member (pool water) on channel 10.
+  const b = rawMember('vesi1');
+  e.setMemberProp(b.ref, 'image', new LImage(2, 2));
+  e.setSpriteProp(e.getSprite(10), 'member', (b.mem.castLibNumber << 16) | b.mem.number);
+  e.setSpriteProp(e.getSprite(10), 'ink', 9);
+  e.flushChannelVisuals();
+  const kindOf = (ch: number): string => {
+    const hits = calls.filter((c) => c.ch === ch);
+    return hits.length ? hits[hits.length - 1].kind : 'none';
+  };
+  assert.equal(kindOf(9), 'bitmap', 'plain raw member starts as kind:bitmap');
+  assert.equal(kindOf(10), 'bitmap', 'masked raw member starts as kind:bitmap');
+  // Paint into BOTH member images via the interpreter path (fires imageMutated).
+  e.addScriptMember(
+    'CamPaint',
+    'movie',
+    ['on run me', '  tSrc = image(1, 1, 24)', '  tSrc.fill(rect(0, 0, 1, 1), rgb(0, 255, 0))', '  member("fuse_screen").image.copyPixels(tSrc, rect(0, 0, 1, 1), rect(0, 0, 1, 1))', '  member("vesi1").image.copyPixels(tSrc, rect(0, 0, 1, 1), rect(0, 0, 1, 1))', '  return 1', 'end'].join('\n'),
+  );
+  const paintScr = e.resolveScript('CamPaint')!;
+  const paintH = paintScr.handlers.find((hh) => hh.name.toLowerCase() === 'run')!;
+  e.interp.callHandler(paintScr, paintH, [], null, new Set());
+  e.flushChannelVisuals();
+  assert.equal(kindOf(9), 'image', 'plain painted member flips to kind:image');
+  assert.equal(kindOf(10), 'bitmap', 'ink-9 masked member KEEPS kind:bitmap (mask preserved)');
+  const last = calls.filter((c) => c.ch === 9);
+  const vis = last[last.length - 1];
+  assert.ok(vis.image instanceof LImage, 'visual must carry the member painted surface');
+  assert.equal((vis.image as LImage).data![1], 255, 'green pixel survives into the surface');
 });
 
 test('value() parses real v14 struct strings with "# key" spacing', () => {
@@ -4397,6 +4552,41 @@ test('copyPixels #color/#bgColor tints grayscale art (purse title brown-on-gold)
   assert.equal(out4[g4 + 2], 238);
 });
 
+test('copyPixels ink 8 + bgColor does NOT tint grayscale (catalogue product preview)', () => {
+  // Product Preview Class getPicture: `copyPixels(part, rect, rect, [#maskImage:
+  // tMatte, #ink: 8, #bgColor: paletteIndex(integer(pPartColors[j])), #blend: 100])`.
+  // For a non-colourable furni the server sends partColors "*ffffff" (no color),
+  // which the corpus turns into `paletteIndex(integer("*ffffff"))` =
+  // paletteIndex(0xFFFFFF) = palette entry 255 (the *ffffff no-color marker is
+  // masked to the last palette entry, black in the radiator's palette). The old
+  // ink-8 grayscale tint lerped the whole gray body toward that bgColor, so the
+  // grunge radiator's native gray art rendered BLACK. DirPlayer's ink-8 path
+  // (drawing.rs) uses foreColor only — bgColor is inert for ink 8 (it belongs
+  // to ink 0 / ink 36). Native grayscale art must survive an ink-8 copy that
+  // passes ONLY #bgColor.
+  const e = new DirectorEngine();
+  e.addScriptMember('TintGate', 'movie', [
+    'on run',
+    '  src = image(5, 5, 32)',
+    '  src.fill(src.rect, rgb(200, 200, 200))',
+    '  src.setPixel(1, 1, rgb(0, 0, 0))',
+    '  src.setPixel(2, 2, rgb(99, 99, 99))',
+    '  src.setPixel(3, 3, rgb(255, 255, 255))',
+    '  dst = image(5, 5, 32)',
+    '  dst.fill(dst.rect, rgb(255, 255, 255))',
+    '  dst.copyPixels(src, src.rect, src.rect, [#ink: 8, #bgColor: rgb(0, 0, 0)])',
+    '  return [dst.getPixel(1, 1).red, dst.getPixel(1, 1).green, dst.getPixel(1, 1).blue,',
+    '          dst.getPixel(2, 2).red, dst.getPixel(2, 2).green, dst.getPixel(2, 2).blue,',
+    '          dst.getPixel(3, 3).red, dst.getPixel(3, 3).green, dst.getPixel(3, 3).blue]',
+    'end',
+  ].join('\n'));
+  const script = e.resolveScript('TintGate')!;
+  const run = script.handlers.find((h) => h.name.toLowerCase() === 'run')!;
+  const out = e.interp.callHandler(script, run, [], null, new Set()) as unknown as { items: number[] };
+  // Native art preserved: black stays black, gray 99 stays gray, white stays white.
+  assert.deepEqual(out.items, [0, 0, 0, 99, 99, 99, 255, 255, 255]);
+});
+
 test('image.trimWhiteSpace trims the white background (button text width)', () => {
   // Common Button getTextWidth: rect(0,0,300,30) -> copy -> trimWhiteSpace().
   // The label member is white-filled (bgColor), so a trim that only removes
@@ -4414,6 +4604,53 @@ test('image.trimWhiteSpace trims the white background (button text width)', () =
   const script = e.resolveScript('Trim Probe')!;
   const obj = e.interp.newInstance(script, []);
   assert.equal(e.interp.callObjectHandler(obj, 'trimProbe', []), 1);
+});
+
+test('image.crop carries the palette + index grid so ink-8 keeps the nav thumbnail border', () => {
+  // Navigator flow: `member(image).trimWhiteSpace()` crops the member image,
+  // then `tPrewImg.copyPixels(tTempImg, ..., [#ink: 8])` mattes it. The
+  // thumbnail palettes put WHITE at index 0, so the ink-8 matte keys white;
+  // the art has no white pixels -> no mask -> the baked-in black border
+  // frame survives. Before the fix, crop() dropped the palette and the matte
+  // fell back to the (0,0)-pixel key, which keyed the BLACK border and
+  // clipped it off the preview.
+  const art = new LImage(6, 4);
+  const a = art.ensure();
+  for (let i = 0; i < 6 * 4; i++) {
+    a[i * 4] = 0; a[i * 4 + 1] = 0; a[i * 4 + 2] = 0; a[i * 4 + 3] = 255; // black border
+  }
+  for (let y = 1; y < 3; y++) {
+    for (let x = 1; x < 5; x++) {
+      const i = (y * 6 + x) * 4;
+      a[i] = 200; a[i + 1] = 120; a[i + 2] = 40; a[i + 3] = 255; // art interior
+    }
+  }
+  art.palette = [[255, 255, 255]]; // index 0 = white, like the thumb .pal
+  art.indices = null;
+  const trimmed = art.crop(0, 0, 6, 4);
+  assert.equal(trimmed.palette, art.palette, 'crop keeps the source palette');
+  const dst = new LImage(6, 4);
+  dst.copyPixels(trimmed, new LRect(0, 0, 6, 4), new LRect(0, 0, 6, 4), 8);
+  const out = dst.ensure();
+  assert.equal(out[3], 255, 'border pixel stays opaque (white key has no match)');
+  assert.equal(out[(1 * 6 + 1) * 4 + 3], 255, 'art interior stays opaque');
+});
+
+test('image.crop carries the index grid for palette-INDEX keyed mattes', () => {
+  const art = new LImage(3, 2);
+  const a = art.ensure();
+  const idx = new Uint8Array(6);
+  for (let i = 0; i < 6; i++) {
+    a[i * 4] = 255; a[i * 4 + 1] = 255; a[i * 4 + 2] = 255; a[i * 4 + 3] = 255;
+    idx[i] = 0; // all index 0 (white)
+  }
+  idx[4] = 5; // one art pixel at index 5
+  art.palette = [[255, 255, 255], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [10, 20, 30]];
+  art.indices = idx;
+  const cropped = art.crop(0, 0, 3, 2);
+  assert.ok(cropped.indices, 'crop keeps the index grid');
+  assert.equal(cropped.indices[4], 5, 'index subregion aligns with the pixels');
+  assert.equal(cropped.indices[0], 0);
 });
 
 test('text member height falls back to the line height when its rect is zero (button label)', () => {
@@ -5275,12 +5512,56 @@ test('the keyboardFocusSprite get+set and the key/keyCode/keyDown/keyUp state', 
   assert.equal(e.interp.evalExpressionString('the keyboardFocusSprite'), 12);
   e.dispatchKeyEvent('keyDown', 'a', 65);
   assert.equal(e.interp.evalExpressionString('the key'), 'a');
-  assert.equal(e.interp.evalExpressionString('the keyCode'), 65);
+  // Browser keyCode 65 ('a') is Director keyCode 0 (DirPlayer keyboard_map).
+  assert.equal(e.interp.evalExpressionString('the keyCode'), 0);
   assert.equal(e.interp.evalExpressionString('the keyDown'), 1);
   assert.equal(e.interp.evalExpressionString('the keyUp'), 0);
+  assert.equal(e.interp.evalExpressionString('the keyPressed'), 'a');
   e.dispatchKeyEvent('keyUp', 'a', 65);
   assert.equal(e.interp.evalExpressionString('the keyDown'), 0);
   assert.equal(e.interp.evalExpressionString('the keyUp'), 1);
+  // `the keyPressed` = most recently held key, EMPTY once nothing is held
+  assert.equal(e.interp.evalExpressionString('the keyPressed'), '');
+});
+
+test('string = comparison is case-insensitive (pool dive keymap)', () => {
+  // The pool diving game's keymap (swimjump.key.list in external_vars) is
+  // UPPERCASE ("A","D",...) while `the key` reports the lowercase char the
+  // browser sends — registration's permitted.name.chars (lowercase) proves
+  // `the key` is lowercase. Director string equality ignores case, so
+  // translateKey's `tPelleKey = pPelleKeys[i]` must match 'a' to "A" for the
+  // run keys to work (compareLingo already lowercases for < >; lingoEquals
+  // must do the same for = / <>).
+  const e = new DirectorEngine();
+  assert.equal(e.interp.evalExpressionString('"a" = "A"'), 1);
+  assert.equal(e.interp.evalExpressionString('"A" <> "a"'), 0);
+  assert.equal(e.interp.evalExpressionString('"d" = "D"'), 1);
+  assert.equal(e.interp.evalExpressionString('"dive" = "DIVE"'), 1);
+  assert.equal(e.interp.evalExpressionString('"x" = "y"'), 0);
+});
+
+test('web keyCodes translate to Director keyCodes (chat "l" sends bug)', () => {
+  // The room chat handler sends on `case the keyCode of 36, 76:` (Director
+  // Return codes). The browser reports the letter 'l' as keyCode 76 — without
+  // the web→Director translation, every 'l' keystroke matched Director's
+  // Return-76 and sent the chat text mid-typing. Director's code for 'l' is
+  // 37 and Return is 36, so typing must not hit the send path.
+  const e = new DirectorEngine();
+  e.dispatchKeyEvent('keyDown', 'l', 76);
+  assert.equal(e.interp.evalExpressionString('the keyCode'), 37); // Director 'l'
+  assert.equal(e.interp.evalExpressionString('the key'), 'l');
+  e.dispatchKeyEvent('keyUp', 'l', 76);
+  e.dispatchKeyEvent('keyDown', 'Enter', 13);
+  assert.equal(e.interp.evalExpressionString('the keyCode'), 36); // Director Return
+  assert.equal(e.interp.evalExpressionString('the key'), '\r');
+  assert.equal(e.interp.evalExpressionString('the keyPressed'), '\r');
+  e.dispatchKeyEvent('keyUp', 'Enter', 13);
+  assert.equal(e.interp.evalExpressionString('the keyPressed'), '');
+  // Backspace is Director 51; the diving game's Pelle KeyDown polls
+  // `the keyPressed <> EMPTY` to drive the jump input.
+  e.dispatchKeyEvent('keyDown', 'Backspace', 8);
+  assert.equal(e.interp.evalExpressionString('the keyCode'), 51);
+  assert.equal(e.interp.evalExpressionString('the key'), '\b');
 });
 
 test('typing goes into the focused editable field member (Director native editing)', () => {
@@ -5536,6 +5817,10 @@ test('ink 9 (Mask): channel visual carries the NEXT member as maskBytes (pool wa
   // in the same cast — as a grayscale alpha mask. buildChannelVisual must
   // resolve the mask member and hand its raw PNG + reg point to the stage, or
   // the water shows as a solid rectangle (the hh_room_pool blue slab).
+  // Director's rule is member + 1 (no name convention): the dumper re-exports
+  // members under their real Lingo numbers, so the pool pairs stay adjacent
+  // (vesi1=84->vesimask1=85, vesi2=89->vesimask2=90, dew_vesi1=33->
+  // dew_vesimask1=34 in the real casts).
   const calls: { ch: number; kind: string; maskBytes?: Uint8Array; maskRegX?: number; maskRegY?: number }[] = [];
   const adapter = {
     setBackground() {},
@@ -5557,16 +5842,6 @@ test('ink 9 (Mask): channel visual carries the NEXT member as maskBytes (pool wa
   mask.regX = 1;
   mask.regY = 1;
 
-  // A NON-mask ink 9 channel with no adjacent bitmap: vesi2's mask is not
-  // member+1 (pool_b keeps the pair apart) — the name fallback must find
-  // vesimask2 by the vesi->vesimask convention.
-  const water2 = e.addScriptMember('vesi2', 'unknown', '');
-  water2.kind = 'bitmap';
-  water2.raw = buildPng(1, 1, [0, 128, 255, 255]);
-  const mask2 = e.addScriptMember('vesimask2', 'unknown', '');
-  mask2.kind = 'bitmap';
-  mask2.raw = buildPng(1, 1, [0, 0, 0, 255]);
-
   const s = { channel: 5, script: null };
   e.setSpriteProp(s, 'member', (water.castLibNumber << 16) | water.number);
   e.setSpriteProp(s, 'ink', 9);
@@ -5578,15 +5853,17 @@ test('ink 9 (Mask): channel visual carries the NEXT member as maskBytes (pool wa
   assert.equal(hit!.maskRegX, 1, 'mask reg point rides along for alignment');
   assert.equal(hit!.maskRegY, 1);
 
-  // Name-convention fallback: water3's +1 is NOT the mask, but vesimask3 exists
-  // by the vesi->vesimask naming rule.
-  const water3 = e.addScriptMember('dew_vesi1', 'unknown', '');
+  // Member+1 is the ONLY rule — a sibling member named "vesi3" whose +1 is an
+  // unrelated bitmap must use THAT bitmap as the mask, even when a
+  // "vesimask3" exists later in the cast (Director has no name convention;
+  // the old vesi->vesimask fallback must not override adjacency).
+  const water3 = e.addScriptMember('vesi3', 'unknown', '');
   water3.kind = 'bitmap';
   water3.raw = buildPng(1, 1, [0, 128, 255, 255]);
-  const unrelated = e.addScriptMember('dew_putous2_5', 'unknown', '');
+  const unrelated = e.addScriptMember('not_a_mask_part', 'unknown', '');
   unrelated.kind = 'bitmap';
   unrelated.raw = buildPng(1, 1, [1, 2, 3, 255]);
-  const mask3 = e.addScriptMember('dew_vesimask1', 'unknown', '');
+  const mask3 = e.addScriptMember('vesimask3', 'unknown', '');
   mask3.kind = 'bitmap';
   mask3.raw = buildPng(1, 1, [0, 0, 0, 255]);
   const s3 = { channel: 6, script: null };
@@ -5594,16 +5871,188 @@ test('ink 9 (Mask): channel visual carries the NEXT member as maskBytes (pool wa
   e.setSpriteProp(s3, 'ink', 9);
   e.flushChannelVisuals();
   const hit3 = calls.find((c) => c.ch === 6);
-  assert.ok(hit3 && hit3.maskBytes, 'ink-9 with non-adjacent mask still resolves by name');
-  assert.equal(hit3!.maskBytes, mask3.raw, 'name convention finds dew_vesimask1, not the adjacent part');
+  assert.ok(hit3 && hit3.maskBytes, 'ink-9 visual must carry the mask bytes');
+  assert.equal(hit3!.maskBytes, unrelated.raw, 'member+1 wins: the mask is the NEXT member, not the vesimask* name');
+
+  // Member+1 with nothing after it (no bitmap): unmasked.
+  const water4 = e.addScriptMember('vesi4', 'unknown', '');
+  water4.kind = 'bitmap';
+  water4.raw = buildPng(1, 1, [0, 128, 255, 255]);
+  const s4 = { channel: 8, script: null };
+  e.setSpriteProp(s4, 'member', (water4.castLibNumber << 16) | water4.number);
+  e.setSpriteProp(s4, 'ink', 9);
+  e.flushChannelVisuals();
+  const hit4 = calls.find((c) => c.ch === 8);
+  assert.ok(hit4 && !hit4.maskBytes, 'no next member -> ink-9 renders unmasked');
 
   // Non-ink-9 bitmap: no mask bytes at all.
   const s2 = { channel: 7, script: null };
-  e.setSpriteProp(s2, 'member', (water2.castLibNumber << 16) | water2.number);
+  e.setSpriteProp(s2, 'member', (water3.castLibNumber << 16) | water3.number);
   e.setSpriteProp(s2, 'ink', 0);
   e.flushChannelVisuals();
   const hit2 = calls.find((c) => c.ch === 7);
   assert.ok(hit2 && !hit2.maskBytes, 'ink-0 bitmap carries no mask');
+});
+
+test('set .red/.green/.blue on a color mutates it (balloon darken)', () => {
+  // Balloon Manager createballoonImg (0005) darkens bright bubble colors:
+  //   tBalloonColorDarken = rgb(0, 0, 0)
+  //   tBalloonColorDarken.red = tBalloonColor.red * 0.9
+  //   tBalloonColorDarken.green = tBalloonColor.green * 0.9
+  //   tBalloonColorDarken.blue = tBalloonColor.blue * 0.9
+  // The engine warned "cannot set red on color(0, 0, 0)" and left the color
+  // black — bot/pet bubbles (bright chat colors, sum >= 600) rendered black.
+  // Director: color channels are settable, clamped to 0-255.
+  const e = new DirectorEngine();
+  e.addScriptMember('ColorT', 'unknown', [
+    'on run me',
+    '  c = rgb(0, 0, 0)',
+    '  c.red = 100',
+    '  c.green = 150',
+    '  c.blue = 200',
+    '  r = c.red * 1000000 + c.green * 1000 + c.blue',
+    '  c2 = rgb(0, 0, 0)',
+    '  c2.red = 300',
+    '  c2.blue = -5',
+    '  return r * 1000000 + c2.red * 1000 + c2.blue',
+    'end',
+  ].join('\n'));
+  const script = e.resolveScript('ColorT')!;
+  const run = script.handlers.find((h) => h.name.toLowerCase() === 'run')!;
+  const out = e.interp.callHandler(script, run, [], null, new Set());
+  // 100/150/200 -> 100150200; clamp: 300->255, -5->0 -> 255000.
+  assert.equal(out, 100150200 * 1000000 + 255000);
+  const warns = e.logs.filter((l) => /cannot set (red|green|blue) on color/.test(l));
+  assert.deepEqual(warns, [], 'color channel setters must not warn');
+});
+
+test('member.image = img auto-centers the regPoint (balloon spawn anchor)', () => {
+  // Balloon Manager showNewBalloon (hh_room_utils 0005):
+  //   tmember.image = me.createballoonImg(...)             -> regPoint (w/2, h/2)
+  //   tmember.regPoint = tmember.regPoint + point(0, h/2)  -> (w/2, h) bottom-center
+  // so the sprite loc (the character's head X) lands at the balloon's
+  // BOTTOM-CENTER — the bubble centers over the head and the pulse tip below
+  // meets its bottom edge. Director centers the regPoint whenever
+  // `member.image =` is assigned (DirPlayer bitmap.rs member.image setter;
+  // the corpus itself compensates where it matters — Common Button saves
+  // tTempOffset = member.regPoint, assigns image, then restores it). Without
+  // it the regPoint stays (0, 0) and the balloon anchors its LEFT edge at
+  // the head X — the bubble floats half a width to the right of the speaker.
+  const e = new DirectorEngine();
+  e.addScriptMember('BalloonRegT', 'unknown', [
+    'on run me',
+    '  n = createMember("balloon.probe", #bitmap)',
+    '  m = member(n)',
+    '  m.image = image(120, 40, 8)',
+    '  r1h = m.regPoint.locH',
+    '  r1v = m.regPoint.locV',
+    '  m.regPoint = m.regPoint + point(0, m.image.height / 2)',
+    '  r2h = m.regPoint.locH',
+    '  r2v = m.regPoint.locV',
+    '  m.image = image(200, 30, 8)',
+    '  r3h = m.regPoint.locH',
+    '  r3v = m.regPoint.locV',
+    '  return r1h & "," & r1v & ";" & r2h & "," & r2v & ";" & r3h & "," & r3v',
+    'end',
+  ].join('\n'));
+  const script = e.resolveScript('BalloonRegT')!;
+  const run = script.handlers.find((h) => h.name.toLowerCase() === 'run')!;
+  const out = e.interp.callHandler(script, run, [], null, new Set());
+  // 120x40 -> centered (60, 20); + (0, 20) -> (60, 40) bottom-center; a NEW
+  // image assignment re-centers to (100, 15) — no accumulation across the
+  // pooled balloon member's reuse.
+  assert.equal(out, '60,20;60,40;100,15');
+});
+
+test('member.char[1..n].font/.fontStyle/.color stores chunk formatting (balloon name)', () => {
+  // Balloon Manager bolds the speaker name inside the message:
+  //   tmember.char[1..tName.length + 1].font = tBoldStruct.getaProp(#font)
+  //   tmember.char[1..tName.length + 1].fontStyle = ...
+  //   tmember.char[1..tName.length + 1].color = pDefaultTextColor
+  // The engine warned "cannot set font on Jem:" (the chunk evaluated to the
+  // plain string). Director applies the prop to the char range of the text
+  // member; the range must be recorded and dropped when the text changes.
+  const e = new DirectorEngine();
+  const tm = e.addScriptMember('balloon.text.plain', 'unknown', '');
+  tm.kind = 'text'; // addScriptMember builds script members; retype for text
+  tm.text = '';
+  void tm;
+  e.addScriptMember('ChunkT', 'unknown', [
+    'on run me',
+    '  m = member("balloon.text.plain")',
+    '  m.text = "Jem: hello there"',
+    '  m.char[1..4].font = "vb"',
+    '  m.char[1..4].fontStyle = [#plain]',
+    '  m.char[1..4].color = rgb(0, 0, 0)',
+    '  return "ok"',
+    'end',
+  ].join('\n'));
+  const script = e.resolveScript('ChunkT')!;
+  const run = script.handlers.find((h) => h.name.toLowerCase() === 'run')!;
+  const out = e.interp.callHandler(script, run, [], null, new Set());
+  assert.equal(out, 'ok');
+  const warns = e.logs.filter((l) => /cannot set (font|fontStyle|color) on /.test(l));
+  assert.deepEqual(warns, [], 'chunk prop assignment must not warn');
+  const m = e.memberFor(e.getMemberByName('balloon.text.plain')!);
+  assert.ok(m, 'text member resolves');
+  assert.equal(m!.text, 'Jem: hello there');
+  const styles = m!.chunkStyles ?? [];
+  assert.equal(styles.length, 1, 'one styled range');
+  assert.deepEqual([styles[0].from, styles[0].to], [1, 4], 'chars 1..4 (name + colon)');
+  assert.equal(styles[0].font, 'vb');
+  assert.equal(styles[0].color instanceof LColor, true);
+  // Director attaches formatting to the TEXT: reassigning m.text clears it
+  // (the balloon member is reused across messages with different names).
+  e.addScriptMember('ChunkT2', 'unknown', [
+    'on run me',
+    '  m = member("balloon.text.plain")',
+    '  m.text = "Other: new message"',
+    '  return 1',
+    'end',
+  ].join('\n'));
+  const script2 = e.resolveScript('ChunkT2')!;
+  const run2 = script2.handlers.find((h) => h.name.toLowerCase() === 'run')!;
+  e.interp.callHandler(script2, run2, [], null, new Set());
+  assert.equal((m!.chunkStyles ?? []).length, 0, 'new text drops old range styles');
+});
+
+test('rasterizeTextMember: chunk styles render the styled range in its own font/color', () => {
+  // The balloon text image is composed from member.image: the name range must
+  // rasterize bold (struct.font.bold -> font "vb" -> Volter 700) while the
+  // message stays in the member font ("v" -> Volter 400).
+  const { document } = globalThis as { document?: unknown };
+  const draws: Array<{ t: string; font: string; fill: string }> = [];
+  const ctxMock = {
+    font: '', fillStyle: '', textAlign: '', textBaseline: '',
+    measureText: (s: string) => ({ width: s.length * 8 }),
+    fillRect: () => undefined,
+    fillText: (t: string, _x: number, _y: number) => { draws.push({ t, font: ctxMock.font, fill: ctxMock.fillStyle }); },
+    getImageData: (_x: number, _y: number, w: number, h: number) => ({ data: new Uint8ClampedArray(w * h * 4) }),
+  };
+  (globalThis as Record<string, unknown>).document = {
+    createElement: () => ({ width: 0, height: 0, getContext: () => ctxMock }),
+  };
+  try {
+    const m = new Member(1, 1, 'balloon.text.plain', 'text');
+    m.text = 'Jem: hello';
+    m.font = 'v';
+    m.fontStyle = new LList([new LSymbol('plain')]);
+    m.fontSize = 9;
+    m.color = new LColor(0, 0, 0);
+    m.rect = new LRect(0, 0, 60, 11);
+    m.textProps = new Map<string, LVal>([['boxtype', new LSymbol('adjust')]]);
+    m.chunkStyles = [{ from: 1, to: 4, font: 'vb', fontStyle: new LList([new LSymbol('plain')]), color: new LColor(0, 0, 0) }];
+    const img = rasterizeTextMember(m);
+    assert.ok(img);
+    assert.equal(draws.length, 2, 'two runs: styled name + plain message');
+    assert.equal(draws[0].t, 'Jem:');
+    assert.match(draws[0].font, /700/, 'name range draws in the bold face');
+    assert.equal(draws[1].t, ' hello');
+    assert.match(draws[1].font, /400/, 'message stays in the member face');
+  } finally {
+    if (document) (globalThis as Record<string, unknown>).document = document;
+    else delete (globalThis as Record<string, unknown>).document;
+  }
 });
 
 test('onCastLoaded fires when a cast registers (embed fonts hook)', async () => {
@@ -6335,7 +6784,63 @@ test('paletteIndex(n) resolves RGB from the movie palette (Figure colors)', () =
   const script = e.resolveScript('PLT')!;
   const run = script.handlers.find((h) => h.name.toLowerCase() === 'run')!;
   const out = e.interp.callHandler(script, run, [], null, new Set()) as unknown as { items: number[] };
-  assert.deepEqual(out.items, [255, 0, 128, 255, 255, 255, 0, 0, 0], 'paletteIndex resolves & masks & 0xFF (C++ paletteIndexColor parity)');
+  // 512 is OUT of palette range (0-255) — Director treats a >255 integer as a
+  // 0xRRGGBB color value (LibreShockwave int->color: only 0..255 is a palette
+  // index), so paletteIndex(512) = 0x000200, NOT a masked palette entry.
+  assert.deepEqual(out.items, [255, 0, 128, 255, 255, 255, 0, 2, 0], 'paletteIndex: 0-255 resolves the palette entry; >255 is the RGB value');
+});
+
+test('paletteIndex(0xFFFFFF) is WHITE — the catalogue *ffffff no-color marker', () => {
+  // Product Preview Class: `tProps[#bgColor] = paletteIndex(integer(pPartColors[j]))`
+  // with the server's "*ffffff" (no color) marker -> paletteIndex(16777215). The
+  // old &0xFF mask resolved it to palette entry 255 (BLACK in the radiator /
+  // mini-bar palettes), so ink-36 previews keyed the furni's dark pixels away
+  // ("all the darker bits get removed") and ink-8 previews tinted gray bodies
+  // black. "*ffffff" IS the RGB value for white — it must resolve to white.
+  const e = new DirectorEngine();
+  e.addScriptMember('NoColor', 'movie', [
+    'on run',
+    '  c = paletteIndex(integer("*ffffff"))',
+    '  return [c.red, c.green, c.blue]',
+    'end',
+  ].join('\n'));
+  // A current palette whose entry 255 is BLACK — the failing case.
+  const pal: number[][] = Array.from({ length: 256 }, (_, i) => [i, i, i]);
+  pal[255] = [0, 0, 0];
+  e.currentPalette = pal;
+  const script = e.resolveScript('NoColor')!;
+  const run = script.handlers.find((h) => h.name.toLowerCase() === 'run')!;
+  const out = e.interp.callHandler(script, run, [], null, new Set()) as unknown as { items: number[] };
+  assert.deepEqual(out.items, [255, 255, 255], 'paletteIndex(0xFFFFFF) = white, not palette[255]');
+});
+
+test('copyPixels ink 36 keys WHITE, keeps the dark art (catalogue mini-bar preview)', () => {
+  // The catalogue Product Preview for bar_polyfon copies `[#ink: 36, #bgColor:
+  // paletteIndex(integer("*ffffff"))]` — BACKGROUND_TRANSPARENT keys the bg
+  // color. With the *ffffff marker resolving to white, the WHITE backdrop is
+  // keyed and the dark outlines/shading survive. (Before: bgColor resolved to
+  // black and the ink-36 key ate every black pixel — the mini-bar's darker
+  // bits vanished.)
+  const e = new DirectorEngine();
+  e.addScriptMember('Ink36Key', 'movie', [
+    'on run',
+    '  src = image(5, 5, 32)',
+    '  src.fill(src.rect, rgb(255, 255, 255))',
+    '  src.setPixel(1, 1, rgb(0, 0, 0))',
+    '  src.setPixel(2, 2, rgb(40, 40, 40))',
+    '  src.setPixel(3, 3, rgb(200, 200, 200))',
+    '  dst = image(5, 5, 32)',
+    '  dst.fill(dst.rect, rgb(255, 255, 255))',
+    '  dst.copyPixels(src, src.rect, src.rect, [#ink: 36, #bgColor: rgb(255, 255, 255)])',
+    '  return [dst.getPixel(1, 1).red, dst.getPixel(2, 2).red, dst.getPixel(3, 3).red]',
+    'end',
+  ].join('\n'));
+  const script = e.resolveScript('Ink36Key')!;
+  const run = script.handlers.find((h) => h.name.toLowerCase() === 'run')!;
+  const out = e.interp.callHandler(script, run, [], null, new Set()) as unknown as { items: number[] };
+  // black + dark gray kept; the bg (white) is transparent so the dest's own
+  // white shows at the border pixels — interior dark art survives.
+  assert.deepEqual(out.items, [0, 40, 200], 'ink 36 keys only the bg color; dark art survives');
 });
 
 test('image(w,h,8,paletteMember) makes that palette current for paletteIndex (navigator rows)', () => {
