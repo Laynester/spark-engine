@@ -293,6 +293,13 @@ export function bakeEdgeBackground(
   const n = width * height;
   if (width <= 0 || height <= 0 || rgba.length < n * 4) return false;
 
+  // Ink 36 is a BLANKET color-key against the sprite's bgColor (white
+  // default), and it fires on 32-bit alpha bitmaps too — DirPlayer color-keys
+  // use_alpha bitmaps as long as they're plain authored members, NOT Flash
+  // captures (rendering_gpu/webgl2/mod.rs, use_embedded_alpha + ink 36 path).
+  // The avatar canvas is exactly that: 32-bit, transparent border, but with
+  // opaque white body-part backgrounds pasted inside that must be keyed away.
+  // A transparent border is NOT a reason to skip — only Flash bitmaps skip.
   if (mode === 'key') {
     const keyRgb = paletteIndex0Rgb(palette) ?? 0xffffff;
     let changed = false;
@@ -542,8 +549,17 @@ export function bakeModeForInk(ink: number): BakeMode | null {
 }
 
 // Director ink -> renderer blend mode: 33/34 add, 35/38 subtract, 37/40
-// lighten, 39/41 darken; everything else normal compositing.
-export function blendModeForInk(ink: number): 'normal' | 'add' | 'subtract' | 'lighten' | 'darken' {
+// LIGHTEST, 39 DARKEST; everything else normal compositing.
+//
+// LIGHTEST/DARKEST map to the core 'max'/'min' blend modes (GL MAX/MIN
+// blend equation). pixi's 'lighten'/'darken' live in the advanced-blend-modes
+// package, which renders through a filter that captures the back texture —
+// broken in pixi 8.19 (captures transparent black), so lighten/darken sprites
+// composite their source unchanged. The core GL MAX/MIN equation composites
+// per-channel against the actual framebuffer: a black/transparent source
+// pixel maxes to exactly the destination, which is the LIGHTEST semantics
+// the scrollbars rely on.
+export function blendModeForInk(ink: number): 'normal' | 'add' | 'subtract' | 'min' | 'max' {
   switch (ink) {
     case 33:
     case 34:
@@ -553,9 +569,9 @@ export function blendModeForInk(ink: number): 'normal' | 'add' | 'subtract' | 'l
       return 'subtract';
     case 37:
     case 40:
-      return 'lighten';
+      return 'max';
     case 39:
-      return 'darken';
+      return 'min';
     // 41 (Darken) is src * sprite-bgColor, baked into the texture at upload
     // (wall/floor wrappers tint via bgColor + ink 41) — NOT a GPU min, which
     // would blacken the pre-tinted pattern against the dark stage.

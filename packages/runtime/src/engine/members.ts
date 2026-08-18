@@ -57,6 +57,11 @@ export class Member {
   fileName?: string;
   // Persistent member.image surface (created lazily by the engine).
   image?: LImage;
+  // True once Lingo has WRITTEN into member.image (copyPixels/fill/draw). A
+  // plain bitmap member (no ink-9 mask) then displays its painted surface
+  // instead of the original raw PNG — the FUSE screen camera copies the
+  // cropped stage into member("fuse_screen").image every frame.
+  imagePainted = false;
   // member.color = rgb(...) store (text/field members).
   color?: LVal;
   // member.rect get/set (text-box rect).
@@ -74,6 +79,12 @@ export class Member {
   paletteRef?: LVal;
   // Generic text-member prop store (topSpacing, boxType, margins, ...).
   textProps?: Map<string, LVal>;
+  // Director chunk formatting: 1-based inclusive char ranges with
+  // font/fontStyle/color overrides (member.char[1..n].font = ... — the
+  // Balloon Manager bolds the speaker name inside the message). Attached to
+  // the TEXT: setMemberProp('text') clears it, like Director. Consumed by
+  // rasterizeTextMember to draw styled runs.
+  chunkStyles?: { from: number; to: number; font?: LVal; fontStyle?: LVal; color?: LVal }[];
   // Parsed shape definition (kind === 'shape').
   shape?: ShapeDef;
 

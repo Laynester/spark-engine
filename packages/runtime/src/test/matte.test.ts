@@ -106,6 +106,33 @@ test('transparent ink (1): exact-white key removes white even inside the art', (
   assert.equal(alphaAt(data, 5, 2, 2), 255);
 });
 
+test('key ink (1/36) still blanket-keys white on a transparent-bordered canvas (avatar regression)', () => {
+  // The avatar canvas is a 32-bit image with a TRANSPARENT border (the drawn
+  // body never reaches the edges) but the indexed body parts paste OPAQUE
+  // white backgrounds onto it, so the interior is white-filled around the
+  // colored art. The ink-36 key must remove that white — DirPlayer color-keys
+  // against sprite bgColor (white default) EVEN for 32-bit alpha bitmaps
+  // (rendering_gpu/webgl2/mod.rs, use_embedded_alpha + ink 36 path: "Plain
+  // 32-bit-with-alpha members still need the key so ink 36 can actually do
+  // its job"). A transparent border is NOT a reason to skip the key — doing
+  // so leaves the white box around every avatar in a room.
+  const { data, fill } = makeImage(9, 9);
+  for (let y = 0; y < 9; y++) {
+    for (let x = 0; x < 9; x++) fill(x, y, 255, 255, 255, 0); // transparent border
+  }
+  // opaque white fill block (the body part's pasted background), interior,
+  // with a colored body pixel inside it
+  for (let y = 2; y <= 6; y++) {
+    for (let x = 2; x <= 6; x++) fill(x, y, 255, 255, 255);
+  }
+  fill(4, 4, 40, 90, 180); // avatar body pixel
+  const changed = bakeEdgeBackground(data, 9, 9, 'key');
+  assert.ok(changed, 'white fill must be keyed even with a transparent border');
+  assert.equal(alphaAt(data, 9, 3, 3), 0, 'white fill pixel keyed to transparent');
+  assert.equal(alphaAt(data, 9, 4, 4), 255, 'colored body pixel survives');
+  assert.equal(alphaAt(data, 9, 0, 0), 0, 'transparent border untouched');
+});
+
 test('no matte when edges disagree (no 75% dominant color) -> bake is a no-op', () => {
   // 4x4 border: 4 red (top), 4 green (bottom), 2 blue (left), 2 yellow (right)
   // = 12 edge pixels, none reaching 75%; interior all dark. No white anywhere,
@@ -301,8 +328,9 @@ test('ink -> blend mode mapping (add pin 33 is additive, per user report)', () =
   assert.equal(blendModeForInk(34), 'add'); // add
   assert.equal(blendModeForInk(35), 'subtract'); // subtract pin
   assert.equal(blendModeForInk(38), 'subtract'); // subtract
-  assert.equal(blendModeForInk(37), 'lighten'); // lightest
-  assert.equal(blendModeForInk(39), 'darken'); // darkest
+  assert.equal(blendModeForInk(37), 'max'); // lightest -> core GL MAX (pixi advanced lighten is broken)
+  assert.equal(blendModeForInk(40), 'max'); // lightest
+  assert.equal(blendModeForInk(39), 'min'); // darkest -> core GL MIN
   assert.equal(blendModeForInk(0), 'normal');
   assert.equal(blendModeForInk(8), 'normal'); // matte: baked alpha, normal composite
   assert.equal(blendModeForInk(36), 'normal');

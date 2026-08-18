@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { availableParallelism } from 'node:os';
 import { Worker } from 'node:worker_threads';
-import { buildSparkBundle } from './index.js';
+import { buildCastSparkBundle, buildSparkBundle } from './index.js';
 import { listCastUnits, nodeFs } from './manifest.js';
 import type { BundleWork, BundleWorkError, BundleWorkResult } from './worker.js';
 
@@ -123,7 +123,9 @@ async function bundleAll(args: Args): Promise<void> {
     for (const unit of units) {
       const key = unit.group ? `${unit.group}/${unit.name}` : unit.name;
       try {
-        const { spark, manifest } = buildSparkBundle(root, [key]);
+        const built = buildCastSparkBundle(root, unit);
+        if (!built) throw new Error('cast directory has no files');
+        const { spark, manifest } = built;
         const file = fileFor(unit);
         mkdirSync(dirname(file), { recursive: true });
         writeFileSync(file, spark);
@@ -152,9 +154,8 @@ async function bundleAll(args: Args): Promise<void> {
       return;
     }
     const unit = queue[cursor++];
-    const key = unit.group ? `${unit.group}/${unit.name}` : unit.name;
     inflight++;
-    w.postMessage({ root, key } satisfies BundleWork);
+    w.postMessage({ root, unit } satisfies BundleWork);
   };
 
   const spawn = (): Worker => {

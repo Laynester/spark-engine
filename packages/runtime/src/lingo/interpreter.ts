@@ -47,6 +47,16 @@ export interface InterpreterHost extends MemberHost {
   getStage(): LStageRef;
   /** Persistent stage drawing surface (`(the stage).image`). */
   stageImage(): LImage;
+  /** The COMPOSITED scene as an image (Director `(the stage).image` reads are
+   *  the displayed stage), or null when no adapter can capture it. Consumed
+   *  when Lingo uses the stage image as a SOURCE (crop / copyPixels src) —
+   *  the FUSE screen camera and the Photo Interface camera shot. */
+  stageComposite?(): LImage | null;
+  /** Lingo wrote pixels into this image (copyPixels/fill/draw/setPixel). The
+   *  host marks the owning member's surface painted so a plain bitmap member
+   *  displays its live painted surface instead of the original raw bytes
+   *  (FUSE screen camera). Masked members (ink 9) keep the raw+mask path. */
+  imageMutated?(img: LImage): void;
   /** Stage background as a color object (`(the stage).bgColor`). */
   stageBgColor(): LVal;
   getThe(head: string, chain: TheSegment[]): LVal;
@@ -866,6 +876,21 @@ export class Interpreter {
         return;
       }
       case 'prop': {
+        // `tmember.char[1..n].font = v` — a property applied to a character
+        // range of a text member (Balloon Manager createballoonImg bolds the
+        // speaker name). Director applies the prop to the chunk: resolve the
+        // base member and route the range + prop to the member chunk-prop
+        // setter. Without this the chunk evaluated to a plain string and the
+        // set warned "cannot set font on Jem:".
+        if (target.obj.kind === 'chunk') {
+          const base = this.evalExpr(target.obj.obj, env);
+          if (base instanceof LMemberRefClass) {
+            const from = target.obj.from ? Math.round(asNum(this.evalExpr(target.obj.from, env))) : undefined;
+            const to = target.obj.to ? Math.round(asNum(this.evalExpr(target.obj.to, env))) : from;
+            this.host.setMemberChunkProp(base, target.obj.chunk, from, to, target.name, value);
+            return;
+          }
+        }
         const obj = this.evalExpr(target.obj, env);
         this.setPropValue(obj, target.name, value);
         if (obj instanceof LObjectClass) this.notePropFloat(obj, target.name, this.isFloatValue(value));
@@ -1513,6 +1538,15 @@ export class Interpreter {
   // ------------------------------------------------------------ image methods
 
   /** Director image.draw/fill/setPixel/crop — real RGBA painting. */
+  /** `(the stage).image` SOURCE reads must see the composited scene, not the
+   *  Lingo paint surface the Loading Bar fills (Director's stage image IS the
+   *  display). Any image that IS the stage image gets the adapter's renderer
+   *  readback substituted when one is available. */
+  private readStageImage(img: LImage): LImage {
+    if (img !== this.host.stageImage()) return img;
+    return this.host.stageComposite?.() ?? img;
+  }
+
   private imageMethod(img: LImage, name: string, args: LVal[]): LVal {
     const lower = name.toLowerCase();
     if (lower === 'duplicate') {
@@ -1520,7 +1554,10 @@ export class Interpreter {
     }
     if (lower === 'fill') {
       const region = this.imageRegion(img, args);
-      if (region) img.fillRect(region.x1, region.y1, region.x2, region.y2, this.imageColor(args));
+      if (region) {
+        img.fillRect(region.x1, region.y1, region.x2, region.y2, this.imageColor(args));
+        this.host.imageMutated?.(img);
+      }
       return img;
     }
     if (lower === 'draw') {
@@ -1540,6 +1577,7 @@ export class Interpreter {
         } else {
           img.drawRect(region.x1, region.y1, region.x2, region.y2, color, ls);
         }
+        this.host.imageMutated?.(img);
       }
       return img;
     }
@@ -1550,11 +1588,13 @@ export class Interpreter {
       } else {
         img.fillRect(asNum(args[0]), asNum(args[1]), asNum(args[0]) + 1, asNum(args[1]) + 1, color);
       }
+      this.host.imageMutated?.(img);
       return img;
     }
     if (lower === 'crop') {
       const region = this.imageRegion(img, args);
-      return region ? img.crop(region.x1, region.y1, region.x2, region.y2) : new LImageClass(0, 0);
+      const src = this.readStageImage(img);
+      return region ? src.crop(region.x1, region.y1, region.x2, region.y2) : new LImageClass(0, 0);
     }
     if (lower === 'getpixel') {
       // Director image.getPixel(h, v[, #integer]) / getPixel(point[, #integer])
@@ -1627,7 +1667,10 @@ export class Interpreter {
       // #blend: pct, #bgColor: color, #maskImage: img]). destRect may be a
       // 4-point QUAD list (Human Class flipHorizontal) — axis-aligned quads
       // map to a rect copy with flipH/flipV.
-      const src = args[0];
+      // `(the stage).image` as the SOURCE must be the composited scene (FUSE
+      // screen camera, Photo Interface cam shot), not the Lingo paint surface.
+      const srcArg = args[0];
+      const src = srcArg instanceof LImageClass ? this.readStageImage(srcArg) : srcArg;
       if (src instanceof LImageClass && args[2] instanceof LRectClass) {
         const params = args.find((a) => a instanceof LPropListClass) as LPropListClass | undefined;
         const ink = params ? Math.round(asNum(params.props.get('ink') ?? 0)) : 0;
@@ -1717,6 +1760,7 @@ export class Interpreter {
               flipV = pts[0].locV === maxY;
             } else {
               img.copyPixels(src, destRect, args[2], ink, blend, bgColor, mask, false, false, foreColor, fgExplicit, bgExplicit, { a, b, c, d, e, f });
+              this.host.imageMutated?.(img);
               return img;
             }
           } else {
@@ -1728,11 +1772,14 @@ export class Interpreter {
           return img;
         }
         img.copyPixels(src, destRect, args[2], ink, blend, bgColor, mask, flipH, flipV, foreColor, fgExplicit, bgExplicit);
+        this.host.imageMutated?.(img);
       }
       return img;
     }
     if (lower === 'setalpha') {
-      return this.imageSetAlpha(img, args);
+      const r = this.imageSetAlpha(img, args);
+      this.host.imageMutated?.(img);
+      return r;
     }
     if (lower === 'creatematte' || lower === 'createmask') {
       // C++ Drawing::createMatte: native-alpha sources -> alpha threshold
@@ -2081,6 +2128,18 @@ export class Interpreter {
     }
     if (obj instanceof LPropListClass) {
       obj.props.set(name, value);
+      return;
+    }
+    if (obj instanceof LColorClass) {
+      // `tBalloonColorDarken.red = tBalloonColor.red * 0.9` — color channels
+      // are settable in Director, clamped to 0-255 (Balloon Manager darkens
+      // bright bubble colors; a no-op left the bubble black on bots/pets).
+      // A channel write detaches the color from its palette index.
+      const clamp255 = (v: LVal): number => Math.max(0, Math.min(255, Math.round(asNum(v))));
+      if (lower === 'red') { obj.red = clamp255(value); obj.paletteIndex = undefined; return; }
+      if (lower === 'green') { obj.green = clamp255(value); obj.paletteIndex = undefined; return; }
+      if (lower === 'blue') { obj.blue = clamp255(value); obj.paletteIndex = undefined; return; }
+      this.host.warn(`cannot set ${name} on ${toLingoString(obj)}`);
       return;
     }
     if (obj instanceof LMemberRefClass) return this.host.setMemberProp(obj, name, value);

@@ -218,6 +218,37 @@ test('container directories expand into sub-cast bundles under the group', () =>
   );
 });
 
+test('a member-named dir holding casts is a grouping, not a cast member', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'habbo-bundle-'));
+
+  // A container (like the v31 hof_furni) whose top level has a `sounds`
+  // subdirectory that itself CONTAINS casts (the v31 sound-set grouping).
+  // `sounds` is a CAST_MEMBER_DIRS name, so the classifier must not treat
+  // the whole container as one lumped cast because of it.
+  const group = join(dir, 'hof_demo');
+  mkdirSync(join(group, 'furni_a'), { recursive: true });
+  writeFileSync(join(group, 'furni_a', '0001_script_Loop.ls'), '-- Cast member: Loop\n-- Type: Score\non exitFrame me\nend\n');
+  mkdirSync(join(group, 'sounds', 'sound_set_1'), { recursive: true });
+  writeFileSync(join(group, 'sounds', 'sound_set_1', '0002_bitmap_sound_set_1_small.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]));
+
+  const { manifest } = buildBundle(dir);
+  // Each nested cast is its own manifest cast; the container and the `sounds`
+  // grouping are never lumped.
+  assert.deepEqual(
+    manifest.casts.map((c) => c.name).sort(),
+    ['furni_a', 'sound_set_1'],
+  );
+  assert.equal(manifest.casts.find((c) => c.name === 'sound_set_1').members[0].file, 'hof_demo/sounds/sound_set_1/0002_bitmap_sound_set_1_small.png');
+
+  // A filter naming the container still selects every nested cast, including
+  // those under the member-named grouping.
+  const byGroup = buildBundle(dir, ['hof_demo']);
+  assert.deepEqual(
+    byGroup.manifest.casts.map((c) => c.name).sort(),
+    ['furni_a', 'sound_set_1'],
+  );
+});
+
 test('member names keep real underscores (non-script) and spaces (scripts)', () => {
   const dir = makeFixture();
   // Bitmap whose real cast name is "cloud_0_left" (Entry Cloud Class splits
