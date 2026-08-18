@@ -996,6 +996,65 @@ test('me.prop access walks the #ancestor chain (FUSE manager inheritance)', () =
   assert.equal(readBack.props.get('system.version'), '0.2.0');
 });
 
+test('handler in an ancestor reads its OWN property slot when a child shadows the name (Queue Public pAnimFrame)', () => {
+  const e = new DirectorEngine();
+  // Ancestor: Active Object Class — declares pAnimFrame, construct sets it to 0.
+  e.addScriptMember(
+    'Active Object Class',
+    'parent',
+    [
+      'property pClass',
+      'property pAnimFrame',
+      'on construct me',
+      '  pClass = "queue_tile2"',
+      '  pAnimFrame = 0',
+      'end',
+      'on solveMembers me, tName',
+      '  return pClass & "_" & pAnimFrame & "/" & me.pAnimFrame',
+      'end',
+    ].join('\n'),
+  );
+  // Child: Queue Public Class — declares pAnimFrame but never assigns it. The
+  // ancestor is constructed on its own instance (the real createActiveObject
+  // flow), so the 0 lives in the ANCESTOR's slot. childRead exists to pin the
+  // shadowing in the other direction: a handler in the CHILD reads the child's
+  // own (never-assigned) slot and gets VOID.
+  e.addScriptMember(
+    'Queue Public Class',
+    'parent',
+    [
+      'property pAnimFrame',
+      'on new me',
+      '  tAnc = script("Active Object Class").new()',
+      '  tAnc.construct()',
+      '  me.ancestor = tAnc',
+      '  return me',
+      'end',
+      'on childRead me',
+      '  return pAnimFrame',
+      'end',
+    ].join('\n'),
+  );
+  const script = e.resolveScript('Queue Public Class')!;
+  const obj = e.interp.newInstance(script, []);
+  // solveMembers is defined in Active Object Class and dispatched up the
+  // #ancestor chain. DirPlayer's bytecode getprop resolves BARE identifiers
+  // on the handler's OWNING instance in the chain (find_handler_level_instance)
+  // — so pAnimFrame must read 0 from Active Object's slot, not the child's
+  // never-assigned slot. The child's declared-but-VOID slot would make the
+  // member name end in a bare `_` and fail to resolve, exactly the park's
+  // 'Couldn't define members: queue_tile2'.
+  const name = e.interp.callObjectHandler(obj, 'solveMembers', ['s_queue_tile2']);
+  assert.equal(name, 'queue_tile2_0/');
+  // The explicit `me.prop` path (DirPlayer get_obj_prop) resolves on the
+  // OBJECT itself: the child shadows the name, so me.pAnimFrame reads the
+  // child's declared-but-never-assigned slot (VOID) — the string concat above
+  // proves bare and me. disagree exactly like DirPlayer.
+  // Sanity: a handler defined in the CHILD reads the child's own slot for the
+  // shadowed name (the handler-level instance is the child itself).
+  assert.equal(e.interp.callObjectHandler(obj, 'childRead', []), VOID);
+});
+
 test('castLib rename keeps the name index consistent', () => {
   const e = new DirectorEngine();
   e.addScriptMember('Loop', 'score', 'on exitFrame me\nend\n');

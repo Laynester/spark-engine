@@ -445,15 +445,42 @@ export class Interpreter {
     return null;
   }
 
-  /** The object in the ancestor chain declaring `name` as a property, if any. */
-  private instancePropOwnerLower(env: Env, _name: string, lower: string): LObject | null {
-    let me: LObject | null = env.me;
+  /** Director binds a property reference to the slot of the script where the
+   *  HANDLER is defined, never to the topmost declaration in the instance's
+   *  ancestor chain. When a child class and an ancestor both declare the same
+   *  property they are two distinct slots: Queue Public Class declares
+   *  `pAnimFrame` (never assigns it) and its ancestor Active Object Class
+   *  declares it too (construct sets it to 0). solveMembers, defined in Active
+   *  Object Class, must read Active Object's slot. Return the topmost chain
+   *  node whose script is the executing handler's script, or null so callers
+   *  fall back to walking from `me` (handlers in movie/frame scripts, which
+   *  are not part of the instance's chain, keep the old resolution). */
+  private propChainStart(me: LObject | null): LObject | null {
+    const want = this.currentScript;
+    if (!want || !me) return null;
+    let cur: LObject | null = me;
     let hops = 0;
-    while (me && me.script) {
-      if (this.propsLowerOf(me.script).has(lower)) return me;
+    while (cur && cur.script) {
+      if (cur.script === want) return cur;
       if (++hops > 32) return null;
-      const anc = me.props.get('ancestor');
-      me = anc instanceof LObjectClass ? anc : null;
+      const anc = cur.props.get('ancestor');
+      cur = anc instanceof LObjectClass ? anc : null;
+    }
+    return null;
+  }
+
+  /** The object in the ancestor chain declaring `name` as a property, if any.
+   *  The declaration walk starts at the executing handler's script node (see
+   *  propChainStart) so an ancestor handler reads its own slot when a child
+   *  shadows the same property name. */
+  private instancePropOwnerLower(env: Env, _name: string, lower: string): LObject | null {
+    let cur: LObject | null = this.propChainStart(env.me) ?? env.me;
+    let hops = 0;
+    while (cur && cur.script) {
+      if (this.propsLowerOf(cur.script).has(lower)) return cur;
+      if (++hops > 32) return null;
+      const anc = cur.props.get('ancestor');
+      cur = anc instanceof LObjectClass ? anc : null;
     }
     return null;
   }
@@ -1065,22 +1092,25 @@ export class Interpreter {
   }
 
   private instancePropOfLower(env: Env, name: string, lower: string): LVal | undefined {
-    let me: LObject | null = env.me;
+    // Start at the executing handler's script node (Director slot binding),
+    // so an ancestor handler reads its own slot when a child shadows the
+    // same property name (see propChainStart).
+    let cur: LObject | null = this.propChainStart(env.me) ?? env.me;
     let hops = 0;
-    while (me && me.script) {
-      if (this.propsLowerOf(me.script).has(lower)) {
+    while (cur && cur.script) {
+      if (this.propsLowerOf(cur.script).has(lower)) {
         const v =
-          me.props.has(name) ? me.props.get(name) : me.props.has(lower) ? me.props.get(lower) : undefined;
+          cur.props.has(name) ? cur.props.get(name) : cur.props.has(lower) ? cur.props.get(lower) : undefined;
         if (v === undefined) return VOID; // declared but never assigned → VOID, no warning
         // Float-typed property (assigned from float()/a float literal): the
         // read re-marks the value so a later division in THIS statement
         // float-divides — Director keeps the property as a Float datum.
-        if (this.objectFloatProps.get(me)?.has(lower)) return this.markFloatValue(v);
+        if (this.objectFloatProps.get(cur)?.has(lower)) return this.markFloatValue(v);
         return v;
       }
       if (++hops > 32) return undefined;
-      const anc = me.props.get('ancestor');
-      me = anc instanceof LObjectClass ? anc : null;
+      const anc = cur.props.get('ancestor');
+      cur = anc instanceof LObjectClass ? anc : null;
     }
     return undefined;
   }
@@ -2017,11 +2047,14 @@ export class Interpreter {
     }
     if (obj instanceof LObjectClass) {
       if (lower === 'ilk') return ilkOf(obj);
-      // Explicit `me.prop` access must walk the #ancestor chain exactly like
-      // bare identifiers do (e.g. `me.pItemList` where pItemList is declared
-      // on an ancestor class). Resolution is declaration-based on both read
-      // and write so they can never disagree: the first object in the chain
-      // whose script declares the property owns it.
+      // Explicit `obj.prop` access (e.g. `me.pItemList`) resolves on the
+      // OBJECT itself, walking up the #ancestor chain only when the object
+      // does not declare the name (DirPlayer get_obj_prop/set_obj_prop: the
+      // explicit path operates on the object datum, unlike bare identifiers
+      // which bind to the handler's owning instance — see propChainStart).
+      // Resolution is declaration-based on both read and write so they can
+      // never disagree: the first object in the chain whose script declares
+      // the property owns it.
       let cur: LObjectClass | null = obj;
       let hops = 0;
       while (cur) {
@@ -2106,7 +2139,10 @@ export class Interpreter {
     if (obj instanceof LObjectClass) {
       // Property declared on an ancestor goes to the declaring object, so a
       // parent instance sees `me.pX` writes through the chain. Mirrors the
-      // read path exactly (declaration-based ownership).
+      // read path exactly (declaration-based ownership): the explicit object
+      // path (get_obj_prop/set_obj_prop in DirPlayer) operates on the object
+      // itself, unlike bare identifiers which bind to the handler's owning
+      // instance (see propChainStart).
       let cur: LObjectClass | null = obj;
       let hops = 0;
       while (cur && cur.script) {
