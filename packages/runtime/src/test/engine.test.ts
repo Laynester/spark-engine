@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deflateSync, deflateRawSync } from 'node:zlib';
 import { DirectorEngine, cssFontFor } from '../engine/engine.js';
-import { BundleLoader, createBundleFromZipBytes, type BundleSource } from '../bundle/loader.js';
+import { fontBaseCandidates } from '../bundle/fontPaths.js';
+import { BundleLoader, castHintDir, createBundleFromZipBytes, type BundleSource } from '../bundle/loader.js';
 import { strToU8, zipSync } from 'fflate';
 import { LColor, LImage, LList, LMemberRef, LObject, LPoint, LPropList, LRect, LSymbol, VOID, duplicateValue, fontStyleFlags, PropPairs, type LVal } from '../lingo/values.js';
 import { normalizeTextLines, parseShapeText, parsePaletteBytes, Member, CastLib } from '../engine/members.js';
@@ -8086,4 +8087,65 @@ end
   assert.equal(e.globalGet('gWindowCount'), 1);
   const bad = e.logs.filter((l) => l.includes('unresolved') || l.includes('unsupported'));
   assert.deepEqual(bad, [], 'stopMovie path must not warn');
+});
+
+test('fontBaseCandidates: flat layout resolves from the movie dir itself', () => {
+  // Flat layout: movie at casts/habbo.spark, manifest font rel is
+  // "hh_interface/fonts/…" — the movie dir IS the casts root.
+  const candidates = fontBaseCandidates('http://x/casts/');
+  assert.deepEqual(candidates, ['http://x/casts/', 'http://x/']);
+  assert.equal(
+    new URL('hh_interface/fonts/0001_Volter_400_0.ttf', candidates[0]).href,
+    'http://x/casts/hh_interface/fonts/0001_Volter_400_0.ttf',
+  );
+});
+
+test('fontBaseCandidates: multiversion layout walks up to the casts root', () => {
+  // Multiversion layout: movie at casts/31/habbo.spark, manifest font rel is
+  // "31/hh_interface/fonts/…" (group-prefixed, rooted at casts/) — the movie
+  // dir alone yields the doubled "31/31/…" URL; the casts root is one up.
+  const candidates = fontBaseCandidates('http://x/casts/31/');
+  assert.deepEqual(candidates, ['http://x/casts/31/', 'http://x/casts/', 'http://x/']);
+  // The movie-dir URL is the bug (31/31/hh_interface); the casts-root base
+  // resolves to where the bundler actually ships the font file.
+  assert.equal(
+    new URL('31/hh_interface/fonts/0001_Volter_700_0.ttf', candidates[0]).href,
+    'http://x/casts/31/31/hh_interface/fonts/0001_Volter_700_0.ttf',
+  );
+  assert.equal(
+    new URL('31/hh_interface/fonts/0001_Volter_700_0.ttf', candidates[1]).href,
+    'http://x/casts/31/hh_interface/fonts/0001_Volter_700_0.ttf',
+  );
+});
+
+test('fontBaseCandidates: nested containers keep their group below the version', () => {
+  // hof_furni casts under a version: rel "31/hof_furni/hh_x/fonts/…", shipped
+  // at casts/31/hof_furni/hh_x/fonts/… — the casts root base resolves it.
+  const candidates = fontBaseCandidates('http://x/casts/31/');
+  assert.equal(
+    new URL('31/hof_furni/hh_x/fonts/0001_Volter_400_0.ttf', candidates[1]).href,
+    'http://x/casts/31/hof_furni/hh_x/fonts/0001_Volter_400_0.ttf',
+  );
+  // Never walks past the origin.
+  assert.ok(candidates.every((c) => c.startsWith('http://x/')), 'candidates stay under the origin');
+});
+
+test('castHintDir: relative preload URLs resolve against the movie dir', () => {
+  // v31's untouched config: dynamic.download.url="hof_furni/" — the relative
+  // hint must resolve against the movie dir so the nested container lookup
+  // finds casts/31/hof_furni/<furni>.spark instead of dying on an invalid URL.
+  assert.equal(
+    castHintDir('hof_furni/hh_furni_xx_360.cct', 'http://x/casts/31/'),
+    'http://x/casts/31/hof_furni/',
+  );
+  // A bare-name hint (no directory) resolves to the movie dir itself.
+  assert.equal(castHintDir('hh_furni_xx_360.cct?randp=1', 'http://x/casts/31/'), 'http://x/casts/31/');
+});
+
+test('castHintDir: absolute hints pass through unchanged', () => {
+  // v14's hand-tuned base is absolute — the query is dropped, the path kept.
+  assert.equal(
+    castHintDir('http://x/casts/14/hof_furni/hh_furni_xx_360.cct?randp=1', 'http://x/casts/14/'),
+    'http://x/casts/14/hof_furni/',
+  );
 });

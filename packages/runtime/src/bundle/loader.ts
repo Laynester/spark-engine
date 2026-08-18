@@ -30,6 +30,24 @@ export interface BundleSource {
   fetchBundle(name: string, onProgress?: (soFar: number, total: number) => void, urlHint?: string): Promise<Uint8Array | null>;
 }
 
+/** Resolve a cast-preload URL hint down to its directory. A RELATIVE hint
+ *  (v31's `dynamic.download.url=hof_furni/` — the original hotel config) is
+ *  relative to the movie's directory, so it must be resolved against
+ *  `movieDir` first or the nested container lookup misses (the v31 furniture
+ *  bundles live at casts/31/hof_furni/<furni>.spark). An absolute hint (v14's
+ *  hand-tuned `http://…/casts/14/` base) passes through unchanged. */
+export function castHintDir(urlHint: string, movieDir: string): string {
+  const q = urlHint.indexOf('?');
+  let clean = q >= 0 ? urlHint.slice(0, q) : urlHint;
+  try {
+    clean = new URL(clean, movieDir).href;
+  } catch {
+    // Not a parseable URL at all — leave as-is; the fetch attempts below will
+    // fail and fall through to the movie dir.
+  }
+  return clean.slice(0, clean.lastIndexOf('/') + 1);
+}
+
 // Unpack a zip-format bundle (legacy bundler output).
 export function createBundleFromZipBytes(bytes: Uint8Array): BundleData {
   const unzipped = unzipSync(bytes);

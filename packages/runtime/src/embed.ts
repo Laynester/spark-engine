@@ -1,4 +1,5 @@
-import { BundleLoader, type BundleSource } from './bundle/loader.js';
+import { BundleLoader, castHintDir, type BundleSource } from './bundle/loader.js';
+import { fontBaseCandidates } from './bundle/fontPaths.js';
 import { DirectorEngine } from './engine/engine.js';
 import { WebAudioPlayer } from './engine/audio.js';
 import { PixiStage } from './stage/pixi.js';
@@ -200,7 +201,11 @@ export class SparkElement extends SparkBase {
   }
 
   // Fetch + register the cast-bundled TTF fonts (FontFace), one per
-  // (family, weight). Paths in the manifest are relative to the movie dir.
+  // (family, weight). Paths in the manifest are rooted at the CASTS output
+  // dir (they carry the version/group prefix, e.g. "31/hh_interface/fonts/…"
+  // for the multiversion layout), while the movie lives one level down — so
+  // resolve against the movie dir first (flat layout), then walk up toward
+  // the casts root until the file actually exists.
   private async loadFonts(engine: DirectorEngine): Promise<void> {
     const movieDir = engine.moviePath.endsWith('/') ? engine.moviePath : engine.moviePath + '/';
     const pending: Promise<void>[] = [];
@@ -212,7 +217,7 @@ export class SparkElement extends SparkBase {
         this._fontSeen.add(key);
         pending.push((async () => {
           try {
-            const url = new URL(rel, movieDir);
+            const url = await resolveFontUrl(rel, movieDir);
             const bytes = await fetchBytes(url);
             const ab = new ArrayBuffer(bytes.byteLength);
             new Uint8Array(ab).set(bytes);
@@ -282,14 +287,11 @@ function makeSource(movieUrl: URL): BundleSource {
   return {
     async fetchBundle(name: string, onProgress?: (soFar: number, total: number) => void, urlHint?: string): Promise<Uint8Array | null> {
       // http://x/casts/hof_furni/hh_x.cct?randp=1 -> http://x/casts/hof_furni/
-      // (strip the randp query BEFORE the directory cut so a '/' inside the
-      // query can't break the split).
+      // (a relative hint like v31's "hof_furni/…" resolves against the movie
+      // dir first; the query is stripped before the directory cut so a '/'
+      // inside the query can't break the split).
       let hintDir = '';
-      if (urlHint) {
-        const q = urlHint.indexOf('?');
-        const clean = q >= 0 ? urlHint.slice(0, q) : urlHint;
-        hintDir = clean.slice(0, clean.lastIndexOf('/') + 1);
-      }
+      if (urlHint) hintDir = castHintDir(urlHint, dir);
       const dirs = [hintDir, dir].filter(Boolean);
       for (const d of dirs) {
         for (const ext of ['spark', 'zip']) {
@@ -333,6 +335,39 @@ async function fetchBytes(url: URL, onProgress?: (soFar: number, total: number) 
     return out;
   }
   return new Uint8Array(await res.arrayBuffer());
+}
+
+// TrueType/OpenType magic signatures (first 4 bytes): 0x00010000, 'OTTO',
+// 'true', 'typ1'. Anything else — HTML from a dev-server SPA fallback, a
+// directory listing, an error page — is not a font and must not be accepted.
+function isFontBytes(b: Uint8Array): boolean {
+  if (b.length < 4) return false;
+  const d = new DataView(b.buffer, b.byteOffset, 4);
+  const u32 = d.getUint32(0);
+  return u32 === 0x00010000 || u32 === 0x4f54544f || u32 === 0x74727565 || u32 === 0x74797031;
+}
+
+// Resolve a manifest font path to a fetchable URL: try each fontBaseCandidate
+// (movie dir first, then parents up to the casts root) and return the first
+// that actually serves a FONT payload. Dev servers answer 200 with the SPA
+// index.html for missing paths, so a plain res.ok is not enough — the body's
+// magic bytes must be a TTF/OTF signature. On a network error (no server,
+// blocked) or when nothing serves, fall back to the movie-dir URL so the
+// caller's error/warn path reports the primary location.
+async function resolveFontUrl(rel: string, movieDir: string): Promise<URL> {
+  for (const base of fontBaseCandidates(movieDir)) {
+    const url = new URL(rel, base);
+    let res: Response;
+    try {
+      res = await fetch(url, { method: 'GET' });
+    } catch {
+      // Network error (no server, blocked) — walking up will not help.
+      return new URL(rel, movieDir);
+    }
+    if (!res.ok) continue;
+    if (isFontBytes(new Uint8Array(await res.arrayBuffer()))) return url;
+  }
+  return new URL(rel, movieDir);
 }
 
 // Derive CSS font family + weight from a bundled font filename
