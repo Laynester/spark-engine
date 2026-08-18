@@ -1,6 +1,6 @@
 {
   "name": "@spark/bundler",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Bundles exported Director casts into .spark/.zip archives for the Lingo runtime. Install globally: npm i -g @spark/bundler, then `spark bundle <exported> <out-dir>`.",
   "main": "dist/index.js",
