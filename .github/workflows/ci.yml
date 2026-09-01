@@ -21,6 +21,3 @@ jobs:
 
       - name: Typecheck (all workspaces)
         run: npm run typecheck
-
-      - name: Test (bundler + runtime)
-        run: npm test

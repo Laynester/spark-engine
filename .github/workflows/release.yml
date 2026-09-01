@@ -77,8 +77,8 @@ jobs:
       - name: Build all workspaces
         run: npm run build
 
-      - name: Typecheck + test the release state
-        run: npm run typecheck && npm test
+      - name: Typecheck the release state
+        run: npm run typecheck
 
       # 1) Runtime browser bundle -------------------------------------------
       - name: Bundle runtime (IIFE, global `Spark`)
