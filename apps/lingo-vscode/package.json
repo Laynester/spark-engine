@@ -2,7 +2,7 @@
   "name": "lingo-vscode",
   "displayName": "Lingo (Director)",
   "description": "Lingo language support — syntax highlighting, diagnostics, completions and hover via a language server that reuses the Habbo runtime's own parser.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "habbo-sw",
   "license": "MIT",
   "type": "commonjs",
