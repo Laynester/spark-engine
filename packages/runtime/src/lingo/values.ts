@@ -510,16 +510,20 @@ export class LImage {
     const maskH = mask ? Math.max(0, Math.round(mask.height)) : 0;
 
     // A palette-carrying source's background — palette index 0 — is
-    // transparent in the copy regardless of ink. Key it EDGE-CONNECTED via a
-    // whole-image flood (not a blanket RGB key) so enclosed same-RGB art
-    // (cloud puffs, the avatar's white body/hair) survives. Ink 36 keeps its
-    // blanket bg key below (gated to indexed depth).
+    // transparent ONLY under the inks that key it: MATTE (8) via an
+    // EDGE-CONNECTED whole-image flood (so enclosed same-RGB art — cloud
+    // puffs, the avatar's white body/hair — survives), and BACKGROUND
+    // TRANSPARENT (36) via the blanket bg key below. Every other ink copies
+    // verbatim — DirPlayer drawing.rs keys only at ink 2/36 (bgColor) and ink
+    // 8 (edge-flood); its indexed ink-0 path is a raw copy. This matters for
+    // the chat balloons: the bubble pieces are white-rect fragments whose
+    // white body is edge-connected WITHIN each piece, and the corpus pastes
+    // them at ink 0 (Chat_Bubble renderBackground) before the whole balloon
+    // gets matted at the SPRITE (ink 8). Keying them at copy time ate the
+    // entire white body — each piece's white is connected to its own edge.
     const srcPalette = src.palette;
     const hasPalette = srcPalette && srcPalette.length > 0;
-    const matteMask =
-      ink === 8 || (hasPalette && ink !== 36)
-        ? matteRegionMask(s, sw, sh, sx0, sy0, srcW, srcH, srcPalette, src.indices)
-        : null;
+    const matteMask = (ink === 8 || ink === 7) ? matteRegionMask(s, sw, sh, sx0, sy0, srcW, srcH, srcPalette, src.indices) : null;
     // The old ink-36 near-white RGB matte is gone — the exporter blanket-keys
     // palette index 0 into every indexed PNG, so a runtime near-white
     // heuristic keyed the avatar eye whites away. Only palette-less 32-bit
@@ -993,6 +997,9 @@ const INTEGER_KEY_RE = /^\d+$/;
 const IDENT_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function propKeyToString(k: string): string {
+  // Composite keys (point/rect) print as their original value form.
+  const raw = rawKeyOf(k);
+  if (raw !== k) return toLingoString(raw);
   if (INTEGER_KEY_RE.test(k)) return k;
   if (IDENT_KEY_RE.test(k)) return '#' + k;
   return JSON.stringify(k);
@@ -1042,7 +1049,36 @@ export function keyOf(v: LVal): string | undefined {
   if (v instanceof LSymbol) return v.name;
   if (typeof v === 'string') return v;
   if (typeof v === 'number') return String(v);
+  // Composite keys (point/rect) encode to a NUL-prefixed string so the
+  // proplist's string-keyed Map surface can hold them (the Landscape Manager
+  // 0034 keys its turn-point list with `setaProp(point(...), tside)`).
+  // rawKeyOf decodes them back when the key is read (getPropAt returns the
+  // original point so `tpoint.locH` works in Landscape Cloud 0038). The NUL
+  // prefix cannot collide with a real string key.
+  if (v instanceof LPoint) return `\u0000point:${v.locH},${v.locV}`;
+  if (v instanceof LRect) return `\u0000rect:${v.left},${v.top},${v.right},${v.bottom}`;
+  // (rawKeyOf slices 7/6 chars past these prefixes — keep them in sync.)
   return undefined;
+}
+
+// Reverse of keyOf for composite keys: a proplist key stored as the encoded
+// string is returned as its original point/rect value; plain string keys
+// come back unchanged (getPropAt on symbol-keyed lists must stay the raw
+// string — wrapping string keys in LSymbol corrupted FUSE task names).
+export function rawKeyOf(key: string): LVal {
+  // '\u0000point:' is 7 chars (NUL + "point:"), '\u0000rect:' is 6 (NUL +
+  // "rect:") — slicing one past the prefix eats the first coordinate digit.
+  if (key.startsWith('\u0000point:')) {
+    const parts = key.slice(7).split(',');
+    if (parts.length === 2) return new LPoint(Number(parts[0]), Number(parts[1]));
+  }
+  if (key.startsWith('\u0000rect:')) {
+    const parts = key.slice(6).split(',');
+    if (parts.length === 4) {
+      return new LRect(Number(parts[0]), Number(parts[1]), Number(parts[2]), Number(parts[3]));
+    }
+  }
+  return key;
 }
 
 // Parse a Director fontStyle value ([#plain] / [#bold] / [#italic] /
@@ -1105,12 +1141,16 @@ export function duplicateValue(v: LVal): LVal {
   if (v instanceof LImage) {
     // image.duplicate() must keep palette + depth — the paletteRef remap
     // needs the source palette to recover pixel indices, and flipH/flipV
-    // re-create via image(w,h,depth,paletteRef).
+    // re-create via image(w,h,depth,paletteRef). Raw indices ride along so a
+    // later `image.paletteRef = member(...)` recolors by TRUE index (the red
+    // window frame pieces: index 153 is black in the member's placeholder
+    // palette but (199,60,60) in window.red.palette).
     const d = new LImage(v.width, v.height);
     if (v.data) d.data = v.data.slice();
     d.palette = v.palette;
     d.paletteRef = v.paletteRef;
     d.depth = v.depth;
+    if (v.indices) d.indices = v.indices.slice();
     return d;
   }
   return v;

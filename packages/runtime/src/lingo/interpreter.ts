@@ -1,7 +1,7 @@
 import type { Expr, Handler, Script, Stmt, TheSegment } from './ast.js';
 import { parseExpr } from './parser.js';
 import {
-  asNum, colorFrom, duplicateValue, ilkOf, isTruthy, keyOf, LEMPTY, lingoAdd, lingoConcat,
+  asNum, colorFrom, duplicateValue, ilkOf, isTruthy, keyOf, rawKeyOf, LEMPTY, lingoAdd, lingoConcat,
   lingoEquals, lingoListCompare, lingoMod, lingoMultiply, lingoNegate, lingoSubtract, toLingoString, VOID,
   type LImage, type LList, type LMemberRef, type LObject, type LPoint, type LPropList,
   type LRect, type LSpriteRef, type LStageRef, type LVal, type LWindowRef,
@@ -231,7 +231,6 @@ export class Interpreter {
   private warnedUndefined = new Set<string>();
   /** (script, handler) pairs already warned as missing — silence the rest. */
   private missingHandlerWarned = new Set<string>();
-
   /** Lowercased script-level `global` names, computed once per script (parsed
    *  once per cast load, never mutated) — callHandlerInner builds the per-call
    *  Env from this instead of lowercasing the array on every call. */
@@ -492,7 +491,6 @@ export class Interpreter {
   }
 
   callObjectHandler(obj: LObject, name: string, args: LVal[]): LVal {
-    // Method dispatch walks the ancestor chain (Lingo #ancestor inheritance).
     const found = this.findHandler(obj, name);
     if (found) {
       return this.callHandler(found.script, found.handler, args, obj, NO_GLOBALS);
@@ -549,11 +547,28 @@ export class Interpreter {
     }
   }
 
+  /** U145 diag: last assign target rendered as Lingo-ish source, so the
+   *  "cannot index-assign on VOID" warn names the failing variable. */
+  private lastAssignSrc = '';
+
+  private exprSrc(e: Expr): string {
+    switch (e.kind) {
+      case 'ident': return e.name;
+      case 'prop': return `${this.exprSrc(e.obj)}.${e.name}`;
+      case 'index': return `${this.exprSrc(e.obj)}[${this.exprSrc(e.index)}]`;
+      case 'num': return String(e.value);
+      case 'str': return JSON.stringify(e.value);
+      case 'symbol': return `#${e.name}`;
+      default: return e.kind;
+    }
+  }
+
   execStmt(stmt: Stmt, env: Env): void {
     switch (stmt.kind) {
       case 'assign': {
         const v = this.evalExpr(stmt.value, env);
         this.noteFloatAssign(stmt.target, stmt.value);
+        this.lastAssignSrc = this.exprSrc(stmt.target);
         this.execAssign(stmt.target, v, env);
         return;
       }
@@ -1376,6 +1391,13 @@ export class Interpreter {
         }
         return 0;
       }
+      // U145: `point.duplicate()` — the Human Bodypart update does
+      // `tLocFix = pBody.pLocFix.duplicate()` (pLocFix is point(30,-10)
+      // while laying). Without this the point branch returned VOID for every
+      // method but inside, the generic duplicate fallback below was
+      // unreachable, and the whole lay +30/-10 part offset was lost — the
+      // laying avatar sank into the bed with a clipped head.
+      if (pl === 'duplicate') return duplicateValue(obj);
       return VOID;
     }
     // Director duplicate() copies ANY value — duplicateValue deep-copies
@@ -1482,10 +1504,13 @@ export class Interpreter {
         // Director: getPropAt(index) returns the *key* at that position
         // (getPropAt(2) on [#breakfast:"Waffles", #lunch:"Tofu Burger"] ->
         // #lunch). Keys are stored normalized as strings (keyOf), so return
-        // the raw key — wrapping it in LSymbol corrupted string keys.
+        // the raw key — wrapping string keys in LSymbol corrupted them. Keys
+        // stored from POINT/RECT values decode back to the original object
+        // (Landscape Cloud 0038 reads `tpoint = pTurnPointList.getPropAt(i)`
+        // then `tpoint.locH`).
         const i = Math.round(asNum(args[0]));
         const keys = [...pl.props.keys()];
-        return i >= 1 && i <= keys.length ? keys[i - 1] : VOID;
+        return i >= 1 && i <= keys.length ? rawKeyOf(keys[i - 1]) : VOID;
       }
       case 'deleteprop':
         if (key !== undefined) pl.props.delete(key);
@@ -1523,11 +1548,12 @@ export class Interpreter {
         return pl.props.size;
       case 'getone': {
         // Director: proplist.getOne(value) returns the KEY whose value matches
-        // (raw key — string keys stay strings, matching getPropAt), or 0 when
-        // not found. Object Manager / Manager Template existence checks gate
-        // on `getOne(tid) <> 0` / `getOne(tid) > 0`.
+        // (raw key — string keys stay strings, matching getPropAt; composite
+        // keys decode back to the original point/rect), or 0 when not found.
+        // Object Manager / Manager Template existence checks gate on
+        // `getOne(tid) <> 0` / `getOne(tid) > 0`.
         for (const [k, v] of pl.props) {
-          if (lingoEquals(v, args[0] ?? VOID)) return k;
+          if (lingoEquals(v, args[0] ?? VOID)) return rawKeyOf(k);
         }
         return 0;
       }
@@ -1811,7 +1837,33 @@ export class Interpreter {
       this.host.imageMutated?.(img);
       return r;
     }
-    if (lower === 'creatematte' || lower === 'createmask') {
+    if (lower === 'createmask') {
+      // Director image.createMask() — a 1-bit luminance mask, NOT an alias
+      // for createMatte (DirPlayer bitmap.rs splits them the same way). Dark
+      // mask pixels are opaque (source shows through), light ones transparent
+      // (destination stays), thresholded at 50% luminance. Habbo v31's
+      // Catalogue Spaces landscape preview relies on it to mask the window
+      // glass out of catalog_spaces_window — the createMatte flood can't
+      // reach the interior glass, so the 5076 magenta placeholder pixels
+      // pasted onto the preview instead (pink window).
+      const w = Math.max(0, Math.round(img.width));
+      const h = Math.max(0, Math.round(img.height));
+      const mask = new LImageClass(w, h);
+      const m = mask.ensure();
+      const s = img.ensure();
+      for (let i = 0; i < w * h; i++) {
+        const o = i * 4;
+        // Rec.601 luma, matching DirPlayer's 50% cut (mask.rs create_mask).
+        const luma = (s[o] * 299 + s[o + 1] * 587 + s[o + 2] * 114) / 1000;
+        m[o] = 255;
+        m[o + 1] = 255;
+        m[o + 2] = 255;
+        m[o + 3] = luma < 128 ? 255 : 0;
+      }
+      mask.dirty = true;
+      return mask;
+    }
+    if (lower === 'creatematte') {
       // C++ Drawing::createMatte: native-alpha sources -> alpha threshold
       // matte; fully-opaque sources -> edge-connected flood-fill matte. The
       // returned mask is alpha-keyed so copyPixels' #maskImage consumes it
@@ -1901,9 +1953,15 @@ export class Interpreter {
             }
           }
         }
+        // Matte polarity = the mask's WHITE is the keyed background (an 8-bit
+        // white-backed matte). A mostly-white edge marks it even when NOTHING
+        // was drawn on it: an all-white mask (empty Writer text -> fakeAlphaRender
+        // builds a mask with no glyph pixels) must key to alpha 0 everywhere,
+        // not fall through to "no polarity" and flood alpha 255 over a never-
+        // painted RGB 0,0,0 buffer (the solid black bar under empty motto text).
         mattePolarity =
           hasTransparency ||
-          (hasDark && edgeTotal > 0 && edgeWhite * 4 >= edgeTotal * 3) ||
+          (edgeTotal > 0 && edgeWhite * 4 >= edgeTotal * 3) ||
           (cornerCount > 0 && whiteCorners === cornerCount && hasDark);
       }
       const d = img.ensure();
@@ -1933,6 +1991,7 @@ export class Interpreter {
    *  matte white). */
   private colorMethod(c: LColorClass, name: string, _args: LVal[]): LVal {
     const lower = name.toLowerCase();
+    if (lower === 'duplicate') return duplicateValue(c);
     if (lower === 'hexstring') {
       const hex = (n: number) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0').toUpperCase();
       return `#${hex(c.red)}${hex(c.green)}${hex(c.blue)}`;
@@ -1998,16 +2057,38 @@ export class Interpreter {
     }
     if (typeof obj === 'string') {
       // Director: string.length / string.ilk (FUSE obfuscate/deobfuscate,
-      // chars(), and removeCastLoadInstance's `tFile.ilk <> #string` gate).
+      // chars(), and removeCastLoadInstance's `tFile.ilk <> #string` gate),
+      // plus the .integer/.float chunk properties (leading-number parse;
+      // "3.9".integer = 3, no rounding — unlike the integer() function).
       if (lower === 'length') return obj.length;
       if (lower === 'ilk') return ilkOf(obj);
+      if (lower === 'integer') {
+        const m = /^[+-]?\d+/.exec(obj.trim());
+        return m ? parseInt(m[0], 10) : VOID;
+      }
+      if (lower === 'float') {
+        const m = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/.exec(obj.trim());
+        return m ? Number(m[0]) : VOID;
+      }
       return VOID;
     }
-    if (typeof obj === 'number' || obj instanceof LSymbol) {
+    if (typeof obj === 'number') {
       // Director: 0.ilk → #integer, 1.5.ilk → #float, #foo.ilk → #symbol.
       // FUSE gates depend on these: registerListener's `tid.ilk <> #symbol`
       // (header ids default to #info/#mus symbols) and setLogMode's
-      // `tMode.ilk <> #integer`.
+      // `tMode.ilk <> #integer`. .integer/.float are string-chunk reads that
+      // Director autoboxes for numbers: Room Handler 0005:1000 builds the
+      // roller-slide command string with `tContainsObjects.integer`, and
+      // Active Object 0003:222 reads `pDestLoc[1].integer`. A VOID here
+      // dropped the "0" chunk from "sld X,Y,H 0 <t>", so word[4] read ''
+      // and pMoveStart became '', making float(now - '')/pMoveTime ≈ 3e9
+      // (clamped to 1.0) — instant dest snap on the first frame.
+      if (lower === 'ilk') return ilkOf(obj);
+      if (lower === 'integer') return Math.trunc(obj);
+      if (lower === 'float') return obj;
+      return VOID;
+    }
+    if (obj instanceof LSymbol) {
       if (lower === 'ilk') return ilkOf(obj);
       return VOID;
     }
@@ -2193,12 +2274,21 @@ export class Interpreter {
         obj.paletteRef = value;
         // Director remaps an 8-bit image's pixels through the palette it
         // points at (the messenger's `#palette: "interface palette_messenger"`
-        // turns its teal chrome gold). Indices are recovered by matching each
-        // RGB against the image's source palette, then taking that index from
-        // the target table.
+        // turns its teal chrome gold; the red window frame's 9-slice pieces
+        // carry indices into a PLACEHOLDER member palette and get their real
+        // colors — index 153 -> window.red.palette[153] = (199,60,60) — only
+        // from the assigned palette). Recolor by TRUE palette index when the
+        // image carries its raw indices (exact — several indices share an RGB,
+        // e.g. all the piece's black entries, so the RGB reverse-lookup below
+        // collapses them onto one index); otherwise recover each index by
+        // matching the RGB against the image's source palette.
         const target = this.host.resolvePaletteTable(value);
         if (target) {
-          obj.remapPalette(target);
+          if (obj.indices && obj.indices.length >= Math.max(0, Math.round(obj.width)) * Math.max(0, Math.round(obj.height))) {
+            obj.remapPaletteByIndices(obj.indices, target);
+          } else {
+            obj.remapPalette(target);
+          }
           // Members without a .pal companion have RGB baked by the export, so
           // remapPalette no-ops and the image stays palette-less; the ink-8
           // matte then falls back to the pixel-(0,0) heuristic and black/gray
@@ -2366,6 +2456,16 @@ export class Interpreter {
       else if (i === 4) obj.bottom = asNum(value);
       return;
     }
+    if (obj instanceof LPointClass) {
+      // Director: `p[1]`/`p[2]` read AND write locH/locV. The Landscape
+      // Cloud's updateAnim scrolls clouds with `pLoc[1] = pLoc[1] + 1` and
+      // `pLoc[2] = me.getLocV(pLoc[1])`; without the write case the Animation
+      // Manager spammed a per-frame "cannot index-assign on point(...)" warn.
+      const i = Math.round(asNum(index));
+      if (i === 1) obj.locH = asNum(value);
+      else if (i === 2) obj.locV = asNum(value);
+      return;
+    }
     if (obj instanceof LObjectClass) {
       const key = keyOf(index);
       if (key !== undefined) {
@@ -2388,7 +2488,7 @@ export class Interpreter {
       }
       return;
     }
-    this.host.warn(`cannot index-assign on ${toLingoString(obj)} [${this.callTrail.slice(-4).join(' <- ')}]`);
+    this.host.warn(`cannot index-assign on ${toLingoString(obj)} (${this.lastAssignSrc}) [${this.callTrail.slice(-4).join(' <- ')}]`);
   }
 
   // ------------------------------------------------------------ chunks

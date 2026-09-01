@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, blendModeForInk, matteRegionMask, matteSpriteHitTest, tintSpriteBackground } from '../stage/matte.js';
+import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, blendModeForInk, matteRegionMask, matteSpriteHitTest, SUBTRACT_BLEND_MODE, tintSpriteBackground, tintSpriteDarken } from '../stage/matte.js';
 
 /** Build an RGBA buffer; fill(x, y, r, g, b, a) default opaque white. */
 function makeImage(width: number, height: number): { data: Uint8ClampedArray; fill: (x: number, y: number, r: number, g: number, b: number, a?: number) => void } {
@@ -225,8 +225,11 @@ test('ink -> bake mode mapping (Director id::InkMode)', () => {
   // DARKEN (41): the visualizer wrapper composites a near-white pattern and
   // the sprite tints it by bgColor (multiply) at upload — the GPU must NOT
   // min against the stage, or the tinted floor blackens behind the dark stage.
-  // (The raw mapping still labels 41 'matte' — pixi's bakeForChannel gates the
-  // white-bake to inks 1/8/36, so 41 goes through tint-only in practice.)
+  // The sprite-level matte fires too: the catalogue Spaces floor/wall preview
+  // elements are ink-41 sprites whose buffers feedImage white-fills before the
+  // tinted pattern is pasted — DirPlayer mattes ink-41 sprites (should_matte_
+  // sprite(41)), so the edge-connected white fill must go transparent or it
+  // covers the previews stacked behind it.
   assert.equal(bakeModeForInk(41), 'matte');
   assert.equal(blendModeForInk(41), 'normal');
   assert.equal(bakeModeForInk(38), 'matte'); // subtract
@@ -234,6 +237,124 @@ test('ink -> bake mode mapping (Director id::InkMode)', () => {
   assert.equal(bakeModeForInk(39), 'matte'); // darkest
   assert.equal(bakeModeForInk(40), 'matte'); // lighten
   assert.equal(bakeModeForInk(41), 'matte'); // darken
+});
+
+test('ink 7 (Not Ghost) indexed art: matte floods key, then non-key pixels are discarded (terrace exit mask)', () => {
+  // dew_exitmaski: a black wedge (index 255) on a white field (index 0), ink 7
+  // with no authored bgColor. The key falls back to the art's top-left pixel
+  // (white): the matte floods the edge-connected white field, then the shader
+  // discards the non-key black wedge — the clickable GOAWAY hotspot renders
+  // FULLY transparent. A white pocket sealed inside the wedge survives (and is
+  // the only thing Not Ghost ever shows).
+  const W = 6, H = 6;
+  const palette = [[255, 255, 255], [0, 0, 0]]; // 0 = white, 1 = black
+  const { data, fill } = makeImage(W, H);
+  const indices = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      // (0,0) is white field; a 3x3 black block sits at bottom-right with one
+      // white pocket SEALED inside it (the only thing Not Ghost ever shows).
+      const black = x >= 3 && y >= 3 && !(x === 4 && y === 4);
+      indices[y * W + x] = black ? 1 : 0;
+      fill(x, y, black ? 0 : 255, black ? 0 : 255, black ? 0 : 255);
+    }
+  }
+  const bake = bakeEdgeBackground(data, W, H, 'notGhost', palette, indices, null);
+  assert.ok(bake, 'pixels should be keyed');
+  assert.equal(alphaAt(data, W, 0, 0), 0, 'white field is transparent');
+  assert.equal(alphaAt(data, W, 5, 5), 0, 'black block is discarded by the shader stage');
+  assert.equal(alphaAt(data, W, 3, 3), 0, 'black block is discarded by the shader stage');
+  assert.equal(alphaAt(data, W, 4, 4), 255, 'enclosed white pocket survives');
+});
+
+test('ink 7 (Not Ghost) 1x1 black indexed art vanishes (terrace curtain handle)', () => {
+  // dew_blend: a single black pixel at index 1, ink 7, no authored bgColor.
+  // Keying the art top-left (black) floods the whole 1x1 -> fully transparent.
+  const palette = [[255, 255, 255], [0, 0, 0]];
+  const { data, fill } = makeImage(1, 1);
+  fill(0, 0, 0, 0, 0);
+  const indices = new Uint8Array([1]);
+  const bake = bakeEdgeBackground(data, 1, 1, 'notGhost', palette, indices, null);
+  assert.ok(bake);
+  assert.equal(alphaAt(data, 1, 0, 0), 0, 'handle is invisible');
+});
+
+test('ink 7 (Not Ghost) 32-bit art blanket-keeps the authored key color', () => {
+  // 32-bit (no indices) Not Ghost with an authored key: only key-colored
+  // pixels survive, everything else goes transparent (DirPlayer shader).
+  const W = 3, H = 1;
+  const { data, fill } = makeImage(W, H);
+  fill(0, 0, 0, 0, 255); // key blue
+  fill(1, 0, 0, 0, 0); // black content => dropped
+  fill(2, 0, 255, 0, 0); // red content => dropped
+  const bake = bakeEdgeBackground(data, W, H, 'notGhost', undefined, undefined, 0x0000ff);
+  assert.ok(bake);
+  assert.equal(alphaAt(data, W, 0, 0), 255, 'key-colored pixel stays');
+  assert.equal(alphaAt(data, W, 1, 0), 0, 'non-key pixel dropped');
+  assert.equal(alphaAt(data, W, 2, 0), 0, 'non-key pixel dropped');
+});
+
+test('ink 7 (Not Ghost) 32-bit 1x1 black art with no authored bgColor keys WHITE (pool ClickArea)', () => {
+  // The pool room's ClickArea elements are a 1x1 BLACK 32-bit bitmap at ink 7
+  // with no authored bgColor. DirPlayer keys 32-bit ink 7 on the sprite's
+  // DEFAULT bgColor (white — the Layout Parser defaults #bgColor and skips
+  // passing it when white), so the black pixel fails the match and is
+  // discarded: an invisible click target. Keying the art's top-left (0,0)=
+  // black instead blanket-kept the black pixel and rendered a black box over
+  // the pool booths and ladders.
+  const W = 1, H = 1;
+  const { data, fill } = makeImage(W, H);
+  fill(0, 0, 0, 0, 0); // opaque black
+  const bake = bakeEdgeBackground(data, W, H, 'notGhost', undefined, undefined, null);
+  assert.ok(bake);
+  assert.equal(alphaAt(data, W, 0, 0), 0, 'black pixel discarded under the white key');
+});
+
+test('ink 7 (Not Ghost) authored BLACK bgColor is a real key (entry elevator shadow)', () => {
+  // The entry room's elevator shadow (tower_elevator_sd) is authored
+  // #bgColor: "#000000" at ink 7 with a palette — DirPlayer keys indexed
+  // ink 7 on the SPRITE's bgColor (black), not the white default. The
+  // two-stage pipeline still applies: the matte floods edge-connected black
+  // and the shader keeps only black, so a black blob sealed inside white
+  // stays, while the white field and the edge-touching black both vanish.
+  // The real shadow bitmap is a blob that touches the edges on all sides,
+  // so it ends fully transparent — same result as DirPlayer.
+  const W = 5, H = 5;
+  const palette = [[255, 255, 255], [0, 0, 0]]; // 0 = white, 1 = black
+  const { data, fill } = makeImage(W, H);
+  const indices = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      // Black column touching the left edge (flooded away), plus a single
+      // black pixel sealed in the middle of the white field (survives).
+      const black = x === 0 || (x === 2 && y === 2);
+      indices[y * W + x] = black ? 1 : 0;
+      fill(x, y, black ? 0 : 255, black ? 0 : 255, black ? 0 : 255);
+    }
+  }
+  const bake = bakeEdgeBackground(data, W, H, 'notGhost', palette, indices, 0x000000);
+  assert.ok(bake, 'pixels should be keyed');
+  assert.equal(alphaAt(data, W, 0, 2), 0, 'edge-touching black flooded by the matte');
+  assert.equal(alphaAt(data, W, 2, 2), 255, 'sealed black pocket survives (only thing Not Ghost shows)');
+  assert.equal(alphaAt(data, W, 4, 4), 0, 'white field discarded by the shader');
+});
+
+test('ink 7 (Not Ghost) no-key fallback is WHITE, not art (0,0), for 32-bit art', () => {
+  // Blanket-keep semantics with the default white key: only white pixels
+  // survive a 32-bit Not-Ghost sprite that never received an authored bgColor
+  // (the pool ClickArea is all-black, so NOTHING survives).
+  const W = 2, H = 2;
+  const { data, fill } = makeImage(W, H);
+  fill(0, 0, 0, 0, 0); // black art — dropped
+  fill(1, 0, 255, 255, 255); // white pixel — kept
+  fill(0, 1, 128, 128, 128); // gray — dropped
+  fill(1, 1, 255, 255, 255); // white pixel — kept
+  const bake = bakeEdgeBackground(data, W, H, 'notGhost');
+  assert.ok(bake);
+  assert.equal(alphaAt(data, W, 0, 0), 0, 'black dropped');
+  assert.equal(alphaAt(data, W, 1, 0), 255, 'exact white kept');
+  assert.equal(alphaAt(data, W, 0, 1), 0, 'gray dropped');
+  assert.equal(alphaAt(data, W, 1, 1), 255, 'exact white kept');
 });
 
 test('key with a palette keys palette index 0 only (cloud body 238 survives)', () => {
@@ -326,8 +447,11 @@ test('matte bake keeps edge-touching art (light1: black diamond on white, ink 33
 test('ink -> blend mode mapping (add pin 33 is additive, per user report)', () => {
   assert.equal(blendModeForInk(33), 'add'); // light1 light rays
   assert.equal(blendModeForInk(34), 'add'); // add
-  assert.equal(blendModeForInk(35), 'subtract'); // subtract pin
-  assert.equal(blendModeForInk(38), 'subtract'); // subtract
+  // 35/38 -> a real GL reverse-subtract registered by PixiStage.init. pixi's
+  // advanced 'subtract' is a broken back-texture filter (source composites
+  // verbatim), which made the v31 room dimmer paint a solid black room.
+  assert.equal(blendModeForInk(35), SUBTRACT_BLEND_MODE); // subtract pin
+  assert.equal(blendModeForInk(38), SUBTRACT_BLEND_MODE); // subtract
   assert.equal(blendModeForInk(37), 'max'); // lightest -> core GL MAX (pixi advanced lighten is broken)
   assert.equal(blendModeForInk(40), 'max'); // lightest
   assert.equal(blendModeForInk(39), 'min'); // darkest -> core GL MIN
@@ -633,4 +757,89 @@ test('ink 9 (Mask): applyMaskAlpha cuts the source to the mask black regions', (
   applyMaskAlpha(out4, W, H, mask, W, H, 1, 1);
   assert.equal(alphaAt(out4, W, 0, 0), 0, 'source (0,0) samples mask (1,1) = white rim');
   assert.equal(alphaAt(out4, W, 1, 1), 255, 'source (1,1) samples mask (2,2) = black pool -> opaque');
+});
+
+test('ink 41 (Darken) tints through the authored fg+bg duotone (sepia camera photo)', () => {
+  // The camera photo display element sets #color: "#681F10" (dark brown) +
+  // #bgColor: "#FFCC66" (light gold) with ink 41. DirPlayer's ink-41 shader
+  // remaps EVERY pixel as mix(fg, bg, src) = fg + (bg-fg)*src per channel:
+  // black -> the dark fg, white -> the light bg, midtones -> the warm ramp.
+  // The old multiply-only (bg*src, fg assumed black) dropped the fg term and
+  // desaturated the photo (the reported "wrong saturation").
+  const W = 3, H = 1;
+  const { data, fill } = makeImage(W, H);
+  fill(0, 0, 0, 0, 0); // black
+  fill(1, 0, 255, 255, 255); // white
+  fill(2, 0, 128, 128, 128); // mid gray
+  const changed = tintSpriteDarken(data, W, H, 0xffcc66, 0x681f10);
+  assert.ok(changed, 'duotone changed pixels');
+  const at = (x: number): [number, number, number] => [data[(x * 4)], data[x * 4 + 1], data[x * 4 + 2]];
+  assert.deepEqual(at(0), [0x68, 0x1f, 0x10], 'black source becomes the dark fg (sepia shadow)');
+  assert.deepEqual(at(1), [0xff, 0xcc, 0x66], 'white source becomes the light bg (sepia highlight)');
+  assert.deepEqual(at(2), [180, 118, 59], 'mid gray maps onto the warm sepia ramp (fg + (bg-fg)*src)');
+});
+
+test('ink 41 Darken with authored black bgColor still shows the fg (trophy plate divider)', () => {
+  // The trophy window's divider lines (trophy_hr1/hr2) are ink-41 sprites
+  // whose buffer is a black-filled runtime image with #color gold/brown and
+  // #bgColor "#000000". A black bgColor must NOT be treated as "no tint":
+  // the duotone output is fg + (bg-fg)*src, so a black source pixel becomes
+  // exactly the authored foreground (the plate's dark-brown shadow line and
+  // gold highlight), not the raw black fill.
+  const W = 2, H = 1;
+  const { data, fill } = makeImage(W, H);
+  fill(0, 0, 0, 0, 0); // black-filled buffer
+  fill(1, 0, 0, 0, 0); // black-filled buffer
+  const changed = tintSpriteDarken(data, W, H, 0x000000, 0x7f552b);
+  assert.ok(changed, 'black buffer was remapped');
+  const at = (x: number): [number, number, number] => [data[x * 4], data[x * 4 + 1], data[x * 4 + 2]];
+  assert.deepEqual(at(0), [0x7f, 0x55, 0x2b], 'black source becomes the authored fg (brown divider)');
+  assert.deepEqual(at(1), [0x7f, 0x55, 0x2b], 'every black pixel remaps to the fg');
+});
+
+test('ink 41 Darken with default fg stays multiply-only (trophy/avatar tint preserved)', () => {
+  // Furniture colour parts (gold trophy cup) and avatar grayscale masks use
+  // ink 41 with ONLY a bgColor — the sprite foreColor is unset (black). With
+  // fg = black the duotone reduces to bg*src, which is exactly what the
+  // earlier fix shipped (white -> bg color, black stays black).
+  const W = 2, H = 1;
+  const { data, fill } = makeImage(W, H);
+  fill(0, 0, 0, 0, 0); // black outline
+  fill(1, 0, 224, 213, 204); // trophy cup warm gray
+  tintSpriteDarken(data, W, H, 0xffdd3f);
+  const at = (x: number): [number, number, number] => [data[(x * 4)], data[x * 4 + 1], data[x * 4 + 2]];
+  assert.deepEqual(at(0), [0, 0, 0], 'black stays black');
+  assert.deepEqual(at(1), [
+    Math.round((0xff * 224) / 255),
+    Math.round((0xdd * 213) / 255),
+    Math.round((0x3f * 204) / 255),
+  ], 'warm gray scaled by the bg color (multiply-only when fg is black)');
+});
+
+test('ink-41 sprite matte keys the feedImage white fill but keeps the tinted pattern (catalogue spaces floor/wall preview)', () => {
+  // The ctlg_spaces preview elements are #type: "image" (Image Wrapper) with
+  // #ink: 41 in the layout. Image Wrapper's feedImage does
+  // `pBuffer.image.fill(tTargetRect, pProps[#bgColor])` where the Layout
+  // Parser defaults #bgColor to WHITE, then pastes the already-tinted pattern
+  // (copyPixels with [#maskImage: createMatte(), #ink: 41, #bgColor: tColor])
+  // on top. DirPlayer's should_matte_sprite(41) is true, so the edge-
+  // connected white fill is keyed at the sprite and the pattern shows through
+  // — the wall preview must not render as an opaque white slab that hides the
+  // floor preview stacked behind it.
+  const W = 10, H = 10;
+  const { data, fill } = makeImage(W, H); // opaque white = the feedImage fill
+  // The tinted floor/wall pattern (a diagonal wedge, no white pixels).
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W - y - 1; x++) fill(x, y, 247, 222, 156);
+  }
+  const changed = bakeEdgeBackground(data, W, H, 'matte');
+  assert.ok(changed, 'white fill must be baked away');
+  // The wedge fills x < W-y-1, so (0,0) is pattern-colored and must survive;
+  // the white fill occupies the other corners.
+  assert.equal(alphaAt(data, W, 0, 0), 255, 'pattern pixel at (0,0) survives');
+  assert.equal(alphaAt(data, W, 9, 0), 0, 'white top-right keyed');
+  assert.equal(alphaAt(data, W, 0, 9), 0, 'white bottom-left keyed');
+  assert.equal(alphaAt(data, W, 9, 9), 0, 'white bottom-right keyed');
+  assert.equal(alphaAt(data, W, 5, 3), 255, 'tinted pattern pixel survives');
+  assert.equal(alphaAt(data, W, 3, 5), 255, 'tinted pattern pixel survives');
 });

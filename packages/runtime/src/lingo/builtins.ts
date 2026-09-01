@@ -1,7 +1,7 @@
 import type { Handler, Script } from './ast.js';
 import type { Interpreter } from './interpreter.js';
 import {
-  asNum, duplicateValue, ilkOf, keyOf, lingoListCompare, toLingoString, VOID,
+  asNum, duplicateValue, ilkOf, keyOf, rawKeyOf, lingoListCompare, toLingoString, VOID,
   type LVal, type LMemberRef, type LObject, type LSpriteRef, type LStageRef,
   type LWindowRef, type LCastLibRef, LSymbol, LList, LPoint, LPropList, LRect, LImage, LSpriteRef as LSpriteRefClass,
   LColor, colorFrom, hexColor, intColor,
@@ -110,6 +110,112 @@ function numArgs(args: LVal[], i: number): number {
 // +Infinity, so integer(-2.5) must be -3, not -2.
 function roundHalfAway(x: number): number {
   return x < 0 ? -Math.round(-x) : Math.round(x);
+}
+
+// Director's value() evaluates the FIRST complete expression and ignores
+// trailing tokens (11.5 Scripting Dictionary). Text members are sometimes
+// authored with stray bytes after the list — roomdimmer.props ends
+// `...]]]` with one bracket too many, and the real client still parses it.
+// The three helpers below replicate DirPlayer's normalise_lingo_expr_for_value
+// + truncate_to_first_balanced_list so our value() tolerates the same input.
+
+// Strip `--` Lingo comments (outside quoted strings), keeping the line break.
+function stripLingoComments(input: string): string {
+  let out = '';
+  let inString = false;
+  let i = 0;
+  while (i < input.length) {
+    const ch = input[i];
+    if (inString) {
+      out += ch;
+      if (ch === '"') inString = false;
+      i++;
+    } else if (ch === '"') {
+      out += ch;
+      inString = true;
+      i++;
+    } else if (ch === '-' && input[i + 1] === '-') {
+      while (i < input.length && input[i] !== '\n' && input[i] !== '\r') i++;
+    } else {
+      out += ch;
+      i++;
+    }
+  }
+  return out;
+}
+
+// Drop `\` line-continuation markers (outside quoted strings), eating an
+// immediately following newline — authoring splits long list literals across
+// lines with `\<CR>` and value() must see them welded together.
+function stripLingoContinuations(input: string): string {
+  let out = '';
+  let inString = false;
+  let i = 0;
+  while (i < input.length) {
+    const ch = input[i];
+    if (ch === '"') {
+      inString = !inString;
+      out += ch;
+      i++;
+    } else if (ch === '\\' && !inString) {
+      if (input[i + 1] === '\r' || input[i + 1] === '\n') i++; // swallow the break
+      i++; // swallow the backslash
+    } else {
+      out += ch;
+      i++;
+    }
+  }
+  return out;
+}
+
+// Trim trailing unbalanced brackets: keep the longest prefix that is fully
+// balanced (or the whole string when it already is). A stray extra `]` on a
+// list literal must not fail the parse — value() reads the first complete
+// expression and drops the rest.
+function trimUnbalancedBrackets(input: string): string {
+  let depthSquare = 0;
+  let depthParen = 0;
+  let inString = false;
+  let lastBalancedEnd = 0;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (inString) {
+      if (ch === '"') inString = false;
+    } else {
+      switch (ch) {
+        case '"': inString = true; break;
+        case '[': depthSquare++; break;
+        case ']': depthSquare--; break;
+        case '(': depthParen++; break;
+        case ')': depthParen--; break;
+      }
+    }
+    if (depthSquare === 0 && depthParen === 0 && !inString) lastBalancedEnd = i + 1;
+  }
+  if (depthSquare === 0 && depthParen === 0 && !inString) return input;
+  return input.slice(0, lastBalancedEnd);
+}
+
+// If the input starts with `[`, keep only through the first balanced close
+// bracket (drop any trailing garbage after the list).
+function truncateToFirstBalancedList(input: string): string {
+  const trimmed = input.trimStart();
+  if (!trimmed.startsWith('[')) return input;
+  let depth = 0;
+  let inString = false;
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+    if (ch === '"') {
+      inString = !inString;
+    } else if (!inString) {
+      if (ch === '[') depth++;
+      else if (ch === ']') {
+        depth--;
+        if (depth === 0) return trimmed.slice(0, i + 1);
+      }
+    }
+  }
+  return input;
 }
 
 export function createBuiltinTable(): Map<string, BuiltinFn> {
@@ -286,11 +392,33 @@ export function createBuiltinTable(): Map<string, BuiltinFn> {
     if (v instanceof LSymbol) return v.name;
     return toLingoString(v);
   });
+  // DirPlayer's value() input normalisation (normalise_lingo_expr_for_value
+  // + truncate_to_first_balanced_list): Director's value() parses the first
+  // complete expression and ignores trailing tokens, so authoring leftovers
+  // (a stray extra `]` on roomdimmer.props) must not fail the parse.
+  const normalizeValueExpr = (input: string): string => {
+    let s = stripLingoComments(input);
+    s = stripLingoContinuations(s);
+    s = trimUnbalancedBrackets(s.trim());
+    return truncateToFirstBalancedList(s);
+  };
+
   set(['value'], (b, a, interp) => {
     const v = a[0];
     if (typeof v === 'number') return v;
     if (typeof v === 'string') {
-      const direct = interp.evalExpressionString(v);
+      // Director's value() evaluates the FIRST complete expression and
+      // ignores trailing tokens (11.5 Scripting Dictionary). Text members
+      // are sometimes authored with a stray trailing bracket (the dimmer's
+      // roomdimmer.props ends `...]]]` — one bracket too many), which the
+      // real client parses fine. Normalise the input the way DirPlayer does
+      // (strip comments / line continuations, then trim to the last fully
+      // balanced bracket, keeping the first balanced list) or the whole
+      // parse fails and solveInk/solveBlend read the props as a raw string
+      // — blend fell back to 100, so the dimmer's shadow layer rendered at
+      // full opacity instead of the authored 20.
+      const cleaned = normalizeValueExpr(v);
+      const direct = interp.evalExpressionString(cleaned);
       // U92: Director value() parses a bare comma-separated list of literals
       // as a linear list — the server's availablesets message ("1,2,3,4,...")
       // flows through handle_availablesets' value(tMsg.content) and must pass
@@ -303,11 +431,13 @@ export function createBuiltinTable(): Map<string, BuiltinFn> {
       // is present — non-comma bare words keep the literal-string fallback
       // (Variable Container GetValue: value(pItemList[x]) must not turn
       // variable values into lists).
-      if (direct === v && v.includes(',')) {
+      if (direct === cleaned && v.includes(',')) {
         const wrapped = interp.evalExpressionString('[' + v + ']');
         if (wrapped instanceof LList) return wrapped;
       }
-      return direct;
+      // A failed parse returns the ORIGINAL string, not the normalised one
+      // (evalExpressionString echoes its input back on failure).
+      return direct === cleaned ? v : direct;
     }
     // Director (LibreShockwave TypeBuiltins::value): non-strings pass through
     // UNCHANGED. The Variable Container's GetValue does value(pItemList[x]) on
@@ -447,6 +577,37 @@ export function createBuiltinTable(): Map<string, BuiltinFn> {
       img.dirty = true;
     }
     return img;
+  });
+  // Director global `createMask(image)` — a 1-bit luminance mask, NOT
+  // createMatte (11.5 dictionary lists them separately; DirPlayer
+  // Bitmap::create_mask). Dark mask pixels are opaque (source shows through),
+  // light ones transparent (the destination stays), thresholded at 50%
+  // luminance. Habbo v31's Catalogue Spaces preview builds the landscape
+  // window from it: `createMask(catalog_spaces_window_mask)` (black frame ->
+  // opaque, white glass -> transparent), then copyPixels(#maskImage) leaves
+  // the landscape visible through the glass. The createMatte flood can't
+  // reach the interior glass, so the frame art's 5076 magenta placeholder
+  // pixels pasted over the preview instead (pink window). Returns a 32-bit
+  // image alpha-keyed so copyPixels' 32-bit #maskImage branch consumes it.
+  set(['createMask'], (b, a) => {
+    const img = a[0];
+    if (!(img instanceof LImage)) return VOID;
+    const w = Math.max(0, Math.round(img.width));
+    const h = Math.max(0, Math.round(img.height));
+    const mask = new LImage(w, h);
+    const m = mask.ensure();
+    const s = img.ensure();
+    for (let i = 0; i < w * h; i++) {
+      const o = i * 4;
+      // Rec.601 luma, matching DirPlayer's 50% cut (mask.rs create_mask).
+      const luma = (s[o] * 299 + s[o + 1] * 587 + s[o + 2] * 114) / 1000;
+      m[o] = 255;
+      m[o + 1] = 255;
+      m[o + 2] = 255;
+      m[o + 3] = luma < 128 ? 255 : 0;
+    }
+    mask.dirty = true;
+    return mask;
   });
   // Director `date()` / `time()` — the current date/time strings (the Error
   // Manager's fatal report header does `date() && time() & RETURN & ...`;
@@ -964,12 +1125,19 @@ export function createBuiltinTable(): Map<string, BuiltinFn> {
     const i = Math.round(asNum(a[1]));
     if (c instanceof LPropList) {
       const keys = [...c.props.keys()];
-      return i >= 1 && i <= keys.length ? keys[i - 1] : VOID;
+      // rawKeyOf decodes composite (point/rect) keys back to their original
+      // value — Landscape Cloud 0038 reads the turn-point list's keys as
+      // points (`tpoint.locH`). String keys come back unchanged.
+      return i >= 1 && i <= keys.length ? rawKeyOf(keys[i - 1]) : VOID;
     }
     if (c instanceof LList) return i >= 1 && i <= c.items.length ? c.items[i - 1] : VOID;
     return VOID;
   });
-  set(['duplicate'], (b, a) => (a[0] instanceof LList || a[0] instanceof LPropList ? duplicateValue(a[0]) : VOID));
+  // duplicateValue deep-copies lists/proplists/images and returns points,
+  // rects, colors, and scalars as fresh/identity values — Director's
+  // duplicate() covers every datum (the Human Bodypart update duplicates its
+  // pLocFix point while laying).
+  set(['duplicate'], (b, a) => duplicateValue(a[0]));
 
   // ---- mouse / stage builtins ----
   set(['rollover'], (b, a) => {

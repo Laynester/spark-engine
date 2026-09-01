@@ -5,7 +5,7 @@ import { DirectorEngine, cssFontFor } from '../engine/engine.js';
 import { fontBaseCandidates } from '../bundle/fontPaths.js';
 import { BundleLoader, castHintDir, createBundleFromZipBytes, type BundleSource } from '../bundle/loader.js';
 import { strToU8, zipSync } from 'fflate';
-import { LColor, LImage, LList, LMemberRef, LObject, LPoint, LPropList, LRect, LSymbol, VOID, duplicateValue, fontStyleFlags, PropPairs, type LVal } from '../lingo/values.js';
+import { LColor, LImage, LList, LMemberRef, LObject, LPoint, LPropList, LRect, LSymbol, VOID, asNum, duplicateValue, fontStyleFlags, PropPairs, type LVal } from '../lingo/values.js';
 import { normalizeTextLines, parseShapeText, parsePaletteBytes, Member, CastLib } from '../engine/members.js';
 import type { PersistWorkerLike, PersistWorkerMsg } from '../worker/persist.js';
 import { decodePng } from '../engine/png.js';
@@ -548,6 +548,27 @@ test('value() evaluates Lingo data literals', () => {
   assert.ok(z instanceof LPropList);
   const arr = (z as LPropList).props.get('z');
   assert.deepEqual((arr as LList).items, [1, 2]);
+});
+
+test('value() tolerates a stray trailing bracket (roomdimmer.props U158)', () => {
+  // Director's value() evaluates the FIRST complete expression and ignores
+  // trailing tokens (11.5 Scripting Dictionary). The dimmer's roomdimmer.props
+  // text member is authored `...]]]` — one bracket too many — and the real
+  // client still parses it. Before, the whole parse failed, the raw string
+  // came back, solveBlend("b") returned the default 100, and the dimmer's
+  // shadow layer (ink 36, blend 20) rendered at full opacity = a pure black
+  // shadow.
+  const e = new DirectorEngine();
+  const props = '["a": [#ink: 36, #zshift: [-1000]], "b": [#ink: 36, #zshift: [-1005], #blend: 20]]]';
+  const v = e.builtin('value', [props], e.interp);
+  assert.ok(v instanceof LPropList, 'stray trailing ] must not fail the parse');
+  const a = (v as LPropList).props.get('a') as LPropList;
+  assert.equal(a.props.get('ink'), 36, 'layer a ink survives');
+  const b = (v as LPropList).props.get('b') as LPropList;
+  assert.equal(b.props.get('ink'), 36, 'layer b ink survives');
+  assert.equal(b.props.get('blend'), 20, 'layer b blend survives — the 20% shadow');
+  // Bare words / plain strings still pass through untouched.
+  assert.equal(e.builtin('value', ['penny'], e.interp), 'penny');
 });
 
 test('string * int follows Director coercion (empty string -> 123456789, not 0)', () => {
@@ -1440,6 +1461,67 @@ test('proplists keep DUPLICATE keys in order (NAVIGATE [#integer: 0, #integer: 3
   assert.equal(e.interp.callHandler(script2, run2, [], null, new Set()), '9/3|7/4|5/1|3/5/1|11|3');
 });
 
+test('point index-assignment writes locH/locV (Landscape Cloud updateAnim)', () => {
+  // The Landscape Cloud scrolls with `pLoc[1] = pLoc[1] + 1` and
+  // `pLoc[2] = me.getLocV(pLoc[1])` — Director points are index-assignable
+  // (1 = locH, 2 = locV). Without the write case the interpreter warned
+  // 'cannot index-assign on point(...)' every animation frame, spamming the
+  // log from #updateAnim@Landscape Cloud.
+  const e = new DirectorEngine();
+  e.addScriptMember(
+    'PointSet',
+    'movie',
+    [
+      'on run me',
+      '  p = point(10, 20)',
+      '  p[1] = p[1] + 5',
+      '  p[2] = 99',
+      '  return p[1] & "/" & p[2]',
+      'end',
+    ].join('\n'),
+  );
+  const script = e.resolveScript('PointSet')!;
+  const run = script.handlers.find((h) => h.name.toLowerCase() === 'run')!;
+  assert.equal(e.interp.callHandler(script, run, [], null, new Set()), '15/99');
+});
+
+test('point-keyed proplists round-trip: getPropAt returns the point, positional read the value (Landscape turn-point list)', () => {
+  // Landscape Manager 0034 builds its turn-point list with
+  // `pTurnPointList.setaProp(point(tSideLeftH, tSideLeftV), tside)` and
+  // Landscape Cloud 0038 reads it back with
+  // `tpoint = pTurnPointList.getPropAt(i)` (needs `tpoint.locH`) and
+  // `pTurnPointList[i]` (needs the #left/#right side VALUE). keyOf returned
+  // undefined for points, so setaProp silently dropped every entry — the
+  // list stayed empty, saveNextTurnPoint never set pLastTurnPoint, and
+  // getLocV computed garbage Y (clouds pasted off-image -> white landscape).
+  const e = new DirectorEngine();
+  e.addScriptMember(
+    'TurnList',
+    'movie',
+    [
+      'on run me',
+      '  tL = [:]',
+      '  tL.setaProp(point(247, 5), #left)',
+      '  tL.setaProp(point(343, 5), #right)',
+      '  tCount = tL.count',
+      '  tP1 = tL.getPropAt(1)',
+      '  tH1 = tP1.locH',
+      '  tV1 = tP1.locV',
+      '  tP2 = tL.getPropAt(2)',
+      '  tH2 = tP2.locH',
+      '  tS1 = tL[1]',
+      '  tS2 = tL[2]',
+      '  return tCount & "|" & tH1 & "/" & tV1 & "|" & tH2 & "|" & tS1 & "|" & tS2',
+      'end',
+    ].join('\n'),
+  );
+  const script = e.resolveScript('TurnList')!;
+  const run = script.handlers.find((h) => h.name.toLowerCase() === 'run')!;
+  // Symbols stringify as bare names under & concat (Director: string(#left)
+  // = "left").
+  assert.equal(e.interp.callHandler(script, run, [], null, new Set()), '2|247/5|343|left|right');
+});
+
 test('chunk assignment writes back: put "x" into (t).char[7] and char/word/item/line = (buildVisual private room)', () => {
   // U134: Visualizer Instance Class buildVisual does
   // `put "x" into (tLayoutName).char[7]` (the private-room model_x.room
@@ -1581,6 +1663,36 @@ test('duplicate() of a duplicate-key proplist keeps every pair (wire param copy)
   assert.equal(dup.getAt(1), 0);
   assert.equal(dup.getAt(2), 3);
   assert.equal(dup.getAt(3), 1);
+});
+
+test('point/rect/color .duplicate() method copies (U145 lay pLocFix)', () => {
+  const e = new DirectorEngine();
+  // The Human Bodypart update does `tLocFix = pBody.pLocFix.duplicate()`
+  // (pLocFix = point(30,-10) while laying). The point-method branch used to
+  // return VOID for everything but #inside, so tLocFix became VOID and the
+  // whole lay +30/-10 part offset was lost — the laying avatar sank into the
+  // bed with a clipped head.
+  const p = e.interp.evalExpressionString('point(30, -10).duplicate()');
+  assert.ok(p instanceof LPoint, 'point.duplicate() returns a point, not VOID');
+  const lp = p as LPoint;
+  assert.equal(lp.locH, 30);
+  assert.equal(lp.locV, -10);
+  assert.notEqual(p, e.interp.evalExpressionString('point(30, -10)'), 'duplicate returns a fresh copy');
+  // Mutating the copy must not touch the original.
+  const orig = e.interp.evalExpressionString('point(30, -10)') as LPoint;
+  const dup = e.interp.evalExpressionString('point(30, -10).duplicate()') as LPoint;
+  dup.locH = 0;
+  assert.equal(orig.locH, 30, 'copy is independent');
+  // rect.duplicate() and the duplicate() builtin on a point keep working.
+  const r = e.interp.evalExpressionString('rect(1, 2, 3, 4).duplicate()');
+  assert.ok(r instanceof LRect);
+  const rl = r as LRect;
+  assert.equal(rl.left, 1);
+  assert.equal(rl.bottom, 4);
+  const pb = e.interp.evalExpressionString('duplicate(point(5, 6))');
+  assert.ok(pb instanceof LPoint);
+  assert.equal((pb as LPoint).locH, 5);
+  assert.equal((pb as LPoint).locV, 6);
 });
 
 test('PropPairs lazy first-index cache: first-match reads + invalidation on structural edits', () => {
@@ -2489,6 +2601,95 @@ test('auto-size text members grow their zero-height hint rect to the laid-out co
   }
 });
 
+test('member.height: non-wrapping #adjust (boxType-unset) text members report CONTENT height (Writer fakeAlphaRender centering)', () => {
+  // The catalogue Treeview Node Renderer renders its row label with
+  // `tTextImage = getWriter(id).render(pText)` then centers it with
+  // `getCenteredOfs(pimage.height - tTextImage.height)`. The Writer's
+  // scratch member starts at pDefRect 480 tall (construct) and Writer::render
+  // re-sizes it as `rect(0, 0, tWidth, pMember.height)`; fakeAlphaRender then
+  // builds `image(pMember.width, pMember.height, 8)`. If member.height still
+  // reports 480 the mask/tOut are 480 tall and the centering math shoves the
+  // glyphs ~230px off the top — the labels never appear. DirPlayer
+  // auto-sizes a NON-WRAPPING #adjust member to its content (text.rs
+  // box_height; the v7 Habbo Purse checkSaldo case); word-wrapping #adjust
+  // members keep their set box (roomlist/ToS bakes rely on it).
+  const { document } = globalThis as { document?: unknown };
+  const ctxMock = {
+    font: '', fillStyle: '', textAlign: '', textBaseline: '',
+    measureText: (s: string) => ({ width: s.length * 5, fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2 }),
+    fillRect: () => undefined,
+    fillText: () => undefined,
+    getImageData: (_x: number, _y: number, w: number, h: number) => ({ data: new Uint8ClampedArray(w * h * 4) }),
+  };
+  (globalThis as Record<string, unknown>).document = {
+    createElement: () => ({ width: 0, height: 0, getContext: () => ctxMock }),
+  };
+  try {
+    const e = new DirectorEngine();
+    e.getCastLib('Internal');
+    e.textRasterizer = rasterizeTextMember;
+    const gNum = e.createNamedMember('writer_treeview_label', 'text', 1);
+    const ref = new LMemberRef(gNum & 0xffff, 'writer_treeview_label', 'text', gNum >> 16, e);
+    // Writer::construct leaves the member at pDefRect (0,0,480,480) and
+    // Writer::render (no pTxtRect) sets `pMember.rect = rect(0,0,tWidth,pMember.height)`.
+    e.setMemberProp(ref, 'rect', new LRect(0, 0, 480, 480));
+    e.setMemberProp(ref, 'font', 'Volter');
+    e.setMemberProp(ref, 'fontsize', 9);
+    e.setMemberProp(ref, 'fixedlinespace', 9);
+    e.setMemberProp(ref, 'topspacing', 1); // Writer::setFont: lineHeight 10 - fontSize 9
+    e.setMemberProp(ref, 'wordwrap', 0); // Writer::construct sets wordWrap = 0
+    e.setMemberProp(ref, 'text', 'Frontpage');
+
+    const member = e.memberFor(ref)!;
+    assert.equal(member.rect!.height, 480, 'scratch rect is the 480 canvas');
+    // The Lingo-visible height must be the CONTENT height: fakeAlphaRender's
+    // image(w, h, 8) then builds an 11-tall mask and the treeview centering
+    // lands the glyphs inside the ~19px node row instead of -230px off-screen.
+    const h = asNum(e.getMemberProp(ref, 'height'));
+    assert.ok(h > 0 && h < 480, `content height ${h}, not the 480 canvas`);
+    assert.equal(h, 11, 'one 9px line at lineH 10 + glyph overhang = 11 (Volter 9px)');
+    assert.equal(member.image?.height ?? 0, 11, 'the rasterized surface agrees with .height');
+
+    // Word-wrapping #adjust members keep their set box height.
+    const gNum2 = e.createNamedMember('writer_treeview_wrap', 'text', 1);
+    const ref2 = new LMemberRef(gNum2 & 0xffff, 'writer_treeview_wrap', 'text', gNum2 >> 16, e);
+    e.setMemberProp(ref2, 'rect', new LRect(0, 0, 60, 30));
+    e.setMemberProp(ref2, 'wordwrap', 1);
+    e.setMemberProp(ref2, 'text', 'Roomlist name that wraps');
+    assert.ok(asNum(e.getMemberProp(ref2, 'height')) > 30, 'wrap #adjust auto-sizes to content, not the set box');
+
+    // boxtype-set (fixed/scroll) members keep their rect height too.
+    const gNum3 = e.createNamedMember('writer_treeview_fixed', 'text', 1);
+    const ref3 = new LMemberRef(gNum3 & 0xffff, 'writer_treeview_fixed', 'text', gNum3 >> 16, e);
+    e.setMemberProp(ref3, 'rect', new LRect(0, 0, 60, 40));
+    e.setMemberProp(ref3, 'boxtype', new LSymbol('fixed'));
+    e.setMemberProp(ref3, 'text', 'Fixed box');
+    assert.equal(asNum(e.getMemberProp(ref3, 'height')), 40, 'boxtype-set members keep their rect height');
+
+    // Writer with wordWrap=1 + no boxtype (#adjust) — the navigator info
+    // panel Writer (pWriterPlainNormWrap) defines [#rect: rect(0,0,tWidth,0)]
+    // then renders; fakeAlphaRender reads pMember.height BEFORE pMember.image,
+    // so the height must be content-tight at that point. Without the fix,
+    // memberTextHeight returned base (rect.height=0) for wordWrap=1, and
+    // fakeAlphaRender created a zero-height mask -> solid black block.
+    const gNum4 = e.createNamedMember('nav_info_writer', 'text', 1);
+    const ref4 = new LMemberRef(gNum4 & 0xffff, 'nav_info_writer', 'text', gNum4 >> 16, e);
+    e.setMemberProp(ref4, 'rect', new LRect(0, 0, 332, 0)); // Writer::define height=0
+    e.setMemberProp(ref4, 'font', 'Volter');
+    e.setMemberProp(ref4, 'fontsize', 9);
+    e.setMemberProp(ref4, 'fixedlinespace', 9);
+    e.setMemberProp(ref4, 'topspacing', 1);
+    e.setMemberProp(ref4, 'wordwrap', 1); // pWriterPlainNormWrap has wordWrap=1
+    e.setMemberProp(ref4, 'text', 'These are habbo public rooms like you');
+    const h4 = asNum(e.getMemberProp(ref4, 'height'));
+    assert.ok(h4 > 0 && h4 < 100, `wordWrap=1 #adjust height ${h4}, not0 or480`);
+    assert.equal(h4, 11, 'content height for wordWrap=1 #adjust with Volter 9px');
+  } finally {
+    if (document) (globalThis as Record<string, unknown>).document = document;
+    else delete (globalThis as Record<string, unknown>).document;
+  }
+});
+
 test('rasterizeTextMember: fixed-line members bottom-sit glyphs in the line box (U143 dropdown text)', () => {
   // The DropDown class sets tTextMember.fixedLineSpace = pLineHeight (the
   // window-def row height, e.g. 18) with NO topSpacing. Em-box centering
@@ -3114,6 +3315,40 @@ test('image.useAlpha + setAlpha: flat level and 8-bit mask with matte polarity (
   assert.equal(flat[3], 200, 'flat level 200');
   assert.equal(flat[7], 200, 'flat level 200 everywhere');
   assert.ok(!e.logs.some((l) => l.includes('useAlpha') || l.includes('setAlpha')), 'no useAlpha/setAlpha warns');
+});
+
+test('image.setAlpha with an ALL-WHITE 8-bit mask keys to alpha 0, not opaque black (empty Writer text)', () => {
+  // Writer Class fakeAlphaRender (0069) with EMPTY text (a single space, e.g.
+  // an empty user motto) builds tFakeAlpha = image(w,h,8) (opaque white
+  // prefill) and copyPixels the text image with ink 8 — with no glyphs, the
+  // mask stays ALL WHITE. tOut.setAlpha(tFakeAlpha) must then key the whole
+  // buffer to alpha 0 (nothing to show). The polarity detector gated the
+  // mostly-white-edge rule on `hasDark`, so an all-white mask fell through to
+  // "no polarity" and wrote alpha = luma = 255 over a tOut that copyPixels
+  // never painted (RGB 0,0,0) — a solid opaque black bar under the name in
+  // the infostand / motto window.
+  const e = new DirectorEngine();
+  e.addScriptMember(
+    'EmptyWriterProbe',
+    'movie',
+    [
+      'on run',
+      '  tMask = image(6, 4, 8)', // all-white prefill, no glyph pixels
+      '  tOut = image(6, 4, 32)',
+      '  tR = tOut.setAlpha(tMask)',
+      '  return [tR, tOut]',
+      'end',
+    ].join('\n'),
+  );
+  const script = e.resolveScript('EmptyWriterProbe')!;
+  const run = script.handlers.find((h) => h.name.toLowerCase() === 'run')!;
+  const out = e.interp.callHandler(script, run, [], null, new Set()) as LList;
+  assert.equal(out.items[0], 1, 'setAlpha returns TRUE');
+  const tOut = out.items[1] as LImage;
+  assert.equal(tOut.depth, 32, '32-bit dest');
+  const px = tOut.ensure();
+  const maxAlpha = Math.max(...Array.from({ length: 6 * 4 }, (_, i) => px[i * 4 + 3]));
+  assert.equal(maxAlpha, 0, `all-white mask -> every pixel alpha 0 (got max ${maxAlpha})`);
 });
 
 test('image.paletteRef remaps 8-bit pixels through the target palette (U67 messenger gold)', () => {
@@ -4378,6 +4613,31 @@ test('the milliSeconds is the full clock (openView sign-anim countdown)', () => 
   const ms = e.getThe('milliseconds', []) as number;
   assert.ok(ms > 1000, `full ms clock, got ${ms}`);
   assert.ok(Number.isInteger(ms));
+});
+
+test('number/string .integer and .float chunk properties (roller slide arg)', () => {
+  const e = new DirectorEngine();
+  // Room Handler 0005:1000 builds the roller slide command with
+  // `tMoveType && tToX & "," & ... && tContainsObjects.integer && tTimeNow`.
+  // `0.integer` was VOID (only .ilk was handled for numbers), which dropped
+  // the "0" chunk: action_sld's word[4] (the slide timestamp) read '' and
+  // pMoveStart became '', so float(now - '')/pMoveTime ≈ 3e9 clamped to 1.0
+  // and the avatar snapped to the dest on the first frame — teleport, no
+  // glide.
+  assert.strictEqual(e.interp.evalExpressionString('0.integer'), 0);
+  assert.strictEqual(e.interp.evalExpressionString('1.integer'), 1);
+  assert.strictEqual(e.interp.evalExpressionString('2.9.integer'), 2);
+  assert.strictEqual(e.interp.evalExpressionString('0.float'), 0);
+  // String chunk reads: "3.9".integer = 3 (leading-int parse, no rounding),
+  // "3.9".float = 3.9.
+  assert.strictEqual(e.interp.evalExpressionString('"42".integer'), 42);
+  assert.strictEqual(e.interp.evalExpressionString('"3.9".integer'), 3);
+  assert.strictEqual(e.interp.evalExpressionString('"3.9".float'), 3.9);
+  // The exact concat shape from the handler (tContainsObjects = 0,
+  // tTimeNow = 1788233716731): the "0" chunk must survive.
+  const arg = e.interp.evalExpressionString('"sld" && "10,3,0.45" && 0.integer && 1788233716731') as string;
+  assert.strictEqual(arg, 'sld 10,3,0.45 0 1788233716731');
+  assert.strictEqual(e.interp.evalExpressionString(`"${arg}".word[4]`), '1788233716731');
 });
 
 test('createMember makes a named bitmap member the cloud can paint and assign', () => {
@@ -6492,6 +6752,51 @@ test('createMatte() keys the opaque-white background (avatar part)', () => {
   assert.equal(m[(1 * 3 + 1) * 4 + 3], 255, 'interior art kept');
 });
 
+test('createMask() is a 1-bit luminance mask, NOT createMatte (catalogue spaces window)', () => {
+  // Habbo v31 Catalogue Spaces preview: catalog_spaces_window_mask is a black
+  // frame + white glass interior; the frame art catalog_spaces_window draws
+  // the glass as magenta placeholder pixels. Director createMask thresholds
+  // to 1 bit at 50% luma — DARK opaque (source shows), LIGHT transparent
+  // (destination stays). The createMatte flood can't reach the interior
+  // glass, so the magenta placeholder pasted over the preview (pink window).
+  const maskArt = new LImage(4, 4);
+  maskArt.fillRect(0, 0, 4, 4, new LColor(0, 0, 0)); // frame
+  maskArt.fillRect(1, 1, 3, 3, new LColor(255, 255, 255)); // glass
+  const engine = new DirectorEngine(null);
+  // GLOBAL form — the corpus calls `createMask(member.image)` bare, which
+  // routes through the builtin table (the old code had no global, so the
+  // call resolved to VOID and copyPixels pasted the un-masked art).
+  const global = engine.builtin('createMask', [maskArt], engine.interp);
+  assert.ok(global instanceof LImage, 'global createMask returns an image');
+  const g = (global as LImage).ensure();
+  assert.equal(g[3], 255, 'dark frame -> opaque (source shows)');
+  assert.equal(g[(1 * 4 + 1) * 4 + 3], 0, 'light glass -> transparent (dest stays)');
+  // METHOD form — image.createMask() must NOT alias createMatte.
+  const method = (engine.interp as never as { dispatchMethod(o: unknown, n: string, a: unknown[]): unknown })['dispatchMethod'](maskArt, 'createMask', []);
+  assert.ok(method instanceof LImage, 'method createMask returns an image');
+  const mt = (method as LImage).ensure();
+  assert.equal(mt[3], 255, 'method: dark frame opaque');
+  assert.equal(mt[(1 * 4 + 1) * 4 + 3], 0, 'method: light glass transparent');
+  // Full pipeline: frame art with magenta glass pasted over a green buffer
+  // with the mask -> glass stays green, frame shows the art, NO magenta.
+  const frame = new LImage(4, 4);
+  frame.fillRect(0, 0, 4, 4, new LColor(0, 0, 200));
+  frame.fillRect(1, 1, 3, 3, new LColor(255, 0, 255)); // magenta glass
+  const dest = new LImage(4, 4);
+  dest.fillRect(0, 0, 4, 4, new LColor(0, 200, 0));
+  const params = new LPropList(new Map<string, LVal>([
+    ['ink', 0],
+    ['maskImage', global as LImage],
+  ]));
+  (engine.interp as never as { dispatchMethod(o: unknown, n: string, a: unknown[]): unknown })['dispatchMethod'](dest, 'copyPixels', [frame, new LRect(0, 0, 4, 4), new LRect(0, 0, 4, 4), params]);
+  const d = dest.ensure();
+  assert.deepEqual([d[0], d[1], d[2]], [0, 0, 200], 'frame pixel copied from art');
+  assert.deepEqual([d[(1 * 4 + 1) * 4], d[(1 * 4 + 1) * 4 + 1], d[(1 * 4 + 1) * 4 + 2]], [0, 200, 0], 'glass keeps destination (landscape)');
+  for (let i = 0; i < 16; i++) {
+    assert.ok(!(d[i * 4] === 255 && d[i * 4 + 1] === 0 && d[i * 4 + 2] === 255), 'no magenta placeholder survives');
+  }
+});
+
 test('union/intersect are rect functions (Bodypart updateRect, C++ unionRect parity)', () => {
   // Bodypart_Class_EX tracks its dirty rect with
   // `me.pUpdateRect = union(me.pUpdateRect, pCacheRectA)` — before these
@@ -7108,10 +7413,14 @@ test('propList count returns the number of pairs', () => {
   assert.equal(out, 3, 'proplist.count = pair count (DropDown define chain)');
 });
 
-test('copyPixels keys the 8-bit source palette background (navigator row pieces)', () => {
-  // DirPlayer indexed-copy parity: an 8-bit source's background (palette
-  // index 0 = white) is transparent in the copy, so nav_rw_lf pastes as a
-  // rounded cutout over the row fill instead of a white block.
+test('copyPixels ink 0 copies an 8-bit palette source VERBATIM (DirPlayer indexed ink-0 parity)', () => {
+  // DirPlayer drawing.rs: the indexed (1-8 bit) ink-0 branch has NO bg key —
+  // matte_mask is computed but never consumed there (only ink 2/36 key
+  // bgColor, ink 8 edge-floods). The chat-balloon pieces are white-rect
+  // fragments whose white body is edge-connected WITHIN each piece; keying
+  // them at ink 0 ate the whole body (Chat_Bubble renderBackground pastes
+  // them at ink 0, then mats the assembled balloon at the sprite with ink 8).
+  // Ink 8 on the same source still keys the edge-connected palette-0 bg.
   const src = new LImage(4, 4);
   src.depth = 8;
   src.palette = [[255, 255, 255], [255, 0, 0]]; // idx0 = white bg, idx1 = red art
@@ -7125,14 +7434,58 @@ test('copyPixels keys the 8-bit source palette background (navigator row pieces)
       s[o] = 255; s[o + 1] = 0; s[o + 2] = 0; s[o + 3] = 255;
     }
   }
+  // Ink 0: verbatim — the white background stays OPAQUE white.
   const dst = new LImage(4, 4);
   const d = dst.ensure(); // transparent black init
-  // copyPixels(this = destination, src, destRect, srcRect, ink)
   dst.copyPixels(src, new LRect(0, 0, 4, 4), new LRect(0, 0, 4, 4), 0);
   const bgPx = (3 * 4 + 3) * 4;
-  assert.equal(d[bgPx + 3], 0, 'white background pixel stays transparent (keyed)');
+  assert.equal(d[bgPx + 3], 255, 'white background pixel copies verbatim (opaque) at ink 0');
+  assert.deepEqual([d[bgPx], d[bgPx + 1], d[bgPx + 2]], [255, 255, 255], 'white stays white');
   const artPx = (0 * 4 + 0) * 4;
   assert.deepEqual([d[artPx], d[artPx + 1], d[artPx + 2], d[artPx + 3]], [255, 0, 0, 255], 'art pixels copy verbatim');
+  // Ink 8: matte — the edge-connected palette-0 background is keyed.
+  const dst8 = new LImage(4, 4);
+  const d8 = dst8.ensure();
+  dst8.copyPixels(src, new LRect(0, 0, 4, 4), new LRect(0, 0, 4, 4), 8);
+  const bg8 = (3 * 4 + 3) * 4;
+  assert.equal(d8[bg8 + 3], 0, 'edge-connected white is keyed at ink 8');
+  assert.deepEqual([d8[artPx], d8[artPx + 1], d8[artPx + 2], d8[artPx + 3]], [255, 0, 0, 255], 'art survives ink 8');
+});
+
+test('chat-balloon composite: ink-0 piece pastes keep the white body (U-balloon white body)', () => {
+  // Chat_Bubble renderBackground pastes chat_bubble_left/middle/right at ink 0
+  // into a fresh 32-bit composite, then the assembled balloon is matted at the
+  // sprite (ink 8). Each piece is a white-rect fragment with a gray border and
+  // white reaching the piece's own edges — an ink-0 copy-time palette-0 key
+  // (the old behavior) floods through the edge-connected white and eats the
+  // entire body. It must copy verbatim.
+  const piece = new LImage(5, 5);
+  piece.depth = 8;
+  piece.palette = [[255, 255, 255], [160, 160, 164], [51, 51, 51]]; // white body, gray border, dark
+  const s = piece.ensure();
+  for (let y = 0; y < 5; y++) {
+    for (let x = 0; x < 5; x++) {
+      const o = (y * 5 + x) * 4;
+      const border = y === 0 || y === 4 || x === 0 || x === 4;
+      const c = border ? 160 : 255;
+      s[o] = c; s[o + 1] = border ? 160 : 255; s[o + 2] = border ? 164 : 255; s[o + 3] = 255;
+    }
+  }
+  const composite = new LImage(5, 5); // fresh 32-bit image(w,h,32)
+  const d = composite.ensure();
+  composite.copyPixels(piece, new LRect(0, 0, 5, 5), new LRect(0, 0, 5, 5), 0);
+  const bodyPx = (2 * 5 + 2) * 4; // enclosed white body pixel
+  assert.deepEqual([d[bodyPx], d[bodyPx + 1], d[bodyPx + 2], d[bodyPx + 3]], [255, 255, 255, 255], 'white body survives the ink-0 paste');
+  const borderPx = (0 * 5 + 2) * 4;
+  assert.deepEqual([d[borderPx], d[borderPx + 1], d[borderPx + 2], d[borderPx + 3]], [160, 160, 164, 255], 'gray border copies too');
+  // The assembled composite, matted at ink 8 (sprite bake), keys only the
+  // edge-connected white — the enclosed body survives. Sanity: every white
+  // pixel in the composite is enclosed (border ring), so an ink-8 copy of the
+  // COMPOSITE as a palette-less 32-bit source keys nothing and keeps all.
+  const baked = new LImage(5, 5);
+  const db = baked.ensure();
+  baked.copyPixels(composite, new LRect(0, 0, 5, 5), new LRect(0, 0, 5, 5), 8);
+  assert.equal(db[bodyPx + 3], 255, 'enclosed white body survives the ink-8 matte');
 });
 
 test('the floatPrecision get/set + keyDown/optionDown/shiftDown/commandDown/controlDown (rooms)', () => {
@@ -8301,4 +8654,38 @@ test('castHintDir: absolute hints pass through unchanged', () => {
     castHintDir('http://x/casts/14/hof_furni/hh_furni_xx_360.cct?randp=1', 'http://x/casts/14/'),
     'http://x/casts/14/hof_furni/',
   );
+});
+
+
+test('periodic timeout re-arms after first fire (Song Player loop fix)', () => {
+  // Before the fix, fireTimeouts() filtered out due entries BEFORE firing
+  // callbacks, so the re-arm check always returned false for a first-fire
+  // periodic timeout. The Song Player's pUpdateTimeout (1500ms) died after
+  // its first tick, killing the checkLoopData poll loop.
+  const e = new DirectorEngine();
+  e.boot();
+  const counts = { fires: 0 };
+  const fakeObj = e.interp.makeInstance({
+    name: 'timeout:rearm-test', type: 'parent', props: [], globals: [],
+    handlers: [], source: '',
+  });
+  const fakeTarget = e.interp.makeInstance({
+    name: 'target:rearm', type: 'parent', props: [], globals: [],
+    handlers: [], source: '',
+  });
+  const orig = (e.interp as any).callObjectHandler;
+  (e.interp as any).callObjectHandler = (o: any, n: string, _a: any[]) => {
+    if (o === fakeTarget) counts.fires++;
+    return orig.call(e.interp, o, n, _a);
+  };
+  (e as any).timeouts.push({
+    obj: fakeObj, due: Date.now() - 10, period: 1,
+    handler: 'onfire', target: fakeTarget,
+  });
+  e.tick();
+  assert.equal(counts.fires, 1, 'first fire');
+  const hasEntry = (e as any).timeouts.some((t: any) => t.obj === fakeObj);
+  assert.ok(hasEntry, 'periodic timeout re-armed after first fire');
+  (e as any).timeouts = (e as any).timeouts.filter((t: any) => t.obj !== fakeObj);
+  (e.interp as any).callObjectHandler = orig;
 });

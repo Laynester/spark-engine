@@ -7,13 +7,9 @@ apps/demo/public/
 exported/
 exported-old/
 
-
 AGENTS.md
-MyCurrentWork.md
-OpenUserInstructions.md
-BOOT.txt
-CompletedUserInstructions.ljson
-MyFinishedWork.ljson
+/AGENTS
+.agents/
 backups/
 /scripts/
 *.vsix

@@ -7,7 +7,7 @@
 // so they run headless in tests and in the browser via canvas ImageData.
 
 // Director ink numbers -> alpha-bake behavior.
-export type BakeMode = 'matte' | 'backgroundTransparent' | 'key';
+export type BakeMode = 'matte' | 'backgroundTransparent' | 'key' | 'notGhost';
 
 export interface MatteSpec {
   rgb: number; // 0xRRGGBB background color
@@ -282,6 +282,11 @@ function paletteIndex0Rgb(palette: number[][] | undefined): number | null {
 // pixel matching the background color goes transparent with no flood fill —
 // a BLANKET key, so enclosed background dies too. The key color is the
 // bitmap's palette index 0 when a palette is supplied, else exact white.
+// `keyRgb` overrides the key color for ink 7 (Not Ghost): the sprite's
+// authored bgColor when one exists, else null = the Director DEFAULT sprite
+// bgColor (white) — NOT the art's top-left pixel. The pool ClickArea is a
+// 1x1 black bitmap and must key white to vanish; DirPlayer's ink-7 keys on
+// the resolved sprite bgColor, which the Layout Parser defaults to white.
 export function bakeEdgeBackground(
   rgba: Uint8Array | Uint8Array | Uint8ClampedArray,
   width: number,
@@ -289,6 +294,7 @@ export function bakeEdgeBackground(
   mode: BakeMode,
   palette?: number[][],
   indices?: Uint8Array | null,
+  keyRgb?: number | null,
 ): boolean {
   const n = width * height;
   if (width <= 0 || height <= 0 || rgba.length < n * 4) return false;
@@ -315,13 +321,54 @@ export function bakeEdgeBackground(
     return changed;
   }
 
-  // With raw palette indices available, the matte flood keys palette INDEX 0
-  // exactly — an RGB key of index 0's color also eats same-colored art at
-  // other indices (the fuzzy floor tile's white dither squares), showing as
-  // black grid lines between tiles. 'key' (ink 36) stays an RGB blanket key.
-  const indexKeyed = !!indices && indices.length >= n;
-  const matte = indexKeyed ? { rgb: 0, tolerance: 0 } : resolveChannelMatte(rgba, width, height, mode, palette);
-  if (!matte) return false;
+  let matte: MatteSpec | null = null;
+  let matchByIndex = false;
+  if (mode === 'notGhost') {
+    // Ink 7 (Not Ghost): only pixels matching the key color survive. The key
+    // is the sprite's authored bgColor when one exists, else the Director
+    // DEFAULT sprite bgColor = WHITE — NOT the art's top-left pixel. The
+    // pool room's ClickArea is a 1x1 black 32-bit bitmap: keying its art
+    // (0,0)=black would blanket-keep an opaque black box (the reported pool
+    // booth/ladder artifacts); DirPlayer keys 32-bit ink 7 on the resolved
+    // sprite bgColor, which the Layout Parser defaults to white, so the black
+    // pixel fails the match and is discarded — an invisible click area. The
+    // terrace's ink-7 elements carry no authored bgColor and still resolve
+    // correctly under white: the 1x1 black curtain handle dew_blend fails the
+    // white match and vanishes (it rendered as a black box on the closed
+    // curtains before), and the exit mask dew_exitmaski (black wedge on a
+    // white field) has its white field flooded and its wedge discarded — the
+    // clickable GOAWAY hotspot ends fully transparent. Indexed/16-bit art is
+    // a TWO-STAGE pipeline (DirPlayer compute_edge_matte_mask_rgb + the ink-7
+    // shader): the matte floods edge-connected key pixels to alpha 0, then
+    // the shader discards every remaining pixel that does NOT match the key
+    // — net effect, ONLY key-colored pockets sealed inside the art survive.
+    // 32-bit art has no matte stage: the shader blanket-keeps every key-
+    // colored pixel and discards the rest.
+    const key = keyRgb !== undefined && keyRgb !== null ? keyRgb : 0xffffff;
+    if (!indices || indices.length < n) {
+      let changed = false;
+      for (let i = 0; i < n; i++) {
+        if (!isOpaque(rgba, i)) continue;
+        if (rgbAt(rgba, i) !== key) {
+          rgba[i * 4] = 0;
+          rgba[i * 4 + 1] = 0;
+          rgba[i * 4 + 2] = 0;
+          rgba[i * 4 + 3] = 0;
+          changed = true;
+        }
+      }
+      return changed;
+    }
+    matte = { rgb: key, tolerance: 0 };
+  } else {
+    // With raw palette indices available, the matte flood keys palette INDEX
+    // 0 exactly — an RGB key of index 0's color also eats same-colored art at
+    // other indices (the fuzzy floor tile's white dither squares), showing as
+    // black grid lines between tiles. 'key' (ink 36) stays an RGB blanket key.
+    matchByIndex = !!indices && indices.length >= n;
+    matte = matchByIndex ? { rgb: 0, tolerance: 0 } : resolveChannelMatte(rgba, width, height, mode, palette);
+    if (!matte) return false;
+  }
 
   // BFS from every edge seed where the pixel is already transparent or
   // matches the matte color, spreading 4-connected.
@@ -331,7 +378,7 @@ export function bakeEdgeBackground(
     const i = y * width + x;
     if (connected[i]) return;
     const opaque = isOpaque(rgba, i);
-    if (!opaque || (indexKeyed ? indices![i] === 0 : matchesRgb(rgbAt(rgba, i), matte.rgb, matte.tolerance))) {
+    if (!opaque || (matchByIndex ? indices![i] === 0 : matchesRgb(rgbAt(rgba, i), matte.rgb, matte.tolerance))) {
       connected[i] = 1;
       queue.push(i);
     }
@@ -362,6 +409,23 @@ export function bakeEdgeBackground(
     rgba[i * 4 + 2] = 0;
     rgba[i * 4 + 3] = 0;
     changed = true;
+  }
+
+  // Ink 7 (Not Ghost) shader stage: discard every remaining pixel that does
+  // NOT match the key color — after the matte flood above, only key-colored
+  // pockets sealed inside the art are left (the exit mask's black wedge and
+  // white field are both gone; the element renders fully transparent).
+  if (mode === 'notGhost') {
+    for (let i = 0; i < n; i++) {
+      if (rgba[i * 4 + 3] === 0) continue;
+      if (!matchesRgb(rgbAt(rgba, i), matte.rgb, matte.tolerance)) {
+        rgba[i * 4] = 0;
+        rgba[i * 4 + 1] = 0;
+        rgba[i * 4 + 2] = 0;
+        rgba[i * 4 + 3] = 0;
+        changed = true;
+      }
+    }
   }
   return changed;
 }
@@ -489,6 +553,54 @@ export function tintSpriteBackground(rgba: Uint8Array | Uint8ClampedArray, w: nu
   return changed;
 }
 
+// Ink 41 (Darken) sprite bg_color tint — DirPlayer's ink-41 shader remaps
+// EVERY pixel, per channel: result.c = mix(fg.c, bg.c, src.c). With the
+// default foreColor (black) that is bg.c * src.c / 255: white becomes exactly
+// the bg color, black stays black, and every other color is scaled toward the
+// bg color (a light warm gray like the trophy cup body (224,213,204) —
+// channel spread 20 — must become gold, which the near-grayscale gate in
+// tintSpriteBackground skips and leaves silver). The foreground term matters
+// when the corpus authors BOTH colors (Director: "Darken makes the background
+// color a filter... the foreground color is then added") — the camera photo
+// display sets #color: "#681F10" + #bgColor: "#FFCC66" and DirPlayer renders
+// the shot as a sepia duotone: fg + (bg-fg)*src, so black pixels become the
+// dark brown fg, white pixels the light gold bg, and midtones the warm ramp.
+// A multiply-only bg*src dropped the fg term and washed the photo out.
+// The background was already keyed to alpha 0 by the matte bake before this
+// runs, so the box never tints. A white bgColor is per-channel identity
+// (bg=255 — skipped upstream anyway by ch.bgColorIsRgb).
+export function tintSpriteDarken(
+  rgba: Uint8Array | Uint8ClampedArray,
+  w: number,
+  h: number,
+  bgRgb: number,
+  fgRgb = 0,
+): boolean {
+  const bgR = (bgRgb >> 16) & 0xff;
+  const bgG = (bgRgb >> 8) & 0xff;
+  const bgB = bgRgb & 0xff;
+  const fgR = (fgRgb >> 16) & 0xff;
+  const fgG = (fgRgb >> 8) & 0xff;
+  const fgB = fgRgb & 0xff;
+  let changed = false;
+  for (let i = 0; i < w * h; i++) {
+    const o = i * 4;
+    if (rgba[o + 3] === 0) continue;
+    const r = rgba[o];
+    const g = rgba[o + 1];
+    const b = rgba[o + 2];
+    // mix(fg, bg, src) = fg + (bg - fg) * src, per channel.
+    const nr = Math.round(fgR + ((bgR - fgR) * r) / 255);
+    const ng = Math.round(fgG + ((bgG - fgG) * g) / 255);
+    const nb = Math.round(fgB + ((bgB - fgB) * b) / 255);
+    if (nr !== r || ng !== g || nb !== b) changed = true;
+    rgba[o] = nr;
+    rgba[o + 1] = ng;
+    rgba[o + 2] = nb;
+  }
+  return changed;
+}
+
 // Ink 9 (Mask): bake the NEXT cast member's bitmap as a grayscale alpha mask
 // onto the source (pool water: vesi1 is an opaque blue rect, vesimask1 its
 // black/white cutout). Aligned by registration points; grayscale inverted —
@@ -533,6 +645,13 @@ export function bakeModeForInk(ink: number): BakeMode | null {
     case 1:
     case 36:
       return 'key';
+    case 7:
+      // Not Ghost: keep only pixels matching the key color (the inverse of a
+      // key). The key is the sprite's authored bgColor, else the Director
+      // default sprite bgColor = white (bakeEdgeBackground keyRgb) — the
+      // pool ClickArea (1x1 black) and terrace drag handle vanish, and the
+      // entry elevator shadow keys on its authored black.
+      return 'notGhost';
     case 8:
     case 32:
     case 33:
@@ -559,14 +678,22 @@ export function bakeModeForInk(ink: number): BakeMode | null {
 // per-channel against the actual framebuffer: a black/transparent source
 // pixel maxes to exactly the destination, which is the LIGHTEST semantics
 // the scrollbars rely on.
-export function blendModeForInk(ink: number): 'normal' | 'add' | 'subtract' | 'min' | 'max' {
+//
+// 'subtract' has the SAME broken filter problem, and it matters: the v31 room
+// dimmer is a 1x1 black bitmap on an ink-35 sprite stretched over the room
+// (subtract-pin of black must be a no-op). The advanced 'subtract' renders
+// the black rectangle verbatim — a solid black room. SUBTRACT_BLEND_MODE is
+// instead a REAL GPU reverse-subtract equation registered into the GL state
+// map by PixiStage.init (alpha preserved: dst stays, rgb = dst - src).
+export const SUBTRACT_BLEND_MODE = 'subtract-gl';
+export function blendModeForInk(ink: number): 'normal' | 'add' | typeof SUBTRACT_BLEND_MODE | 'min' | 'max' {
   switch (ink) {
     case 33:
     case 34:
       return 'add';
     case 35:
     case 38:
-      return 'subtract';
+      return SUBTRACT_BLEND_MODE;
     case 37:
     case 40:
       return 'max';

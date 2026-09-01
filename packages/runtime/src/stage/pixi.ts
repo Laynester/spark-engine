@@ -11,7 +11,7 @@ import { alignmentName, type ChannelVisual, type DirectorEngine, type StageAdapt
 import type { Channel } from '../engine/sprites.js';
 import { LImage, LList, LObject, LPoint, LPropList, LSpriteRef, LSymbol } from '../lingo/values.js';
 import type { ShapeDef } from '../engine/members.js';
-import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, blendModeForInk, cornersAreNearWhite, matteSpriteHitTest, tintSpriteBackground, type BakeMode } from './matte.js';
+import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, blendModeForInk, cornersAreNearWhite, matteSpriteHitTest, tintSpriteBackground, tintSpriteDarken, SUBTRACT_BLEND_MODE, type BakeMode } from './matte.js';
 import { caretBlinkOn, caretX } from './caret.js';
 import { decodePng } from '../engine/png.js';
 
@@ -186,6 +186,7 @@ export class PixiStage implements StageAdapter {
     // 9-slice pieces stay crisp instead of bilinear-blurry (Text keeps its own
     // smooth canvas textures).
     await this.app.init({ width: w, height: h, background: bg, antialias: false, resolution: 1 });
+    this.registerSubtractBlend();
     this.parent.appendChild(this.app.canvas);
 
     this.background = new Graphics().rect(0, 0, w, h).fill(bg);
@@ -221,6 +222,30 @@ export class PixiStage implements StageAdapter {
       this.syncChannelImages();
       this.syncCaret();
     });
+  }
+
+  // pixi 8.19's 'subtract' is an advanced blend mode rendered through a
+  // filter that captures the back texture — broken (captures transparent
+  // black), so the sprite composites its source VERBATIM. That makes the v31
+  // room dimmer (1x1 black bitmap, ink 35, stretched over the room) paint an
+  // opaque black rectangle: a black room. Register a REAL GPU subtract under
+  // a name the advanced-blend-mode pipe doesn't claim: reverse-subtract
+  // equation with ONE/ONE rgb (dst - src, GL-clamped at 0) and alpha kept as
+  // the destination's (ONE/ZERO, FUNC_ADD) so transparent areas stay
+  // transparent and opaque stays opaque.
+  private registerSubtractBlend(): void {
+    const state = (this.app.renderer as unknown as { state?: { blendModesMap?: Record<string, number[]> } }).state;
+    const gl = (this.app.renderer as unknown as { gl?: WebGLRenderingContext | WebGL2RenderingContext }).gl;
+    if (state?.blendModesMap && gl) {
+      state.blendModesMap[SUBTRACT_BLEND_MODE] = [
+        gl.ONE,
+        gl.ONE,
+        gl.ONE,
+        gl.ZERO,
+        gl.FUNC_REVERSE_SUBTRACT,
+        gl.FUNC_ADD,
+      ];
+    }
   }
 
   // Blinking 1px text-editing caret for the focused editable field (the corpus
@@ -282,7 +307,7 @@ export class PixiStage implements StageAdapter {
       const ch = this.engine.getChannel(channel);
       const bake = this.bakeForChannel(ch, img, w, h);
       const tint = this.tintForChannel(ch);
-      const baked = bake || tint ? this.bakeImagePixels(node, img, w, h, bake, tint) : null;
+      const baked = bake || tint ? this.bakeImagePixels(node, img, w, h, bake, tint, this.ink7KeyForChannel(ch), ch.ink ?? 0, ch.colorSet ? ch.color : 0) : null;
       // Only adopt the bake when it actually removed pixels — a near-white-cornered
       // surface with no edge-connected white region must stay raw (no texture churn).
       const pixels = baked && baked.changed ? baked.pixels : img.ensure();
@@ -325,7 +350,7 @@ export class PixiStage implements StageAdapter {
   // white rim shows on composited button buffers).
   private bakeForChannel(ch: { ink: number } | undefined, img: LImage, w: number, h: number): BakeMode | null {
     if (!ch) return null;
-    if (ch.ink === 1 || ch.ink === 8 || ch.ink === 36) return bakeModeForInk(ch.ink);
+    if (ch.ink === 1 || ch.ink === 7 || ch.ink === 8 || ch.ink === 36 || ch.ink === 41) return bakeModeForInk(ch.ink);
     if (ch.ink === 0 && w > 0 && h > 0 && cornersAreNearWhite(img.ensure(), w, h)) return 'backgroundTransparent';
     return null;
   }
@@ -339,6 +364,9 @@ export class PixiStage implements StageAdapter {
     h: number,
     bake: BakeMode | null,
     tint: number | null,
+    ink7Key?: number | null,
+    ink = 0,
+    fgRgb = 0,
   ): { pixels: Uint8ClampedArray; changed: boolean } {
     const n = w * h * 4;
     if (!node.bakeBuf || node.bakeBuf.length !== n) node.bakeBuf = new Uint8ClampedArray(n);
@@ -346,23 +374,55 @@ export class PixiStage implements StageAdapter {
     node.bakeBuf.set(src.subarray(0, n));
     // Tint FIRST, then bake: the swatch's white box becomes the bg color, and
     // its own near-white gate re-evaluates on the tinted corners so the
-    // ink-0 backgroundTransparent bake no-ops and the box survives.
-    const tinted = tint !== null ? tintSpriteBackground(node.bakeBuf, w, h, tint) : false;
+    // ink-0 backgroundTransparent bake no-ops and the box survives. Ink 41
+    // (Darken) remaps EVERY pixel through the authored fg+bg duotone (sepia
+    // camera photo display); other inks keep the near-grayscale lerp.
+    const tinted =
+      tint !== null ? (ink === 41 ? tintSpriteDarken(node.bakeBuf, w, h, tint, fgRgb) : tintSpriteBackground(node.bakeBuf, w, h, tint)) : false;
     // Key runtime-composed surfaces by EXACT WHITE (the Lingo fill color) —
     // never the surface's own palette[0]: copyPixels full-surface adoption can
     // hand the canvas a part's palette whose index 0 IS the eye-white gray, and
     // a blanket key on it would wipe the whole figure. Indexed art is already
     // export-keyed; this bake only drops the runtime white fill.
-    const changed = bake ? bakeEdgeBackground(node.bakeBuf, w, h, bake, undefined) : false;
+    const changed = bake ? bakeEdgeBackground(node.bakeBuf, w, h, bake, undefined, undefined, ink7Key) : false;
     return { pixels: node.bakeBuf, changed: changed || tinted };
   }
 
   // The sprite's explicit RGB bgColor, or null when there's nothing to tint
   // (unset / palette-index int / white — white is identity, skip).
-  private tintForChannel(ch: { bgColorIsRgb?: boolean; bgColor?: number } | undefined): number | null {
-    if (!ch?.bgColorIsRgb || !ch.bgColor) return null;
+  private tintForChannel(ch: { ink?: number; bgColorIsRgb?: boolean; bgColor?: number } | undefined): number | null {
+    if (!ch?.bgColorIsRgb || ch.bgColor === undefined || ch.bgColor === null) return null;
+    // Authored black is a REAL color for ink 41 (Darken): the duotone
+    // remaps every source pixel through fg+bg, so a black bgColor means
+    // "black source stays black, otherwise fade toward fg" — the trophy
+    // plate's divider lines (#bgColor "#000000" + #color gold/brown over a
+    // black-filled buffer) need that pass or they draw the raw black fill.
+    // For every other ink black is a no-op tint (grayscale pixels just get
+    // blacker), so keep skipping it outside Darken.
     if (ch.bgColor === 0xffffff) return null;
+    if (ch.bgColor === 0 && ch.ink !== 41) return null;
     return ch.bgColor;
+  }
+
+  // Ink 7 (Not Ghost) key color: the sprite's authored RGB bgColor when it
+  // isn't the Layout Parser's default — every room element's bgColor is
+  // coerced through rgb(string) with an explicit white default, so WHITE
+  // means "no authored key" and null tells the bake to use the Director
+  // default sprite bgColor (white): the pool room's 1x1 black ClickArea
+  // fails the white match and renders as an invisible click area (keying
+  // its art (0,0)=black left an opaque black box on the booths/ladders),
+  // the terrace's black 1x1 curtain handle vanishes, and the exit mask's
+  // white field floods away, leaving its black GOAWAY wedge. Authored
+  // NON-WHITE keys are kept verbatim — the entry elevator's shadow is
+  // authored #bgColor: "#000000" on ink 7, so black is a real key there
+  // (the shadow is a black silhouette on the palette's white background and
+  // must survive; the white field is discarded).
+  private ink7KeyForChannel(ch: { ink?: number; bgColorIsRgb?: boolean; bgColor?: number } | undefined): number | null | undefined {
+    if (!ch || ch.ink !== 7) return undefined;
+    if (ch.bgColorIsRgb && ch.bgColor !== undefined && ch.bgColor !== 0xffffff) {
+      return ch.bgColor;
+    }
+    return null;
   }
 
   // Draw a Director shape definition into a Pixi Graphics (fill + outline).
@@ -617,9 +677,13 @@ export class PixiStage implements StageAdapter {
       const group = new Container();
       // Transparency inks (1/8/36) make the member's white bgColor vanish —
       // the field's image background IS the box, so drawing a white rect here
-      // would cover it with a flat slab.
+      // would cover it with a flat slab. Ink 3 (Ghost) keys white the same way
+      // (Director: "nonoverlapping colors are transparent"), and the corpus
+      // Layout Parser defaults EVERY text element's #txtBgColor to white — the
+      // camera caption field (ink 3) rendered a solid white box behind the
+      // typed caption until Ghost joined the skip list.
       const ink = visual.ink ?? 0;
-      const bg = ink === 1 || ink === 8 || ink === 36 ? null : visual.bgColor;
+      const bg = ink === 1 || ink === 3 || ink === 8 || ink === 36 ? null : visual.bgColor;
       if (bg) {
         group.addChild(new Graphics().rect(0, 0, w, h).fill(bg));
       }
@@ -663,7 +727,7 @@ export class PixiStage implements StageAdapter {
         const ch = this.engine.getChannel(channel);
         const bake = this.bakeForChannel(ch, img, w, h);
         const tint = this.tintForChannel(ch);
-        const baked = bake || tint ? this.bakeImagePixels(node, img, w, h, bake, tint) : null;
+        const baked = bake || tint ? this.bakeImagePixels(node, img, w, h, bake, tint, this.ink7KeyForChannel(ch), ch.ink ?? 0, ch.colorSet ? ch.color : 0) : null;
         const pixels = baked && baked.changed ? baked.pixels : img.ensure();
         node.bakeMode = baked && baked.changed ? bake : null;
         node.imgBuffer = pixels;
@@ -734,11 +798,18 @@ export class PixiStage implements StageAdapter {
         }
       } else {
       const bake: BakeMode | null = bakeModeForInk(ch.ink);
+      // Ink-7 (Not Ghost) key: authored bgColor, else the Director default
+      // sprite bgColor (white) — see ink7KeyForChannel.
+      const ink7Key = this.ink7KeyForChannel(ch);
       // Furniture colour tint: solveMembers sets sprite.bgColor per part
-      // (coloured furniture like "pura_mdl1*1") and the part art is grayscale
-      // where the colour goes, so tintSpriteBackground swaps near-grayscale
-      // pixels for the bg colour. The blob cache can't serve these (the tint
-      // depends on the channel's bgColor), so a tinted channel bakes its own.
+      // (coloured furniture like "pura_mdl1*1"). Ink 41 (Darken) is a PER-
+      // CHANNEL duotone remap toward the bg color (DirPlayer's ink-41 shader:
+      // mix(fg, bg, src), fg defaults black) — the gold trophy cup's body is
+      // light warm gray (224,213,204, spread 20) and must tint gold, which a
+      // near-grayscale-lerp gate would skip ("mostly silver with some yellow
+      // accents"). Other inks keep the near-grayscale lerp. The blob cache
+      // can't serve these (the tint depends on the channel's bgColor), so a
+      // tinted channel bakes its own.
       const tint = this.tintForChannel(ch);
       if (tint !== null) {
         let width = 0;
@@ -752,12 +823,19 @@ export class PixiStage implements StageAdapter {
           // Pattern remap FIRST (member.paletteRef — floor patterns recolor
           // the art by palette index through the pattern palette).
           if (visual.remapPalette) PixiStage.remapPixels(rgba, dec.indices, ch.member?.palette, visual.remapPalette);
-          // Matte FIRST, then tint: the bake keys the edge-connected
-          // background so the backdrop vanishes, then the tint recolors the
-          // SURVIVING enclosed grayscale art. Tinting first recolored the
-          // background too, leaving no white edges to flood from.
-          if (bake && width > 0 && height > 0) bakeEdgeBackground(rgba, width, height, bake, ch.member?.palette, dec.indices);
-          tintSpriteBackground(rgba, width, height, tint);
+          // Bake FIRST, then tint: with a 32-bit (index-less) source the
+          // matte resolves the white box by RGB, and a prior tint would recolor
+          // it so nothing keys (colored bed_polyfon_one*2 ink-41 parts rendered
+          // an opaque tinted slab). Indexed art keys by palette index so the
+          // order is neutral there, but bake-first is correct for both. Ink 41
+          // -> darken duotone (every pixel, so the trophy cup's light-gray
+          // body becomes gold), else near-gray lerp.
+          if (bake && width > 0 && height > 0) bakeEdgeBackground(rgba, width, height, bake, ch.member?.palette, dec.indices, ink7Key);
+          // Ink 41 (Darken) uses the sprite's authored foreColor too (sepia
+          // camera photo: #color "#681F10" + #bgColor "#FFCC66"); unset stays
+          // black, which is the multiply-only behavior the trophy/avatars use.
+          if (ch.ink === 41) tintSpriteDarken(rgba, width, height, tint, ch.colorSet ? ch.color : 0);
+          else tintSpriteBackground(rgba, width, height, tint);
         } catch (e) {
           this.engine.warn(`bitmap decode failed (tint): ${e instanceof Error ? e.message : String(e)}`);
           rgba = null;
@@ -781,7 +859,7 @@ export class PixiStage implements StageAdapter {
           node.container.addChild(sprite);
         }
       } else {
-        const entry = this.acquireBlob(visual.bytes, bake, ch.member?.palette, visual.remapPalette);
+        const entry = this.acquireBlob(visual.bytes, bake, ch.member?.palette, visual.remapPalette, ink7Key);
         node.blobEntry = entry;
         const sprite = new Sprite(entry.texture);
         node.baseW = entry.width;
@@ -847,8 +925,12 @@ export class PixiStage implements StageAdapter {
   // bake + palette + pattern-remap. Same bytes + bake + palette on any channel
   // => one decode, one texture; released entries stay cached (LRU-capped) so
   // frame-cycling animations reuse them.
-  private acquireBlob(bytes: Uint8Array, bake: BakeMode | null, palette?: number[][], remap?: number[][]): BlobEntry {
-    const key = (bake ?? 'none') + '|' + PixiStage.paletteKey(palette) + '|' + PixiStage.paletteKey(remap);
+  private acquireBlob(bytes: Uint8Array, bake: BakeMode | null, palette?: number[][], remap?: number[][], ink7Key?: number | null): BlobEntry {
+    // Ink 7 keys by the channel's authored bgColor when one exists (else the
+    // art top-left) — a color key must be part of the cache fingerprint so a
+    // Not-Ghost sprite with a blue key doesn't reuse a white-keyed texture.
+    const keyColor = ink7Key !== undefined ? 'k' + (ink7Key ?? 'auto') : 'nk';
+    const key = (bake ?? 'none') + '|' + PixiStage.paletteKey(palette) + '|' + PixiStage.paletteKey(remap) + '|' + keyColor;
     let byBake = this.blobCache.get(bytes);
     if (!byBake) {
       byBake = new Map();
@@ -876,7 +958,7 @@ export class PixiStage implements StageAdapter {
         // palette[0] RGB — art that merely LOOKS white at other indices
         // survives the flood. Palette-less 32-bit art gets the edge-color
         // fallback.
-        if (bake && width > 0 && height > 0) bakeEdgeBackground(rgba, width, height, bake, palette, dec.indices);
+        if (bake && width > 0 && height > 0) bakeEdgeBackground(rgba, width, height, bake, palette, dec.indices, ink7Key);
       } catch (e) {
         this.engine.warn(`bitmap decode failed: ${e instanceof Error ? e.message : String(e)}`);
         rgba = null;
@@ -990,7 +1072,11 @@ export class PixiStage implements StageAdapter {
     node.visual.alpha = Math.max(0, Math.min(1, ch.blend / 100));
     // Director ink -> GPU blend mode (additive beams composite additively; the
     // transparency inks were pre-baked into the texture at load).
-    node.visual.blendMode = blendModeForInk(ch.ink);
+    // `subtract-gl` is registered into the GL state map by registerSubtractBlend
+    // (a real reverse-subtract equation — pixi's advanced 'subtract' filter is
+    // broken), so it's a valid runtime value even though pixi's type doesn't
+    // know it.
+    node.visual.blendMode = blendModeForInk(ch.ink) as unknown as (typeof node.visual)['blendMode'];
     node.container.zIndex = ch.locZ;
     // Re-fill shape visuals on color changes — buildVisual sets sprite.color
     // AFTER castNum/width/height, so the initial fill is only a fallback.

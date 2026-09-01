@@ -1559,17 +1559,41 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     const now = Date.now();
     const due = this.timeouts.filter((t) => t.due <= now);
     if (due.length === 0) return;
-    this.timeouts = this.timeouts.filter((t) => t.due > now);
+    // Fire callbacks FIRST while entries are still in this.timeouts so that
+    // forgetTimeout() called during a callback actually removes the entry.
+    // Track which objects were forgotten so we skip re-arming them.
+    const forgottenObjs = new Set<LObject>();
+    const preCount = new Map<LObject, number>();
+    for (const t of this.timeouts) {
+      preCount.set(t.obj, (preCount.get(t.obj) || 0) + 1);
+    }
     for (const t of due) {
       const h = t.target.handlers.get(t.handler.toLowerCase());
       if (h && t.target.script) this.interp.callHandler(t.target.script, h, [t.obj], t.target, NO_GLOBALS);
       else this.interp.callObjectHandler(t.target, t.handler, [t.obj]);
-      // Periodic timeouts re-arm (Director semantics) unless forgotten during
-      // the callback (Timeout Manager's executeTimeOut calls forget() when the
-      // matching task is gone, which removes it from this.timeouts).
-      if (t.period > 0 && this.timeouts.some((t2) => t2.obj === t.obj)) {
-        this.timeouts.push({ ...t, due: now + t.period });
-      }
+    }
+    // After all callbacks, detect forget() calls: if the post-callback count
+    // for an object dropped below (preCount minus its due entries), the
+    // callback called forgetTimeout() and we must not re-arm.
+    const postCount = new Map<LObject, number>();
+    for (const t of this.timeouts) {
+      postCount.set(t.obj, (postCount.get(t.obj) || 0) + 1);
+    }
+    const dueCount = new Map<LObject, number>();
+    for (const t of due) {
+      dueCount.set(t.obj, (dueCount.get(t.obj) || 0) + 1);
+    }
+    for (const [obj, pc] of preCount) {
+      const dc = dueCount.get(obj) || 0;
+      const po = postCount.get(obj) || 0;
+      if (po <= pc - dc) forgottenObjs.add(obj);
+    }
+    // Remove due entries and re-arm periodic survivors.
+    this.timeouts = this.timeouts.filter((t) => t.due > now);
+    for (const t of due) {
+      if (t.period <= 0) continue; // one-shot, don't re-arm
+      if (forgottenObjs.has(t.obj)) continue; // callback called forget()
+      this.timeouts.push({ ...t, due: now + t.period });
     }
   }
 
@@ -1805,9 +1829,11 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   log(msg: string): void {
     this.logs.push(msg);
     if (this.logs.length > 4000) this.logs.splice(0, 2000);
-    // U79 DIAG: boot-order diagnostics must survive the #log window's line
-    // cap — mirror them to the devtools console where history is kept.
-    if (msg.startsWith('DBG ')) {
+    // Boot-order diagnostics (DBG indexCast/getmemnum/song/...) are kept in
+    // the in-app #log window regardless, but mirrored to the devtools console
+    // only when diagnostics are opted into (window.SPARK_DIAG = 1) — the
+    // flood of DBG lines should not clutter every normal session.
+    if (msg.startsWith('DBG ') && this.diagOn()) {
       (typeof console !== 'undefined' ? console.log : null)?.(msg);
     }
   }
@@ -2350,6 +2376,16 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         // tLast=0 and the bin cast stayed empty (furniture PH boxes).
         if (h === 'number') return subject.number;
         if (h === 'name') return subject.name;
+        return VOID;
+      }
+      if (subject instanceof LPointClass) {
+        // `the locV of tParm` — the Navigator's back-link handler computes the
+        // clicked history tab from the mouseDown point passed as the event
+        // proc's tParm (expected 0/0 coords inside the element). VOID here
+        // made expandHistoryItem(integer(VOID/…) + 1) abort and the click fell
+        // through to the roomlist row beneath.
+        if (h === 'loch') return subject.locH;
+        if (h === 'locv') return subject.locV;
         return VOID;
       }
       if (h === 'rollover') return this.rollover();
@@ -3375,13 +3411,13 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
    *  drive loops and queues through it). */
   private soundChannels = new Map<
     number,
-    { volume: number; memberRef: LMemberRef | null; memberName: string; loop: boolean; playing: boolean; queue: LList }
+    { volume: number; memberRef: LMemberRef | null; memberName: string; loop: boolean; playing: boolean; queue: LList; playStartedAt: number; soundDuration: number }
   >();
 
-  private soundChannel(channel: number): { volume: number; memberRef: LMemberRef | null; memberName: string; loop: boolean; playing: boolean; queue: LList } {
+  private soundChannel(channel: number): { volume: number; memberRef: LMemberRef | null; memberName: string; loop: boolean; playing: boolean; queue: LList; playStartedAt: number; soundDuration: number } {
     let st = this.soundChannels.get(channel);
     if (!st) {
-      st = { volume: 255, memberRef: null, memberName: '', loop: false, playing: false, queue: new LList() };
+      st = { volume: 255, memberRef: null, memberName: '', loop: false, playing: false, queue: new LList(), playStartedAt: 0, soundDuration: 0 };
       this.soundChannels.set(channel, st);
     }
     return st;
@@ -3464,6 +3500,8 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       st.memberName = '';
       st.loop = false;
       st.queue = new LList();
+      st.playStartedAt = 0;
+      st.soundDuration = 0;
     }
     this.audioHost?.stop(channel);
   }
@@ -3480,6 +3518,11 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     st.memberName = member.name;
     st.playing = true;
     st.loop = loop;
+    st.playStartedAt = Date.now();
+    // duration is a computed property (mp3DurationMs + slot snap), not a
+    // stored field — resolve through getMemberProp so the snapping logic
+    // matches what the corpus reads.
+    st.soundDuration = (this.getMemberProp(ref, 'duration') as number) || 0;
     if (!this.audioHost) {
       this.log(`sound: puppetSound(${channel}, ${name}) (no audio host)`);
       return;
@@ -3498,10 +3541,13 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
    *  in its Sound Channel Class; methods dispatch through the interpreter's
    *  `sound:` branch to soundChannelMethod. */
   getSoundChannel(channel: number): LVal {
+    // Declare props so the interpreter's prop-chain lookup (propsLowerOf)
+    // can find them; without declarations, obj.props.set() stores the
+    // value but instancePropOfLower never reaches it.
     const script: Script = {
       name: `sound:${channel}`,
       type: 'parent',
-      props: [],
+      props: ['member', 'startTime', 'endTime'],
       globals: [],
       handlers: [],
       source: '',
@@ -3510,6 +3556,19 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     obj.lenient = true;
     obj.props.set('volume', 255);
     obj.props.set('member', VOID);
+    // Director `the startTime/endTime of sound n` — the Song Player's
+    // getPlayBufferLength reads `endTime - startTime` plus the queued
+    // playlist durations to decide when to refill. Without these the
+    // buffer reads 0 and initializePlaying restarts the song every 1.5s.
+    const st = this.soundChannels.get(channel);
+    if (st && st.playing && st.playStartedAt > 0) {
+      const elapsed = Date.now() - st.playStartedAt;
+      obj.props.set('startTime', Math.min(elapsed, st.soundDuration));
+      obj.props.set('endTime', st.soundDuration);
+    } else {
+      obj.props.set('startTime', 0);
+      obj.props.set('endTime', 0);
+    }
     return obj;
   }
 
@@ -3837,6 +3896,50 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     return member.image;
   }
 
+  /** Lingo-visible `member.height` with DirPlayer's #adjust auto-grow rule
+   *  (text.rs box_height): a NON-WRAPPING #adjust text member — boxType unset,
+   *  which is exactly the Writer Class's scratch members (construct sets
+   *  wordWrap = 0) — reports its CONTENT height even when its canvas rect is
+   *  much taller (Writer pDefRect = 480). Writer::render sizes the scratch
+   *  rect `rect(0, 0, tWidth, pMember.height)` off this read, and
+   *  fakeAlphaRender builds `image(pMember.width, pMember.height, 8)` — with
+   *  the raw 480 the mask (and the tOut copy) is 480 tall, so centering
+   *  consumers like the catalogue Treeview (getCenteredOfs on
+   *  pimage.height - tTextImage.height) shove the glyphs ~230px off the top.
+   *  Real v31 hits the same wall (the v7 Habbo Purse checkSaldo centering a
+   *  60x480 writer); DirPlayer auto-sizes. Word-wrapping #adjust members keep
+   *  their set box (the roomlist/ToS bakes rely on the set height), and
+   *  fixed/scroll (boxtype-set) members keep their rect height. */
+  private memberTextHeight(member: Member): number {
+    const base = member.height;
+    if (member.kind !== 'text' || member.textProps?.has('boxtype')) return base;
+    // wordWrap=1 members WITH a boxtype (#fixed/#scroll) keep their set box;
+    // wordWrap=1 members WITHOUT boxtype (#adjust, e.g. the Writer's scratch
+    // member) auto-size to content — same as non-wrapping #adjust.  Without
+    // this, the Writer's fakeAlphaRender reads pMember.height=0 (from the
+    // define rect height) before memberImage has a chance to auto-grow, and
+    // the zero-height mask makes the text render as a solid black block.
+    if (asNum(member.wordWrap ?? 0) === 1 && member.textProps?.has('boxtype')) return base;
+    if (!member.text) return base;
+    // Reuse the rasterized surface when memberImage already materialized it
+    // (it is content-tight for these members); otherwise measure through the
+    // same rasterizer so .height always agrees with the image's height.
+    let img = member.image;
+    if (!img && this.textRasterizer) {
+      try {
+        const rasterized = this.textRasterizer(member);
+        if (rasterized) {
+          img = rasterized;
+          member.image = rasterized;
+          this.imageOwners.set(rasterized, member);
+        }
+      } catch {
+        img = undefined;
+      }
+    }
+    return img ? img.height : base;
+  }
+
   /** Director `script(memberRef)` — the Script behind a script-type cast
    *  member. initializeAndRun's vercode gate does `new script(member(5, 1))`:
    *  member 5 of castlib 1 is a Parent script, and script() must hand back its
@@ -3884,7 +3987,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       case 'width':
         return member.width;
       case 'height':
-        return member.height;
+        return this.memberTextHeight(member);
       case 'image':
         return this.memberImage(member);
       case 'media':
@@ -4241,6 +4344,8 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       case 'bgcolor':
       case 'backcolor':
         return intColor(ch.bgColor);
+      case 'forecolor':
+        return intColor(ch.foreColor);
       case 'rotation':
         return ch.rotation;
       case 'skew':
@@ -4296,17 +4401,30 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     switch (p) {
       case 'member': {
         const member = this.resolveMember(value);
-        // Director/DirPlayer parity: a member change resets the channel's
-        // rotation/skew/flips (castNum keeps transforms so the furniture flip
-        // `rotation 180 + skew 180` set BEFORE castNum survives). Without the
-        // reset, releaseSprite()'s `tsprite.member = member(0)` leaked a
-        // flipped sprite's mirror onto the next user of the channel
-        // (navigator sprites randomly flipped after switching tabs).
-        if (ch.puppet && ch.member !== member) {
+        // Director: `sprite.member = X` NEVER touches the sprite's
+        // rotation/skew/flips — they are independent sprite props. The
+        // fridge's openCloseDoor swaps the member mid-flip and relies on the
+        // `rotation 180 + skew 180` mirror persisting across the swap.
+        // Only clearing to the EMPTY member (member 0 — releaseSprite, BB
+        // powerup hide) wipes the channel's transforms, so a released sprite
+        // can't leak its mirror onto the next user of the channel
+        // (navigator sprites randomly flipped after switching tabs — the
+        // corpus's releaseSprite resets rotation/skew but not flipH/flipV).
+        if (!member && ch.member) {
           ch.rotation = 0;
           ch.skew = 0;
           ch.flipH = 0;
           ch.flipV = 0;
+          // A released sprite drops its colors too (DirPlayer sprite.rs
+          // reset() clears fore/back color on release) — a reused channel
+          // must not leak a stale color into the next occupant. The room
+          // wall/floor ink-41 sprites read ch.color as the darken
+          // foreground: a white ch.color left over from a window sprite
+          // turned every black line white on room reload.
+          ch.color = 0;
+          ch.colorSet = false;
+          ch.bgColor = 0;
+          ch.bgColorIsRgb = false;
         }
         ch.member = member ?? undefined;
         this.notifyChannel(ch);
@@ -4426,7 +4544,12 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       case 'bgcolor':
       case 'backcolor':
         ch.bgColor = this.colorToInt(value);
-        ch.colorSet = true;
+        // NOT colorSet — that flag means the corpus authored `sprite.color`
+        // (DirPlayer has_fore_color vs has_back_color are separate). The
+        // ink-41 darken foreground reads colorSet ? ch.color : 0, and the
+        // room wall/floor sprites set ONLY bgColor (multiply-only tint):
+        // letting bgColor set colorSet here fed a stale ch.color from
+        // channel reuse into the foreground and lightened black lines.
         // U78: only REAL RGB colors (rgb() LColor / hex string) tint the
         // bitmap's grayscale pixels (figure-creator swatch = white pixel +
         // `sprite.bgColor = rgb(...)`). Bare ints are palette indices (Entry
@@ -4436,6 +4559,14 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         // white (Layout Parser default) and palette-index ints stay on the
         // cheap refresh path.
         changed = ch.bgColorIsRgb && ch.bgColor !== 0xffffff;
+        break;
+      case 'forecolor':
+        // DirPlayer parity: fore_color is stored (default 255) and never used
+        // to draw bitmap sprites, so store it and take the cheap refresh path
+        // (no rebuild — resetSpriteColors sets it on every avatar, per-frame
+        // spam must not re-decode textures).
+        ch.foreColor = this.colorToInt(value);
+        changed = false;
         break;
       case 'rotation':
         ch.rotation = asNum(value);
@@ -4513,6 +4644,14 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   /** Refresh the stage's channel node without rebuilding its visual — the
    *  cheap path for transform/color props (rotation, flip, scale, loc...). */
   private refreshSprite(ch: Channel): void {
+    // If a rebuild is already pending for this channel (a member/castNum swap
+    // queued via notifyChannel → microtask), applying the channel's NEW
+    // width/height against the node's STALE base texture right now would
+    // stretch the old art for a beat (sx = newW / oldBaseW) — the fridge door
+    // swap (53→80px) and wheel spin frames (1×1→73×98) jittered on exactly
+    // this. The pending rebuild rebuilds the texture and re-runs applyTransform
+    // with the matching base size, so the cheap refresh is pure waste here.
+    if (this.visualDirty.has(ch.number)) return;
     this.adapter?.refreshChannel(ch.number);
   }
 

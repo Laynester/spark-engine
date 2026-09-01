@@ -28,17 +28,17 @@
         them: sw5's external.variables.txt is the URL it downloads and dumps
         into the Variable Manager; the connection/sw vars get registered too.
       -->
-    <spark-player movie="/casts/14/habbo.spark" sw1="site.url=http://www.habbo.ch;url.prefix=http://www.habbo.ch"
+    <!-- <spark-player movie="/casts/14/habbo.spark" sw1="site.url=http://www.habbo.ch;url.prefix=http://www.habbo.ch"
       sw2="connection.info.host=localhost;connection.info.port=3003" sw3="client.reload.url=http://localhost/"
       sw4="connection.mus.host=localhost;connection.mus.port=3004"
       sw5="external.variables.txt=/external_vars_14.txt;external.texts.txt=http://localhost/v14/stuff/gamedata/external_texts.txt"
-      sw6="use.sso.ticket=0;sso.ticket=test-sso" log="#log"></spark-player>
+      sw6="use.sso.ticket=0;sso.ticket=test-sso" log="#log"></spark-player> -->
 
-    <!-- <spark-player movie="/casts/habbo.spark" sw1="site.url=http://www.habbo.ch;url.prefix=http://www.habbo.ch"
-      sw2="connection.info.host=localhost;connection.info.port=3000" sw3="client.reload.url=http://localhost/"
-      sw4="connection.mus.host=localhost;connection.mus.port=3004"
+    <spark-player movie="/casts/31/habbo.spark" sw1="site.url=http://www.habbo.ch;url.prefix=http://www.habbo.ch"
+      sw2="connection.info.host=localhost;connection.info.port=12321" sw3="client.reload.url=http://localhost/"
+      sw4="connection.mus.host=localhost;connection.mus.port=12322"
       sw5="external.variables.txt=/external_vars_31.txt?;external.texts.txt=http://localhost/v31/stuff/gamedata/external_texts.txt?"
-      sw6="use.sso.ticket=1;sso.ticket=test-sso" log="#log"></spark-player> -->
+      sw6="use.sso.ticket=1;sso.ticket=admin-ticket-1" log="#log"></spark-player>
   </main>
   <pre id="log" class="log">waiting for spark…</pre>
   <!-- Loaded as a module so Vite compiles spark.ts + the @habbo/runtime TS
