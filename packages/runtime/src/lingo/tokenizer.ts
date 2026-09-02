@@ -4,7 +4,6 @@ export interface Token {
   type: TokenType;
   value: string;
   line: number;
-  /** Character offset of the token start in the source (LSP positions). */
   pos: number;
 }
 
@@ -36,7 +35,6 @@ export function tokenize(src: string): Token[] {
       continue;
     }
 
-    // Comments: --[[ ... ]] block, or -- to end of line.
     if (c === '-' && src[i + 1] === '-') {
       if (src[i + 2] === '[' && src[i + 3] === '[') {
         const end = src.indexOf(']]', i + 4);
@@ -48,7 +46,6 @@ export function tokenize(src: string): Token[] {
       continue;
     }
 
-    // Strings with "" as escaped quote.
     if (c === '"') {
       const pos = i;
       let value = '';
@@ -74,9 +71,6 @@ export function tokenize(src: string): Token[] {
       continue;
     }
 
-    // Symbols: #name. Tolerate "# name" — the real v14 external_vars.txt
-    // writes struct keys as `# ilk:#struct` (space after the hash); Director's
-    // value() accepts it, and Variable Container GetValue parses those strings.
     if (c === '#') {
       const pos = i;
       let value = '';
@@ -92,7 +86,6 @@ export function tokenize(src: string): Token[] {
       continue;
     }
 
-    // Numbers (stop before a range operator: `1..x` must tokenize as 1, .., x)
     if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(src[i + 1] ?? ''))) {
       const pos = i;
       let value = '';
@@ -112,7 +105,6 @@ export function tokenize(src: string): Token[] {
       continue;
     }
 
-    // Identifiers (case-insensitive in Lingo; we keep original case and compare lowercased).
     if (/[A-Za-z_]/.test(c)) {
       const pos = i;
       let value = '';
@@ -124,7 +116,6 @@ export function tokenize(src: string): Token[] {
       continue;
     }
 
-    // Punctuators (longest first)
     let matched: string | undefined;
     for (const p of PUNCTUATORS) {
       if (src.startsWith(p, i)) {

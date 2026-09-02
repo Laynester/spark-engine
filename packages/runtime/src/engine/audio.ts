@@ -1,19 +1,13 @@
-// Web Audio backend for the engine's sound channels. Decodes MP3 payloads,
-// plays them per channel through a GainNode (so volume/stop map to real
-// audio), creates the AudioContext lazily so autoplay policies never block a
-// boot sound, and caches decoded buffers so re-plays skip the decode.
 export class WebAudioPlayer {
   private ctx: AudioContext | null = null;
   private gains = new Map<number, GainNode>();
   private sources = new Map<number, AudioBufferSourceNode>();
   private buffers = new Map<string, AudioBuffer>();
-  // Key of the in-flight decode per channel — a newer play on the same
-  // channel invalidates the older one's completion.
   private pending = new Map<number, string>();
 
   private ensureContext(): AudioContext | null {
     if (this.ctx) {
-      if (this.ctx.state === 'suspended') void this.ctx.resume().catch(() => { /* blocked */ });
+      if (this.ctx.state === 'suspended') void this.ctx.resume().catch(() => {  });
       return this.ctx;
     }
     const g = globalThis as {
@@ -24,10 +18,8 @@ export class WebAudioPlayer {
     if (!AC) return null;
     const ctx = new AC();
     this.ctx = ctx;
-    // A context created outside a user gesture starts suspended; unlock it
-    // on the next interaction.
     const unlock = () => {
-      if (this.ctx && this.ctx.state === 'suspended') void this.ctx.resume().catch(() => { /* blocked */ });
+      if (this.ctx && this.ctx.state === 'suspended') void this.ctx.resume().catch(() => {  });
     };
     if (typeof document !== 'undefined') {
       document.addEventListener('pointerdown', unlock, { once: true });
@@ -36,7 +28,6 @@ export class WebAudioPlayer {
     return ctx;
   }
 
-  // Play a sound payload on a channel (replacing whatever's playing).
   play(channel: number, name: string, raw: Uint8Array, opts: { loop?: boolean; volume?: number; onEnded?: () => void }): void {
     const ctx = this.ensureContext();
     if (!ctx) return;
@@ -47,14 +38,12 @@ export class WebAudioPlayer {
       this.start(ctx, channel, cached, opts);
       return;
     }
-    // decodeAudioData detaches the buffer it's given, so hand it a copy and
-    // cache the decoded result for later re-plays.
     this.pending.set(channel, key);
     const copy = raw.slice().buffer as ArrayBuffer;
     ctx.decodeAudioData(
       copy,
       (decoded) => {
-        if (this.pending.get(channel) !== key) return; // superseded by a newer play
+        if (this.pending.get(channel) !== key) return;
         this.pending.delete(channel);
         this.buffers.set(key, decoded);
         this.start(ctx, channel, decoded, opts);
@@ -65,7 +54,6 @@ export class WebAudioPlayer {
     );
   }
 
-  // Wire a decoded buffer into the channel's gain node and play it.
   private start(ctx: AudioContext, channel: number, buffer: AudioBuffer, opts: { loop?: boolean; volume?: number; onEnded?: () => void }): void {
     let gain = this.gains.get(channel);
     if (!gain) {
@@ -81,8 +69,6 @@ export class WebAudioPlayer {
     const self = this;
     src.onended = () => {
       if (self.sources.get(channel) === src) self.sources.delete(channel);
-      // A natural end (not a stop() — that nulls onended first) advances the
-      // channel's queue in the engine.
       if (!src.loop) opts.onEnded?.();
     };
     this.sources.set(channel, src);
@@ -93,11 +79,10 @@ export class WebAudioPlayer {
     this.pending.delete(channel);
     const src = this.sources.get(channel);
     if (src) {
-      src.onended = null; // don't treat an explicit stop as a natural end
+      src.onended = null;
       try {
         src.stop();
       } catch {
-        /* already stopped */
       }
       this.sources.delete(channel);
     }

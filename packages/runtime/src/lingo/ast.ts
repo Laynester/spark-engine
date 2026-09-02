@@ -1,5 +1,4 @@
 export interface Script {
-  /** Script member name (from the filename), e.g. "Room_Interface_Class". */
   name: string;
   type: 'parent' | 'movie' | 'score' | 'behavior' | 'unknown';
   props: string[];
@@ -20,7 +19,6 @@ export interface TheSegment {
   op: 'of' | 'in';
   name: string;
   arg?: Expr;
-  /** first/last/middle for `the last char in X` forms. */
   qualifier?: string;
 }
 

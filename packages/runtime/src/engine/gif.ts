@@ -1,15 +1,9 @@
-// Minimal GIF87a/89a decoder — dependency-free, same contract as png.ts.
-// Powers catalogue headers/teasers and badge downloads (.gif art from
-// image.library.url). Supports LZW frames, color tables, transparency,
-// interlace and the three disposal modes; multi-frame GIFs composite onto one
-// canvas so the final state is what renders.
 
 
 function readU16(bytes: Uint8Array, pos: number): number {
   return bytes[pos] | (bytes[pos + 1] << 8);
 }
 
-// RGB triplets for a color table of `size` entries.
 
 function readColorTable(bytes: Uint8Array, pos: number, size: number): number[] {
   const out = new Array<number>(size * 3);
@@ -21,7 +15,6 @@ function readColorTable(bytes: Uint8Array, pos: number, size: number): number[] 
   return out;
 }
 
-// GIF LZW: codes arrive LSB-first, dictionary grows up to 12-bit codes.
 
 function lzwDecompress(data: number[], minCodeSize: number, expected: number): number[] {
   const clearCode = 1 << minCodeSize;
@@ -31,8 +24,8 @@ function lzwDecompress(data: number[], minCodeSize: number, expected: number): n
   const reset = (): void => {
     dict = [];
     for (let i = 0; i < clearCode; i++) dict.push([i]);
-    dict.push([]); // clearCode slot
-    dict.push([]); // endCode slot
+    dict.push([]);
+    dict.push([]);
     codeSize = minCodeSize + 1;
   };
   reset();
@@ -68,10 +61,9 @@ function lzwDecompress(data: number[], minCodeSize: number, expected: number): n
     if (code < dict.length) {
       entry = dict[code];
     } else if (code === dict.length) {
-      // KwKwK case: the pending sequence plus its first pixel.
       entry = [dict[prevCode][0], ...dict[prevCode]];
     } else {
-      break; // corrupt stream — stop rather than throw
+      break;
     }
     out.push(...entry);
     dict.push([...dict[prevCode], entry[0]]);
@@ -81,7 +73,6 @@ function lzwDecompress(data: number[], minCodeSize: number, expected: number): n
   return out;
 }
 
-// Interlace source-row order: 0,8,16… then 4,12,20… then 2,6,10… then 1,3,5…
 
 function interlaceRowOrder(height: number): number[] {
   const order: number[] = [];
@@ -108,23 +99,21 @@ export function decodeGif(bytes: Uint8Array): { width: number; height: number; r
     pos += gctSize * 3;
   }
   const out = new Uint8Array(width * height * 4);
-  let prevCanvas: Uint8Array | null = null; // disposal-3 restore-to-previous
-  let nextTransparent = -1; // GCE transparency applies to the next image block
+  let prevCanvas: Uint8Array | null = null;
+  let nextTransparent = -1;
   let nextDisposal = 0;
   while (pos < bytes.length) {
     const block = bytes[pos++];
-    if (block === 0x3b) break; // trailer
+    if (block === 0x3b) break;
     if (block === 0x21) {
       const label = bytes[pos++];
       if (label === 0xf9) {
-        // Graphic Control Extension: size, packed flags, delay(2), trans idx.
         const gceSize = bytes[pos++];
         const flags = bytes[pos];
         nextTransparent = flags & 1 ? bytes[pos + 3] : -1;
         nextDisposal = (flags >> 2) & 7;
-        pos += gceSize + 1; // flags/delay/trans-index + block terminator
+        pos += gceSize + 1;
       } else {
-        // Other extensions (application/comment/plain text): skip sub-blocks.
         while (true) {
           const n = bytes[pos++];
           if (n === 0) break;
@@ -134,7 +123,6 @@ export function decodeGif(bytes: Uint8Array): { width: number; height: number; r
       continue;
     }
     if (block !== 0x2c) throw new Error('GIF: unexpected block 0x' + block.toString(16));
-    // Image descriptor.
     const left = readU16(bytes, pos); pos += 2;
     const top = readU16(bytes, pos); pos += 2;
     const iw = readU16(bytes, pos); pos += 2;
@@ -161,7 +149,6 @@ export function decodeGif(bytes: Uint8Array): { width: number; height: number; r
     const disposal = nextDisposal;
     nextTransparent = -1;
     nextDisposal = 0;
-    // Disposal 3 (restore to previous) needs the canvas before this frame.
     if (disposal === 3) prevCanvas = new Uint8Array(out);
     const rowOrder = interlace ? interlaceRowOrder(ih) : null;
     let idx = 0;
@@ -187,7 +174,6 @@ export function decodeGif(bytes: Uint8Array): { width: number; height: number; r
       }
     }
     if (disposal === 2) {
-      // Restore to background: clear this frame's rect.
       for (let y = 0; y < ih; y++) {
         const ty = top + y;
         if (ty >= height) continue;

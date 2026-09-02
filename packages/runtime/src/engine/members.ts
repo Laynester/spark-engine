@@ -2,9 +2,8 @@ import type { Script } from '../lingo/ast.js';
 import type { CastFont, MemberKind } from '../bundle/types.js';
 import type { LImage, LRect, LVal } from '../lingo/values.js';
 
-// Parsed Director shape-member definition (solid-fill rects/ovals on stage).
 export interface ShapeDef {
-  shapeType: string; // 'rect' | 'oval' | 'line' | 'roundedRect'
+  shapeType: string;
   width: number;
   height: number;
   color: number;
@@ -16,7 +15,6 @@ export interface ShapeDef {
   outlineInvisible: boolean;
 }
 
-// Parse a Director shape member's exported text (key: value lines).
 export function parseShapeText(content: string): ShapeDef {
   const d: ShapeDef = {
     shapeType: 'rect', width: 0, height: 0, color: 0xffffff, backColor: 0,
@@ -49,43 +47,22 @@ export class Member {
   text?: string;
   raw?: Uint8Array;
   palette?: number[][];
-  // Target palette for a pattern remap (member.palette = member(patternPalette)
-  // — wall/floor patterns). Separate from `palette` (the member's own .pal,
-  // the index source) so memberImage can remap art through the pattern table.
   paletteTarget?: number[][];
   script?: Script;
   fileName?: string;
-  // Persistent member.image surface (created lazily by the engine).
   image?: LImage;
-  // True once Lingo has WRITTEN into member.image (copyPixels/fill/draw). A
-  // plain bitmap member (no ink-9 mask) then displays its painted surface
-  // instead of the original raw PNG — the FUSE screen camera copies the
-  // cropped stage into member("fuse_screen").image every frame.
   imagePainted = false;
-  // member.color = rgb(...) store (text/field members).
   color?: LVal;
-  // member.rect get/set (text-box rect).
   rect?: LRect;
-  // member.font / fontSize / alignment (text members).
   font?: LVal;
   fontSize?: LVal;
   alignment?: LVal;
-  // member.wordWrap / fixedLineSpace (Writer text layout).
   wordWrap?: LVal;
   fixedLineSpace?: LVal;
-  // member.fontStyle — a style list like [#plain].
   fontStyle?: LVal;
-  // Palette member reference for 8-bit images (member.paletteRef).
   paletteRef?: LVal;
-  // Generic text-member prop store (topSpacing, boxType, margins, ...).
   textProps?: Map<string, LVal>;
-  // Director chunk formatting: 1-based inclusive char ranges with
-  // font/fontStyle/color overrides (member.char[1..n].font = ... — the
-  // Balloon Manager bolds the speaker name inside the message). Attached to
-  // the TEXT: setMemberProp('text') clears it, like Director. Consumed by
-  // rasterizeTextMember to draw styled runs.
   chunkStyles?: { from: number; to: number; font?: LVal; fontStyle?: LVal; color?: LVal }[];
-  // Parsed shape definition (kind === 'shape').
   shape?: ShapeDef;
 
   constructor(
@@ -102,7 +79,6 @@ export class Member {
       return size ? size.w : 0;
     }
     if (this.kind === 'shape' && this.shape) return this.shape.width;
-    // In-movie bitmap members (createMember + member.image) size from their surface.
     if (this.image) return this.image.width;
     return 0;
   }
@@ -110,8 +86,6 @@ export class Member {
   get height(): number {
     if (this.kind === 'text') {
       if (this.rect && this.rect.height > 0) return this.rect.height;
-      // Freshly-created text members auto-size to their line height (buttons
-      // size their label box off member.height); zero would rasterize a sliver.
       const size = Math.round(Number(this.fontSize)) || 12;
       return size + 2;
     }
@@ -132,13 +106,11 @@ export class CastLib {
   fontFiles: string[] = [];
   fileName?: string;
   preloadMode = 0;
-  // False for pre-registered shells (casts.txt) whose bundle isn't loaded yet.
   loaded = false;
 
   constructor(public number: number, public name: string) {}
 }
 
-// Read width/height from a PNG IHDR chunk.
 export function readPngSize(bytes: Uint8Array): { w: number; h: number } | null {
   if (bytes.length < 24) return null;
   if (bytes[0] !== 0x89 || bytes[1] !== 0x50 || bytes[2] !== 0x4e || bytes[3] !== 0x47) return null;
@@ -146,14 +118,10 @@ export function readPngSize(bytes: Uint8Array): { w: number; h: number } | null 
   return { w: dv.getUint32(16), h: dv.getUint32(20) };
 }
 
-// Normalize exported LF text to Director's canonical CR (chr 13) separators —
-// the corpus splits text members on RETURN and counts .line chunks, so LF
-// files would parse as one line and class lookups would read VOID.
 export function normalizeTextLines(content: string): string {
   return content.replace(/\r\n/g, '\n').replace(/\n/g, '\r');
 }
 
-// Parse a JASC-PAL palette file into RGB triplets.
 export function parsePalette(content: string): number[][] {
   const lines = content.split(/\r?\n/);
   const colors: number[][] = [];
@@ -164,8 +132,6 @@ export function parsePalette(content: string): number[][] {
   return colors;
 }
 
-// Parse a palette payload — the bundler's compact binary form ('PALB' + count
-// + RGB bytes) or classic JASC-PAL text (old bundles / unparseable sources).
 export function parsePaletteBytes(bytes: Uint8Array): number[][] {
   if (
     bytes.length >= 6 &&

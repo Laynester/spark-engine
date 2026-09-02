@@ -1,24 +1,3 @@
-/**
- * Persistence worker — keeps the client alive while the tab is hidden.
- *
- * The engine tick is driven by Pixi's requestAnimationFrame ticker, and
- * browsers pause rAF when the page is hidden. That freezes `engine.tick()`
- * (timeouts, delays, net-message draining, frame scripts) and lets the server
- * drop the session. This module gives the engine a dedicated Worker that:
- *
- *  - owns the Multiuser WebSocket (worker IO/timers are exempt from the
- *    hidden-page throttling that hits the main thread), and
- *  - runs a 1 Hz clock while the page is hidden, posting `tick` messages that
- *    the engine uses to keep advancing FULL game logic (no rendering).
- *
- * The main thread keeps all game state; the worker holds only the socket and
- * the hidden-clock. When the page becomes visible the rAF ticker takes back
- * over and the worker's clock stops, so nothing double-ticks.
- *
- * The demo builds a single self-contained iife (spark.js), so the worker is
- * created from an inline Blob of this source rather than a separate chunk.
- *//** The worker's full program. Plain JS on purpose: it ships as a string and
- *  has no imports. */
 export const PERSIST_WORKER_SOURCE = `
 'use strict';
 // One socket per Multiuser connection url — the client runs BOTH the main
@@ -95,7 +74,6 @@ self.onmessage = function (ev) {
 };
 `;
 
-/** Messages the worker posts to the main thread. */
 export type PersistWorkerMsg =
   | { type: 'ws-open'; url: string }
   | { type: 'ws-close'; url: string }
@@ -104,32 +82,18 @@ export type PersistWorkerMsg =
   | { type: 'ws-text'; url: string; text: string }
   | { type: 'tick' };
 
-/** The engine-facing surface of a persistence worker. Tests implement this
- *  with a fake so the routing logic runs without a real Worker. */
 export interface PersistWorkerLike {
-  /** Open (or re-open) the WebSocket at url. */
   connect(url: string): void;
-  /** Ship bytes to the worker's socket at url (kepler wants binary frames).
-   *  Multiple Multiuser connections live in the worker simultaneously (info +
-   *  mus), so sends are routed by url. */
   send(url: string, bytes: Uint8Array): void;
-  /** Close the socket at url. */
   closeSocket(url: string): void;
-  /** Start/stop the 1 Hz hidden-clock. */
   setHidden(hidden: boolean): void;
-  /** Register the engine's inbound message handler (single slot). */
   onMessage(cb: (msg: PersistWorkerMsg) => void): void;
-  /** Tear the worker down. */
   terminate(): void;
 }
 
-/** Real Blob-worker implementation. The constructor is a no-op with
- *  `available = false` in headless environments (Node, strict CSP) — the
- *  embed host skips wiring then and the engine keeps its inline socket. */
 export class PersistWorker implements PersistWorkerLike {
   private worker: Worker | null = null;
   private cb: ((msg: PersistWorkerMsg) => void) | null = null;
-  /** False in Node/headless/CSP-blocked environments — skip wiring then. */
   readonly available: boolean;
 
   constructor() {

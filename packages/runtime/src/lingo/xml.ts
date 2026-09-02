@@ -1,23 +1,3 @@
-// XML parser for the `xmlparser` Xtra (FUSE Figure System / Figure Data Class).
-//
-// The corpus parses partsets.xml, draworder.xml, animation.xml and
-// figuredata.xml through `new(xtra("xmlparser"))`:
-//
-//   tParser = new(xtra("xmlparser"))
-//   tParser.parseString(tdata)          -> 1 on success / 0 on error
-//   tParser.getError()                  -> error string or VOID
-//   tParser.child[i].name               -> element name (string)
-//   tParser.child[i].child[j]           -> sub-elements
-//   tParser.child[i].attributeName[k]   -> attribute names (list of strings)
-//   tParser.child[i].attributeValue[k]  -> attribute values (list of strings)
-//   tElement.child[1].text              -> text-node content ("#text" nodes)
-//
-// The node shape mirrors LibreShockwave's XmlParserXtra exactly (proplists
-// with name/child/attributeName/attributeValue, text nodes carry `text`),
-// including its whitespace rules: whitespace-only text between elements is
-// discarded, and an element whose children are all elements gets NO text
-// node — so `<color id="1">FFCB98</color>` has child.count = 1 (the text
-// node) while `<settype> <set/> </settype>` has child.count = 1 (the set).
 import { LList, LPropList } from './values.js';
 import type { LVal } from './values.js';
 
@@ -46,7 +26,6 @@ function makeTextNode(text: string): LPropList {
 }
 
 function decodeEntities(value: string): string {
-  // LibreShockwave order — &amp; last so its own replacement isn't re-decoded.
   return value
     .split('&quot;').join('"')
     .split('&apos;').join("'")
@@ -88,7 +67,6 @@ class XmlParser {
         children.push(this.parseElement());
         continue;
       }
-      // Document-level text (e.g. figuredata's "-\n" separators) is discarded.
       this.readText();
     }
   }
@@ -149,9 +127,9 @@ class XmlParser {
     while (this.pos < this.xml.length) {
       const c = this.xml.charCodeAt(this.pos);
       const ok =
-        (c >= 48 && c <= 57) || // 0-9
-        (c >= 65 && c <= 90) || // A-Z
-        (c >= 97 && c <= 122) || // a-z
+        (c >= 48 && c <= 57) ||
+        (c >= 65 && c <= 90) ||
+        (c >= 97 && c <= 122) ||
         this.xml[this.pos] === '_' ||
         this.xml[this.pos] === '-' ||
         this.xml[this.pos] === '.' ||
@@ -212,12 +190,10 @@ class XmlParser {
   }
 }
 
-/** Empty document — the xmlparser's pre-parse root ([#child: []]). */
 export function emptyXmlDocument(): LPropList {
   return makeNode('#document', [], [], []);
 }
 
-/** Parse XML into the xmlparser node tree; throws on malformed input. */
 export function parseXmlToLingo(xml: string): LPropList {
   return new XmlParser(xml).parseDocument();
 }

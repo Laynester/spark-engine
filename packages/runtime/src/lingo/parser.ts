@@ -3,10 +3,8 @@ import { LingoSyntaxError, tokenize, type Token } from './tokenizer.js';
 
 const CHUNK_KWS = new Set(['char', 'word', 'line', 'item', 'paragraph']);
 
-// Plural chunk names in `the number of items/lines/words/chars in X`.
 const CHUNK_COUNT_KWS = new Set(['items', 'lines', 'words', 'chars']);
 
-// Names that accept Lingo command syntax without parens: `field "System Props"`.
 const COMMAND_FUNCS = new Set([
   'field', 'member', 'sprite', 'castlib', 'window', 'go', 'call', 'new', 'symbol', 'value',
   'string', 'integer', 'float', 'abs', 'sqrt', 'length', 'random', 'min', 'max', 'list', 'point', 'rect',
@@ -31,9 +29,7 @@ const BINARY_PRECEDENCE: Record<string, number> = {
 
 export class Parser {
   private pos = 0;
-  // When set, `the X of Y` chains stop consuming trailing of/in.
   private noOf = false;
-  // Paren nesting depth: command-syntax args stop at a comma inside parens.
   private parenDepth = 0;
 
   constructor(private tokens: Token[]) {}
@@ -76,7 +72,6 @@ export class Parser {
     return t.value;
   }
 
-  // ---------------------------------------------------------------- script
 
   parseScript(): Script {
     const handlers: Handler[] = [];
@@ -118,7 +113,6 @@ export class Parser {
     const nameTok = this.next();
     if (nameTok.type !== 'ident') throw this.err('expected handler name after on');
     const name = nameTok.value;
-    // Parameters must sit on the same line as the handler name.
     const params: string[] = [];
     if (this.peek().type === 'ident' && this.peek().line === nameTok.line) {
       while (this.peek().type === 'ident' && !['end', 'property', 'global', 'on'].includes(this.peek().value.toLowerCase())) {
@@ -130,14 +124,12 @@ export class Parser {
     const body = this.parseBlock(new Set(['end']));
     const endTok = this.next();
     if (endTok.type !== 'ident' || endTok.value.toLowerCase() !== 'end') throw this.err('expected "end"');
-    // optional trailing handler name on the same line: `end foo`
     if (this.peek().type === 'ident' && this.peek().line === endTok.line) {
       this.next();
     }
     return { name, params, body };
   }
 
-  // ---------------------------------------------------------------- blocks
 
   private parseBlock(terminators: Set<string>): Stmt[] {
     const stmts: Stmt[] = [];
@@ -150,7 +142,6 @@ export class Parser {
     return stmts;
   }
 
-  // ---------------------------------------------------------------- statements
 
   private parseStmt(): Stmt {
     const t = this.peek();
@@ -176,10 +167,6 @@ export class Parser {
       if (kw === 'return') {
         this.next();
         if (this.atStatementEnd()) return { kind: 'return' };
-        // sparkd renders the R31 compiler's `return <error-call>` bytecode as
-        // `return RETURN, error(me, ...)` — a comma-separated value list. The
-        // handler returns the LAST value (error()'s result), matching the
-        // sibling `return error(...)` form in the same scripts (U135).
         const values = [this.parseExpr(0)];
         while (this.isPunct(',')) {
           this.next();
@@ -189,10 +176,8 @@ export class Parser {
       }
       if (kw === 'put') {
         const putLine = this.next().line;
-        // Bare `put` (no value on the same line) is a no-op log.
         if (this.peek().line !== putLine) return { kind: 'put', value: { kind: 'str', value: '' } };
         const values = [this.parseExpr(0)];
-        // Comma-separated values.
         while (this.isPunct(',')) {
           this.next();
           values.push(this.parseExpr(0));
@@ -205,7 +190,6 @@ export class Parser {
         return { kind: 'put', value: values.length === 1 ? values[0] : { kind: 'list', items: values } };
       }
       if (kw === 'delete') {
-        // `delete <chunkExpr>` removes a range from a string variable.
         this.next();
         return { kind: 'delete', target: this.parseChain() };
       }
@@ -231,7 +215,6 @@ export class Parser {
       }
     }
 
-    // Assignment vs expression statement.
     const chain = this.parseChain();
     if (this.isPunct('=')) {
       this.next();
@@ -249,13 +232,12 @@ export class Parser {
   }
 
   private parseIf(): Stmt {
-    const line = this.next().line; // 'if'
+    const line = this.next().line;
     const cond = this.parseExpr(0);
     this.expectKw('then');
     const thenLine = this.peek().line;
 
     if (thenLine === line) {
-      // One-liner: `if x then stmt [else stmt]`.
       const stmts = [this.parseStmt()];
       let els: Stmt[] = [];
       if (this.isKw('else')) {
@@ -270,7 +252,6 @@ export class Parser {
     let els: Stmt[] = [];      if (this.isKw('else')) {
         const elseTok = this.next();
         if (this.isKw('if') && this.peek().line === elseTok.line) {
-          // `else if` chain on one line: the nested if consumes the trailing `end if`.
           return { kind: 'if', cond, then, els: [this.parseIf()] };
       }
       els = this.parseBlock(new Set(['end']));
@@ -282,7 +263,6 @@ export class Parser {
 
   private parseCase(): Stmt {
     this.expectKw('case');
-    // `case the keyCode of` — the `of` belongs to case, not the `the` chain.
     const savedNoOf = this.noOf;
     this.noOf = true;
     let subject: Expr;
@@ -306,8 +286,6 @@ export class Parser {
         branches.push({ match: undefined, body: this.parseCaseBody() });
         continue;
       }
-      // label:  expr ":" body
-      // label:  expr ["," expr]* ":" body   (multi-value labels: `6, 4159, 4165:`)
       const matches = [this.parseExpr(0)];
       while (this.isPunct(',')) {
         this.next();
@@ -331,7 +309,6 @@ export class Parser {
     return stmts;
   }
 
-  /** True when the rest of the current line is a case label: `expr :` at depth 0. */
   private lineEndsWithLabelColon(): boolean {
     const line = this.peek().line;
     let depth = 0;
@@ -384,7 +361,6 @@ export class Parser {
     return { kind: 'repeatWith', varName, from, to, down, body };
   }
 
-  // ---------------------------------------------------------------- expressions
 
   private parseExpr(minPrec = 0): Expr {
     let left = this.parseUnary();
@@ -394,9 +370,6 @@ export class Parser {
       if (t.type === 'punct' && BINARY_PRECEDENCE[t.value] !== undefined) op = t.value;
       else if (t.type === 'ident' && BINARY_PRECEDENCE[t.value.toLowerCase()] !== undefined) op = t.value.toLowerCase();
       if (!op) break;
-      // Lingo continues an expression onto the next line only when the current
-      // line *ends* with the operator. An operator that starts a new line (e.g.
-      // a case label `-128:`) must not be consumed as continuation.
       if (t.line !== this.tokens[this.pos - 1].line) break;
       const prec = BINARY_PRECEDENCE[op];
       if (prec < minPrec) break;
@@ -407,7 +380,6 @@ export class Parser {
     return left;
   }
 
-  /** Parse a full expression and require EOF (backs value()). */
   parseTopLevelExpr(): Expr {
     const expr = this.parseExpr(0);
     if (this.peek().type !== 'eof') throw this.err('trailing tokens after expression');
@@ -420,13 +392,6 @@ export class Parser {
       const kw = t.value.toLowerCase();
       if (kw === 'not') {
         this.next();
-        // Director: `not` binds tighter than every binary operator. The Entry
-        // Car Class toggles direction with `tDirNum = not (tDirNum - 1) + 1`
-        // which must parse as `(not (tDirNum-1)) + 1` (1<->2), not
-        // `not ((tDirNum-1)+1)` (= 0 -> castNum 0 -> the car vanished at the
-        // turn). `if not tWndObj = VOID` then reads `(not tWndObj) = VOID`,
-        // which is TRUE for a live window because VOID coerces to 0 in numeric
-        // equality (lingoEquals) — same net effect as the loose reading.
         return { kind: 'unary', op: 'not', arg: this.parseExpr(7) };
       }
     }
@@ -442,16 +407,6 @@ export class Parser {
     return this.parseChainTail(expr, this.tokens[this.pos - 1].line);
   }
 
-  /**
-   * Consume `.prop` / `[index]` / `(args)` chain continuations onto an already
-   * parsed primary. Like the binary loop, continuation tokens are only consumed
-   * on the same line — a `(` starting a fresh line after a completed call is a
-   * NEW statement (`cursor(0)` + `(the stage).title = ...`), not more args.
-   * Shared by parseChain and parseThe. When `indexOnly` is set only `[index]`
-   * is consumed: parseThe uses it because `the count of X[i][j]` binds the
-   * index chain to the SUBJECT expression, while a `.method()` after `of`
-   * (`the ancestor of me.construct()`) binds to the `the` RESULT.
-   */
   private parseChainTail(expr: Expr, startLine: number, indexOnly = false): Expr {
     for (;;) {
       const sameLine = this.peek().line === startLine;
@@ -498,7 +453,6 @@ export class Parser {
         expr = { kind: 'call', callee: expr, args };
         continue;
       }
-      // Command syntax without parens: `field "System Props"`, `symbol "x"`.
       if (sameLine && expr.kind === 'ident' && COMMAND_FUNCS.has(expr.name.toLowerCase()) && this.startsCommandArg()) {
         expr = { kind: 'call', callee: expr, args: this.parseCommandArgs() };
         continue;
@@ -516,9 +470,6 @@ export class Parser {
     const args: Expr[] = [];
     for (;;) {
       args.push(this.parseExpr(0));
-      // Inside parens (`convertToPropList(field "X", RETURN)`), a comma ends
-      // the command arg list so the outer call gets the rest. At statement
-      // level (`put a, b, c`) commas still separate command args.
       if (this.parenDepth === 0 && this.isPunct(',')) {
         this.next();
         continue;
@@ -564,8 +515,6 @@ export class Parser {
     const t = this.next();
     switch (t.type) {
       case 'num':
-        // Decimal/exponent literals (14.0, 1e3) are FLOAT-typed — 14.0 / 4 =
-        // 3.5 while 14 / 4 = 3 — so the parser flags them for the interpreter.
         return { kind: 'num', value: parseFloat(t.value), float: /[.eE]/.test(t.value) };
       case 'str':
         return { kind: 'str', value: t.value };
@@ -599,16 +548,10 @@ export class Parser {
       qualifier = headLower;
       head = this.parseIdent();
     }
-    // `the long time` / `the short date` / `the abbrev date`: adjective folds into head.
     if (['long', 'short', 'abbrev'].includes(headLower) && this.peek().type === 'ident' && this.peek().line === headLine) {
       head = headLower + this.parseIdent();
     }
     if (CHUNK_KWS.has(head.toLowerCase()) || qualifier) {
-      // Chunks bind TIGHTER than any binary operator: `the last char in
-      // tName = "*"` is (the last char in tName) = "*", not the last char in
-      // (tName = "*") — a full expression subject would swallow the
-      // comparison and the `*` alias read would never fire. Subject is a
-      // primary + index chains.
       let subject: Expr | undefined;
       if (this.isKw('of') || this.isKw('in')) {
         this.next();
@@ -620,9 +563,6 @@ export class Parser {
       return { kind: 'the', head: 'chunk', chain: [{ op: 'of', name: head.toLowerCase(), arg: subject, qualifier }] };
     }
     const chain: TheSegment[] = [];
-    // `the number of items in tLine` — chunk-count form: one keyword segment
-    // + one subject, then STOP so a trailing `of X` binds as an outer chunk's
-    // subject (`item 2 to the number of items in tLine of tLine`).
     if (headLower === 'number' && (this.isKw('of') || this.isKw('in')) &&
         this.peek(1).type === 'ident' && CHUNK_COUNT_KWS.has(this.peek(1).value.toLowerCase())) {
       const op = this.next().value.toLowerCase() as 'of' | 'in';
@@ -645,8 +585,6 @@ export class Parser {
     while (!this.noOf && (this.isKw('of') || this.isKw('in'))) {
       const op = this.next().value.toLowerCase() as 'of' | 'in';
       if (this.isKw('the')) {
-        // `the count of the pItemList of me` — a nested `the` expression is the
-        // subject of the outer one; parse it whole (including its own `of`).
         chain.push({ op, name: 'the', arg: this.parsePrimary() });
         continue;
       }
@@ -656,11 +594,6 @@ export class Parser {
       if (this.isPunct('(')) {
         arg = { kind: 'call', callee: { kind: 'ident', name }, args: this.parseArgs() };
       } else      if (this.isPunct('[')) {
-        // Index chains after the identifier belong to the SUBJECT
-        // (`the count of pSelectablePartsList[tsex][tPart]`) — attaching them
-        // to the count RESULT made Figure_System.getCountOfPart return VOID.
-        // Only `[...]` is consumed; a `.method()` after `of` binds to the
-        // `the` RESULT.
         arg = this.parseChainTail({ kind: 'ident', name }, nameLine, true);
       } else if (this.startsAtom(nameLine)) {
         arg = this.parsePrimary();
@@ -688,7 +621,6 @@ export class Parser {
     const saved = this.noOf;
     this.noOf = true;
     try {
-      // `word of X` (no index) vs `word 1 to 3 of X`.
       let from: Expr | undefined;
       let to: Expr | undefined;
       if (!this.isKw('of') && !this.isKw('in')) {
@@ -701,8 +633,6 @@ export class Parser {
       let subject: Expr | undefined;
       if (this.isKw('of') || this.isKw('in')) {
         this.next();
-        // Subject binds tighter than any binary operator (`item 1 of tLine =
-        // "x"` is (item 1 of tLine) = "x"). Parse a primary + index chains.
         if (this.startsAtom()) {
           subject = this.parsePrimary();
           subject = this.parseChainTail(subject, this.tokens[this.pos - 1].line, true);
@@ -726,7 +656,6 @@ export class Parser {
     }
     const first = this.parseExpr(0);
     if (this.isPunct(':')) {
-      // Property list
       this.next();
       const pairs: [Expr, Expr][] = [[first, this.parseExpr(0)]];
       while (this.isPunct(',')) {
@@ -743,7 +672,6 @@ export class Parser {
       this.expectPunct(']');
       return { kind: 'proplist', pairs };
     }
-    // Linear list
     const items = [first];
     while (this.isPunct(',')) {
       this.next();

@@ -1,7 +1,3 @@
-// Minimal DEFLATE decompressor + PNG decoder — dependency-free so the runtime
-// works in browser and Node alike. Powers member.image reads for raw bitmaps.
-// Supports the subset Director exports use: 8-bit, non-interlaced, color
-// types 0/2/3/4/6.
 
 
 class BitReader {
@@ -23,7 +19,6 @@ class BitReader {
     this.buf = 0;
     this.cnt = 0;
   }
-  /** Skip n raw bytes (must be byte-aligned — used by stored blocks). */
   skip(n: number): void {
     this.pos += n;
   }
@@ -43,7 +38,6 @@ const CL_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 
 
 interface HuffTable {
   maxLen: number;
-  /** code (as read LSB-first) | (len << 16) -> symbol */
   table: Map<number, number>;
 }
 
@@ -56,7 +50,6 @@ function bitReverse(v: number, n: number): number {
   return r;
 }
 
-/** Build a canonical-Huffman decode table from per-symbol code lengths. */
 function buildTable(lengths: number[]): HuffTable {
   const counts = new Array(16).fill(0);
   let maxLen = 0;
@@ -100,7 +93,6 @@ function fixedLitLen(): number[] {
   return l;
 }
 
-/** RFC 1951 inflate. Throws on malformed data. */
 function inflate(data: Uint8Array): Uint8Array {
   const br = new BitReader(data);
   const out: number[] = [];
@@ -112,10 +104,9 @@ function inflate(data: Uint8Array): Uint8Array {
     const final = br.bits(1);
     const type = br.bits(2);
     if (type === 0) {
-      // Stored block: raw bytes, no Huffman-coded data.
       br.byteAlign();
       const len = br.bits(16);
-      br.bits(16); // NLEN (one's complement of LEN)
+      br.bits(16);
       for (let i = 0; i < len; i++) out.push(br.raw[br.rawPos + i]);
       br.skip(len);
     } else {
@@ -151,13 +142,12 @@ function inflate(data: Uint8Array): Uint8Array {
       } else {
         throw new Error('deflate: reserved block type 3');
       }
-      // symbol loop (Huffman-coded blocks only)
       for (;;) {
         const sym = decodeSym(br, litT);
         if (sym < 256) {
           out.push(sym);
         } else if (sym === 256) {
-          break; // end of block
+          break;
         } else {
           const li = sym - 257;
           if (li >= LENGTH_BASE.length) throw new Error('deflate: bad length code');
@@ -186,13 +176,9 @@ function concatChunks(chunks: Uint8Array[]): Uint8Array {
   return out;
 }
 
-// Decode a PNG into raw RGBA (color types 0/2/3/4/6, 8-bit, non-interlaced).
-// For INDEXED art the per-pixel palette INDICES are returned too — wall/floor
-// pattern remaps recolor by index, and an RGBA-only decode loses that mapping
-// when several indices share one RGB.
 
 export function decodePng(bytes: Uint8Array): { width: number; height: number; rgba: Uint8Array; indices?: Uint8Array } {
-  let pos = 8; // skip 8-byte signature
+  let pos = 8;
   let width = 0;
   let height = 0;
   let bitDepth = 0;
@@ -222,8 +208,6 @@ export function decodePng(bytes: Uint8Array): { width: number; height: number; r
   const bppMap: Record<number, number> = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 };
   const bpp = bppMap[colorType];
   if (bpp === undefined) throw new Error(`png: color type ${colorType} unsupported`);
-  // IDAT holds a zlib stream (CMF/FLG header + deflate + adler32). Our
-  // inflate is raw DEFLATE, so strip the zlib header.
   const zlib = concatChunks(idat);
   if (zlib.length < 2) throw new Error('png: empty IDAT');
   const raw = inflate(zlib.subarray(2));

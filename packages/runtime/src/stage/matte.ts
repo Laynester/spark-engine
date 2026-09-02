@@ -1,22 +1,14 @@
-// Director sprite-ink alpha baking — the "magic wand" background removal.
-// Ported from LibreShockwave's bitmap pipeline: for MATTE (8) and
-// BACKGROUND_TRANSPARENT (36) inks, the sprite's edge-connected background is
-// inferred and flood-filled to alpha 0 — the white backdrop disappears while
-// white detail inside the art (cloud puffs, highlights) survives.
-// TRANSPARENT (1) is a plain exact-white key. Pure functions over RGBA bytes
-// so they run headless in tests and in the browser via canvas ImageData.
 
-// Director ink numbers -> alpha-bake behavior.
 export type BakeMode = 'matte' | 'backgroundTransparent' | 'key' | 'notGhost';
 
 export interface MatteSpec {
-  rgb: number; // 0xRRGGBB background color
-  tolerance: number; // per-channel match tolerance (0 exact)
+  rgb: number;
+  tolerance: number;
 }
 
-const NEAR_WHITE_MIN = 232; // C++: corners/edges must be >= this on every channel
-const NEAR_WHITE_DELTA = 16; // C++: channel-to-channel spread for "grayscale"
-const CONTENT_MIN_PIXELS = 8; // C++: enough non-background pixels to matter
+const NEAR_WHITE_MIN = 232;
+const NEAR_WHITE_DELTA = 16;
+const CONTENT_MIN_PIXELS = 8;
 
 function matchesRgb(pixel: number, matteRgb: number, tolerance: number): boolean {
   const pr = (pixel >> 16) & 0xff;
@@ -65,8 +57,6 @@ function edgeIndices(width: number, height: number): number[] {
   return out;
 }
 
-// The edge color that also fills every opaque corner and covers >= 75% of
-// opaque edge pixels; null when the image is uniform or the edges disagree.
 function inferDominantEdgeRgb(rgba: Uint8Array | Uint8ClampedArray, width: number, height: number): number | null {
   const counts = new Map<number, number>();
   let opaqueEdgeCount = 0;
@@ -84,7 +74,6 @@ function inferDominantEdgeRgb(rgba: Uint8Array | Uint8ClampedArray, width: numbe
     }
   }
   if (opaqueEdgeCount === 0 || dominant < 0) return null;
-  // Every opaque pixel equal to the dominant color -> nothing to silhouette.
   let uniform = true;
   for (let i = 0; i < width * height; i++) {
     if (isOpaque(rgba, i) && rgbAt(rgba, i) !== dominant) {
@@ -93,8 +82,6 @@ function inferDominantEdgeRgb(rgba: Uint8Array | Uint8ClampedArray, width: numbe
     }
   }
   if (uniform) return null;
-  // Every opaque corner must be the dominant edge color, covering >= 75% of
-  // the opaque edge.
   let opaqueCornerCount = 0;
   for (const i of cornerIndices(width, height)) {
     if (!isOpaque(rgba, i)) continue;
@@ -105,10 +92,6 @@ function inferDominantEdgeRgb(rgba: Uint8Array | Uint8ClampedArray, width: numbe
   return dominant;
 }
 
-// True when every opaque corner is near-white — the signal that an ink-0
-// copy image (a button's composed buffer with a white mask) needs the
-// background-transparent bake so the white corners around the art don't show
-// as a box. Opaque panels keep their non-white corners untouched.
 export function cornersAreNearWhite(
   rgba: Uint8Array | Uint8ClampedArray,
   width: number,
@@ -141,11 +124,6 @@ function hasOpaqueNonNearWhiteContent(
   return false;
 }
 
-// True when pure white genuinely FILLS the image edge: >= 75% of the opaque
-// edge pixels are exact white AND every opaque corner is white. The "any
-// white edge pixel wins" shortcut lets a few white glyph pixels on the edge
-// hijack the matte and eat the whole glyph — requiring 75% + corners keeps
-// the white-backdrop case while a handful of glyph specks can't.
 function whiteEdgeDominates(rgba: Uint8Array | Uint8ClampedArray, width: number, height: number): boolean {
   let opaqueEdge = 0;
   let whiteEdge = 0;
@@ -161,19 +139,12 @@ function whiteEdgeDominates(rgba: Uint8Array | Uint8ClampedArray, width: number,
   return true;
 }
 
-// For a 32-bit source without alpha, the ink-8 matte background is EXACTLY
-// the source's top-left pixel (0,0) — no edge-voting. The art is authored so
-// (0,0) is the backdrop (white for window shadows, black for entry_bar field
-// images). The strict white gate below belongs to the channel/texture bake
-// only, where the source is a composed buffer.
 function edgeMatteColor(rgba: Uint8Array | Uint8ClampedArray, width: number, height: number): number | null {
   if (width < 1 || height < 1 || rgba.length < 4) return null;
   if (!isOpaque(rgba, 0)) return null;
   return rgbAt(rgba, 0);
 }
 
-// copyPixels-time matte for 32-bit no-alpha sources: the background is pixel
-// (0,0). Palette-driven mattes (index 0) take precedence and never get here.
 function resolveMatteMode(rgba: Uint8Array | Uint8ClampedArray, width: number, height: number): MatteSpec | null {
   if (borderIsTransparent(rgba, width, height)) return null;
   const p00 = edgeMatteColor(rgba, width, height);
@@ -181,12 +152,6 @@ function resolveMatteMode(rgba: Uint8Array | Uint8ClampedArray, width: number, h
   return { rgb: p00, tolerance: 0 };
 }
 
-// An image whose border is mostly TRANSPARENT is already alpha-keyed (text
-// bitmaps are transparent + glyphs). On such a source the transparent border
-// seeds the flood, which then roams through every transparent pixel and eats
-// ANY pixel matching the matte color — white glyphs vanish. When the border
-// is mostly transparent the alpha channel IS the mask: skip the color matte.
-// Rounded-corner art keeps its opaque white border and is still matted.
 function borderIsTransparent(rgba: Uint8Array | Uint8ClampedArray, width: number, height: number, threshold = 0.5): boolean {
   let total = 0;
   let transparent = 0;
@@ -197,10 +162,6 @@ function borderIsTransparent(rgba: Uint8Array | Uint8ClampedArray, width: number
   return total > 0 && transparent / total >= threshold;
 }
 
-// BACKGROUND_TRANSPARENT (36) matte. The strict near-white corners/75% gates
-// reject real backdrops (art bleeds to a corner), leaving the white box
-// visible. The flood is edge-connected and can't pass through art, so the
-// safe gate is: some opaque edge pixel is near-white and real content exists.
 function resolveBackgroundTransparent(rgba: Uint8Array | Uint8ClampedArray, width: number, height: number): MatteSpec | null {
   let nearWhiteEdge = false;
   for (const i of edgeIndices(width, height)) {
@@ -216,13 +177,6 @@ function resolveBackgroundTransparent(rgba: Uint8Array | Uint8ClampedArray, widt
   return { rgb: 0xffffff, tolerance: 24 };
 }
 
-// Channel/sprite-level matte (the texture-upload bake, NOT copyPixels). With
-// a palette, the background is EXACTLY palette index 0 (a palette-driven
-// matte keeps outlined puffs the old near-white heuristic ate). Without a
-// palette, ONLY pure white wins — inferring a non-white edge color here ate
-// opaque panels (a solid teal drag header was keyed to nothing but its title
-// text). A composed panel with non-white edges has no white backdrop to
-// remove — leave it untouched.
 function resolveChannelMatte(
   rgba: Uint8Array | Uint8ClampedArray,
   width: number,
@@ -234,21 +188,9 @@ function resolveChannelMatte(
   if (p0 !== null) return { rgb: p0, tolerance: 0 };
   if (mode === 'backgroundTransparent') return resolveBackgroundTransparent(rgba, width, height);
   if (borderIsTransparent(rgba, width, height)) return null;
-  // Ink-8, opaque 32-bit source: the matte key is the bitmap's TOP-LEFT
-  // pixel, flood-filled from every matching edge pixel — no dominance voting.
-  // whiteEdgeDominates would reject a white corner-bevel on a gray button
-  // and an arrow whose dark outline touches the art edge; the (0,0) white IS
-  // the background. Restricted to a WHITE (0,0) so non-white-cornered panels
-  // keep the old gates.
   const p00 = edgeMatteColor(rgba, width, height);
   if (p00 !== null && p00 === 0xffffff) return { rgb: p00, tolerance: 0 };
   if (whiteEdgeDominates(rgba, width, height)) return { rgb: 0xffffff, tolerance: 0 };
-  // Runtime-composed group buffers: the image() builtin fills fresh 8-bit
-  // surfaces with palette index 0 (white), and where the art doesn't cover
-  // the buffer edge that white IS the fill and must go transparent under the
-  // ink-8 matte. Any opaque EXACT-white edge pixel with real content is
-  // enough — the flood is edge-connected, so enclosed white art survives.
-  // Exact-white only (tolerance 0), so near-white bevels are never keyed.
   if (
     whiteEdgeExists(rgba, width, height) &&
     hasOpaqueNonNearWhiteContent(rgba, width, height, NEAR_WHITE_MIN, NEAR_WHITE_DELTA, CONTENT_MIN_PIXELS)
@@ -258,9 +200,6 @@ function resolveChannelMatte(
   return null;
 }
 
-// True when any opaque border pixel is EXACT white. A lone glyph/bevel speck
-// can trigger the matte, but the flood only removes pixels connected to it,
-// so isolated specks inside the border are never reached.
 function whiteEdgeExists(rgba: Uint8Array | Uint8ClampedArray, width: number, height: number): boolean {
   for (const i of edgeIndices(width, height)) {
     if (isOpaque(rgba, i) && rgbAt(rgba, i) === 0xffffff) return true;
@@ -268,25 +207,12 @@ function whiteEdgeExists(rgba: Uint8Array | Uint8ClampedArray, width: number, he
   return false;
 }
 
-// Palette index 0's RGB as a 0xRRGGBB int, or null when the palette is
-// empty. The indexed-bitmap background is exactly index 0 — every other
-// index (even one whose RGB is white) is art and must survive a key.
 function paletteIndex0Rgb(palette: number[][] | undefined): number | null {
   const p0 = palette && palette.length > 0 ? palette[0] : null;
   if (!p0 || p0.length < 3) return null;
   return (p0[0] << 16) | (p0[1] << 8) | p0[2];
 }
 
-// Zero the alpha of the edge-connected background region — the magic-wand
-// flood fill. Returns true when any pixel changed. For 'key' inks, every
-// pixel matching the background color goes transparent with no flood fill —
-// a BLANKET key, so enclosed background dies too. The key color is the
-// bitmap's palette index 0 when a palette is supplied, else exact white.
-// `keyRgb` overrides the key color for ink 7 (Not Ghost): the sprite's
-// authored bgColor when one exists, else null = the Director DEFAULT sprite
-// bgColor (white) — NOT the art's top-left pixel. The pool ClickArea is a
-// 1x1 black bitmap and must key white to vanish; DirPlayer's ink-7 keys on
-// the resolved sprite bgColor, which the Layout Parser defaults to white.
 export function bakeEdgeBackground(
   rgba: Uint8Array | Uint8Array | Uint8ClampedArray,
   width: number,
@@ -299,13 +225,6 @@ export function bakeEdgeBackground(
   const n = width * height;
   if (width <= 0 || height <= 0 || rgba.length < n * 4) return false;
 
-  // Ink 36 is a BLANKET color-key against the sprite's bgColor (white
-  // default), and it fires on 32-bit alpha bitmaps too — DirPlayer color-keys
-  // use_alpha bitmaps as long as they're plain authored members, NOT Flash
-  // captures (rendering_gpu/webgl2/mod.rs, use_embedded_alpha + ink 36 path).
-  // The avatar canvas is exactly that: 32-bit, transparent border, but with
-  // opaque white body-part backgrounds pasted inside that must be keyed away.
-  // A transparent border is NOT a reason to skip — only Flash bitmaps skip.
   if (mode === 'key') {
     const keyRgb = paletteIndex0Rgb(palette) ?? 0xffffff;
     let changed = false;
@@ -324,26 +243,6 @@ export function bakeEdgeBackground(
   let matte: MatteSpec | null = null;
   let matchByIndex = false;
   if (mode === 'notGhost') {
-    // Ink 7 (Not Ghost): only pixels matching the key color survive. The key
-    // is the sprite's authored bgColor when one exists, else the Director
-    // DEFAULT sprite bgColor = WHITE — NOT the art's top-left pixel. The
-    // pool room's ClickArea is a 1x1 black 32-bit bitmap: keying its art
-    // (0,0)=black would blanket-keep an opaque black box (the reported pool
-    // booth/ladder artifacts); DirPlayer keys 32-bit ink 7 on the resolved
-    // sprite bgColor, which the Layout Parser defaults to white, so the black
-    // pixel fails the match and is discarded — an invisible click area. The
-    // terrace's ink-7 elements carry no authored bgColor and still resolve
-    // correctly under white: the 1x1 black curtain handle dew_blend fails the
-    // white match and vanishes (it rendered as a black box on the closed
-    // curtains before), and the exit mask dew_exitmaski (black wedge on a
-    // white field) has its white field flooded and its wedge discarded — the
-    // clickable GOAWAY hotspot ends fully transparent. Indexed/16-bit art is
-    // a TWO-STAGE pipeline (DirPlayer compute_edge_matte_mask_rgb + the ink-7
-    // shader): the matte floods edge-connected key pixels to alpha 0, then
-    // the shader discards every remaining pixel that does NOT match the key
-    // — net effect, ONLY key-colored pockets sealed inside the art survive.
-    // 32-bit art has no matte stage: the shader blanket-keeps every key-
-    // colored pixel and discards the rest.
     const key = keyRgb !== undefined && keyRgb !== null ? keyRgb : 0xffffff;
     if (!indices || indices.length < n) {
       let changed = false;
@@ -361,17 +260,11 @@ export function bakeEdgeBackground(
     }
     matte = { rgb: key, tolerance: 0 };
   } else {
-    // With raw palette indices available, the matte flood keys palette INDEX
-    // 0 exactly — an RGB key of index 0's color also eats same-colored art at
-    // other indices (the fuzzy floor tile's white dither squares), showing as
-    // black grid lines between tiles. 'key' (ink 36) stays an RGB blanket key.
     matchByIndex = !!indices && indices.length >= n;
     matte = matchByIndex ? { rgb: 0, tolerance: 0 } : resolveChannelMatte(rgba, width, height, mode, palette);
     if (!matte) return false;
   }
 
-  // BFS from every edge seed where the pixel is already transparent or
-  // matches the matte color, spreading 4-connected.
   const connected = new Uint8Array(n);
   const queue: number[] = [];
   const seed = (x: number, y: number): void => {
@@ -411,10 +304,6 @@ export function bakeEdgeBackground(
     changed = true;
   }
 
-  // Ink 7 (Not Ghost) shader stage: discard every remaining pixel that does
-  // NOT match the key color — after the matte flood above, only key-colored
-  // pockets sealed inside the art are left (the exit mask's black wedge and
-  // white field are both gone; the element renders fully transparent).
   if (mode === 'notGhost') {
     for (let i = 0; i < n; i++) {
       if (rgba[i * 4 + 3] === 0) continue;
@@ -430,12 +319,6 @@ export function bakeEdgeBackground(
   return changed;
 }
 
-// Copy-time matte mask (ink 8 copyPixels): the edge-connected background of
-// the WHOLE source image, returned as a mask over the requested region (1 =
-// background pixel to skip). Mattes the entire source once, then samples the
-// source rect — a region-local flood on a PARTIAL slice (the cloud turn()
-// pastes left/right slices) would seed from the slice's artificial cut and
-// eat the outlined puffs. Returns null when no background resolves.
 export function matteRegionMask(
   rgba: Uint8Array | Uint8ClampedArray,
   imgW: number,
@@ -453,20 +336,12 @@ export function matteRegionMask(
   const rh = Math.min(imgH, top + h) - rt;
   if (rw <= 0 || rh <= 0 || imgW <= 0 || imgH <= 0) return null;
 
-  // With a palette, the background is exactly palette index 0 (the cloud body
-  // is a different index than the white bg, so every outlined puff survives);
-  // with raw palette INDICES the flood keys by INDEX — an RGB-keyed flood
-  // would eat same-colored art at other indices (the fuzzy floor tile's white
-  // dither squares), punching gaps that show as a black grid.
   const paletteRgb = paletteIndex0Rgb(palette);
   const indexKeyed = !!indices && indices.length >= imgW * imgH;
   const matte =
     indexKeyed ? { rgb: 0, tolerance: 0 } : paletteRgb !== null ? { rgb: paletteRgb, tolerance: 0 } : resolveMatteMode(rgba, imgW, imgH);
   if (!matte) return null;
 
-  // C++ computeEdgeConnectedMask over the WHOLE image: BFS from every edge
-  // pixel where the pixel is already transparent or matches the matte color,
-  // spreading 4-connected through transparent-or-matching pixels.
   const full = new Uint8Array(imgW * imgH);
   const queue: number[] = [];
   const seed = (x: number, y: number): void => {
@@ -498,7 +373,6 @@ export function matteRegionMask(
     if (y + 1 < imgH) seed(x, y + 1);
   }
 
-  // Sample the region out of the full-image mask.
   const mask = new Uint8Array(rw * rh);
   let background = 0;
   for (let y = 0; y < rh; y++) {
@@ -512,21 +386,7 @@ export function matteRegionMask(
   return background > 0 ? mask : null;
 }
 
-// Which Director ink needs an alpha bake at texture-load time (0 copy, 1
-// transparent, 8 matte, 32 blend, 33 add pin, 34 add, 35 subtract pin, 36 bg
-// transparent, 37 lightest, 38 subtract, 39 darkest, 40 lighten, 41 darken).
-// COMPOSITE inks rely on the bitmap's alpha — the exported PNGs carry no
-// baked matte, so the white background must be removed BEFORE the ink
-// composites or it shows as a white box. Copy (0) shows the bitmap as-is and
-// mask (9) uses a mask member. Ink 36 is a BLANKET color-key, not a flood
-// fill — the real player keys every pixel within tolerance of the bg color,
-// enclosed background included.
 
-// Sprite bg_color tint (the figure-creator swatch recolors a white box via
-// sprite.bgColor = rgb(...)): NEAR-GRAYSCALE pixels (max-min <= 16) are lerped
-// toward the bg color — white becomes exactly the bg color, black stays
-// black, colorful pixels are untouched. A white bgColor is identity, so this
-// only fires when the sprite bgColor is a real RGB color (ch.bgColorIsRgb).
 export function tintSpriteBackground(rgba: Uint8Array | Uint8ClampedArray, w: number, h: number, bgRgb: number): boolean {
   const bgR = (bgRgb >> 16) & 0xff;
   const bgG = (bgRgb >> 8) & 0xff;
@@ -553,22 +413,6 @@ export function tintSpriteBackground(rgba: Uint8Array | Uint8ClampedArray, w: nu
   return changed;
 }
 
-// Ink 41 (Darken) sprite bg_color tint — DirPlayer's ink-41 shader remaps
-// EVERY pixel, per channel: result.c = mix(fg.c, bg.c, src.c). With the
-// default foreColor (black) that is bg.c * src.c / 255: white becomes exactly
-// the bg color, black stays black, and every other color is scaled toward the
-// bg color (a light warm gray like the trophy cup body (224,213,204) —
-// channel spread 20 — must become gold, which the near-grayscale gate in
-// tintSpriteBackground skips and leaves silver). The foreground term matters
-// when the corpus authors BOTH colors (Director: "Darken makes the background
-// color a filter... the foreground color is then added") — the camera photo
-// display sets #color: "#681F10" + #bgColor: "#FFCC66" and DirPlayer renders
-// the shot as a sepia duotone: fg + (bg-fg)*src, so black pixels become the
-// dark brown fg, white pixels the light gold bg, and midtones the warm ramp.
-// A multiply-only bg*src dropped the fg term and washed the photo out.
-// The background was already keyed to alpha 0 by the matte bake before this
-// runs, so the box never tints. A white bgColor is per-channel identity
-// (bg=255 — skipped upstream anyway by ch.bgColorIsRgb).
 export function tintSpriteDarken(
   rgba: Uint8Array | Uint8ClampedArray,
   w: number,
@@ -589,7 +433,6 @@ export function tintSpriteDarken(
     const r = rgba[o];
     const g = rgba[o + 1];
     const b = rgba[o + 2];
-    // mix(fg, bg, src) = fg + (bg - fg) * src, per channel.
     const nr = Math.round(fgR + ((bgR - fgR) * r) / 255);
     const ng = Math.round(fgG + ((bgG - fgG) * g) / 255);
     const nb = Math.round(fgB + ((bgB - fgB) * b) / 255);
@@ -601,11 +444,6 @@ export function tintSpriteDarken(
   return changed;
 }
 
-// Ink 9 (Mask): bake the NEXT cast member's bitmap as a grayscale alpha mask
-// onto the source (pool water: vesi1 is an opaque blue rect, vesimask1 its
-// black/white cutout). Aligned by registration points; grayscale inverted —
-// black(0) -> opaque, white(255) -> transparent, grays partial. Pixels the
-// mask doesn't cover are transparent. In-place on the source RGBA buffer.
 export function applyMaskAlpha(
   rgba: Uint8Array | Uint8ClampedArray,
   w: number,
@@ -624,13 +462,11 @@ export function applyMaskAlpha(
       const o = (y * w + x) * 4;
       let a = rgba[o + 3];
       if (mx < 0 || my < 0 || mx >= mw || my >= mh) {
-        // Outside the mask's coverage: transparent.
         if (a !== 0) changed = true;
         rgba[o + 3] = 0;
         continue;
       }
       const mi = (my * mw + mx) * 4;
-      // Inverted grayscale: white(255) -> alpha 0, black(0) -> alpha 255.
       const gray = (mask[mi] + mask[mi + 1] + mask[mi + 2]) / 3;
       const na = Math.round((255 - gray) * (a / 255));
       if (na !== a) changed = true;
@@ -646,11 +482,6 @@ export function bakeModeForInk(ink: number): BakeMode | null {
     case 36:
       return 'key';
     case 7:
-      // Not Ghost: keep only pixels matching the key color (the inverse of a
-      // key). The key is the sprite's authored bgColor, else the Director
-      // default sprite bgColor = white (bakeEdgeBackground keyRgb) — the
-      // pool ClickArea (1x1 black) and terrace drag handle vanish, and the
-      // entry elevator shadow keys on its authored black.
       return 'notGhost';
     case 8:
     case 32:
@@ -667,24 +498,6 @@ export function bakeModeForInk(ink: number): BakeMode | null {
   }
 }
 
-// Director ink -> renderer blend mode: 33/34 add, 35/38 subtract, 37/40
-// LIGHTEST, 39 DARKEST; everything else normal compositing.
-//
-// LIGHTEST/DARKEST map to the core 'max'/'min' blend modes (GL MAX/MIN
-// blend equation). pixi's 'lighten'/'darken' live in the advanced-blend-modes
-// package, which renders through a filter that captures the back texture —
-// broken in pixi 8.19 (captures transparent black), so lighten/darken sprites
-// composite their source unchanged. The core GL MAX/MIN equation composites
-// per-channel against the actual framebuffer: a black/transparent source
-// pixel maxes to exactly the destination, which is the LIGHTEST semantics
-// the scrollbars rely on.
-//
-// 'subtract' has the SAME broken filter problem, and it matters: the v31 room
-// dimmer is a 1x1 black bitmap on an ink-35 sprite stretched over the room
-// (subtract-pin of black must be a no-op). The advanced 'subtract' renders
-// the black rectangle verbatim — a solid black room. SUBTRACT_BLEND_MODE is
-// instead a REAL GPU reverse-subtract equation registered into the GL state
-// map by PixiStage.init (alpha preserved: dst stays, rgb = dst - src).
 export const SUBTRACT_BLEND_MODE = 'subtract-gl';
 export function blendModeForInk(ink: number): 'normal' | 'add' | typeof SUBTRACT_BLEND_MODE | 'min' | 'max' {
   switch (ink) {
@@ -699,9 +512,6 @@ export function blendModeForInk(ink: number): 'normal' | 'add' | typeof SUBTRACT
       return 'max';
     case 39:
       return 'min';
-    // 41 (Darken) is src * sprite-bgColor, baked into the texture at upload
-    // (wall/floor wrappers tint via bgColor + ink 41) — NOT a GPU min, which
-    // would blacken the pre-tinted pattern against the dark stage.
     case 41:
       return 'normal';
     default:
@@ -709,12 +519,6 @@ export function blendModeForInk(ink: number): 'normal' | 'add' | typeof SUBTRACT
   }
 }
 
-// Only ink 8 (Matte) does pixel-level hit-testing — a click on a transparent
-// pixel of a matte sprite falls through to the sprite below; all other inks
-// are bounding-box. `pixels` is the sprite's stage RGBA buffer; null means no
-// surface yet, so the bounding box stands. Without this, every click on a
-// window's title bar hits the back panel (whose rect covers the strip) and
-// windows can't be dragged.
 export function matteSpriteHitTest(
   ink: number,
   pixels: Uint8Array | Uint8ClampedArray | null | undefined,
