@@ -1,7 +1,8 @@
 import type { Expr, Handler, Script, TheSegment } from '../lingo/ast.js';
 import { Env, Interpreter, NO_GLOBALS, scriptPropsLower, type GlobalHandlerRef, type InterpreterHost } from '../lingo/interpreter.js';
 import { createBuiltinTable, type BuiltinBackend, type BuiltinFn } from '../lingo/builtins.js';
-import { parseLingo } from '../lingo/parser.js';
+import { inferScriptType, parseLingo } from '../lingo/parser.js';
+import { decodeScript } from '../lingo/bytecode.js';
 import {
   asNum, colorFrom, LEMPTY, toLingoString, VOID,
   type LCastLibRef, type LMemberRef, type LObject, type LPoint, type LPropList,
@@ -15,6 +16,7 @@ import { parseXmlToLingo } from '../lingo/xml.js';
 import type { BundleLoader } from '../bundle/loader.js';
 import type { CastListEntry, CastManifest, MemberEntry, MovieConfig } from '../bundle/types.js';
 import { CastLib, Member, normalizeTextLines, parsePaletteBytes, parseShapeText, type ShapeDef } from './members.js';
+import { decodeImage } from './pix8.js';
 import { decodePng } from './png.js';
 import { decodeGif } from './gif.js';
 
@@ -361,7 +363,6 @@ interface NetRequest {
 
 const NET_RAMP_FRAMES = 24;
 
-const SCRIPT_TYPE_RE = /^--\s*Type:\s*(\w+)/m;
 const CAST_MEMBER_RE = /^--\s*Cast member:\s*(.*)$/m;
 
 export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHostApi {
@@ -569,16 +570,28 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
 
       switch (entry.kind) {
         case 'script': {
-          const source = loader.memberText(entry) ?? '';
-          const script = parseLingo(source);
-          script.name = entry.name;
-          const tm = SCRIPT_TYPE_RE.exec(source);
-          if (tm) {
-            const type = tm[1].toLowerCase();
-            script.type = type === 'parent' || type === 'movie' || type === 'score' || type === 'behavior' ? type : 'unknown';
+          let script: Script | null = null;
+          let source = '';
+          if (entry.bytecode) {
+            const bytes = loader.readBytes(entry.file);
+            if (bytes) {
+              try {
+                script = decodeScript(bytes);
+                script.name = entry.name;
+              } catch (e) {
+                this.warn(`bytecode decode failed for ${entry.name}: ${e instanceof Error ? e.message : String(e)}`);
+                script = null;
+              }
+            }
+          }
+          if (!script) {
+            source = loader.memberText(entry) ?? '';
+            script = parseLingo(source);
+            script.name = entry.name;
+            script.type = inferScriptType(source);
           }
           member.script = script;
-          member.text = source;
+          member.text = source || entry.file;
           break;
         }
         case 'text':
@@ -1313,10 +1326,6 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       for (const cast of this.casts) {
         const member = cast.byName.get(v);
         if (member) {
-          if (this.diagOn() && /(_small|_sd)$/i.test(name)) {
-            const img = this.memberImage(member);
-            this.log(`DBG getmemnum("${name}") -> (${cast.number}<<16|${member.number}) name="${member.name}" art=${img?.width ?? '?'}x${img?.height ?? '?'} [${this.interp.callTrail.slice(-3).join(' <- ')}]`);
-          }
           return this.memberGlobalNum(cast.number, member.number);
         }
       }
@@ -1348,9 +1357,6 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   log(msg: string): void {
     this.logs.push(msg);
     if (this.logs.length > 4000) this.logs.splice(0, 2000);
-    if (msg.startsWith('DBG ') && this.diagOn()) {
-      (typeof console !== 'undefined' ? console.log : null)?.(msg);
-    }
   }
 
   warn(msg: string): void {
@@ -2516,9 +2522,13 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     return 1;
   }
 
+  /** Cast slots that went through indexCast (preIndexMembers ran); observable
+   *  for tests, kept off the log stream. */
+  indexedSlots: number[] = [];
+
   private indexCast(castNum: number): void {
     const cast = this.casts[castNum - 1];
-    this.log(`DBG indexCast(${castNum} ${cast?.name ?? '?'})`);
+    this.indexedSlots.push(castNum);
     try {
       const h = this.globalHandlers.get('getresourcemanager');
       if (!h) return;
@@ -2692,7 +2702,6 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       volume: st.volume,
       onEnded: () => this.advanceSoundQueue(channel),
     });
-    this.log(`DBG sound: play ch=${channel} "${member.name}" bytes=${member.raw.length} loop=${loop}`);
   }
 
   getSoundChannel(channel: number): LVal {
@@ -2966,7 +2975,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       }
       if (member.kind === 'bitmap' && member.raw) {
         try {
-          const { width, height, rgba, indices } = decodePng(member.raw);
+          const { width, height, rgba, indices } = decodeImage(member.raw, member.palette);
           const img = new LImage(width, height);
           img.data = rgba;
           img.dirty = true;
@@ -3330,7 +3339,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     switch (p) {
       case 'member': {
         const member = this.resolveMember(value);
-        if (!member && ch.member) {
+        if (!member) {
           ch.rotation = 0;
           ch.skew = 0;
           ch.flipH = 0;

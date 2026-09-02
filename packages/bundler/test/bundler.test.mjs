@@ -4,7 +4,8 @@ import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildBundle, buildSparkBundle, readSpark, isSparkBytes, encodePalette, isPaletteBytes } from '../dist/index.js';
-import { unzipSync } from 'fflate';
+import { unzipSync, zlibSync } from 'fflate';
+import { decodePng, decodePix8, isPix8, BundleLoader, DirectorEngine } from '@habbo/runtime';
 
 function makeFixture() {
   const dir = mkdtempSync(join(tmpdir(), 'habbo-bundle-'));
@@ -94,17 +95,19 @@ test('spark container: single-stream, round-trips every file, smaller than the z
 
   // Round-trip: index offsets slice the body back to the exact original files.
   const { index, body } = readSpark(spark);
-  assert.equal(manifest.files.length + 1, Object.keys(index).length, 'manifest + every file indexed');
+  assert.equal(manifest.files.length + 2, Object.keys(index).length, 'manifest + every file + the shared palette indexed');
   const slice = (p) => {
     const [off, len] = index[p];
     return body.subarray(off, off + len);
   };
-  const text = new TextDecoder().decode(slice('hh_demo/0001_script_Loop.ls'));
-  assert.ok(text.startsWith('-- Cast member: Loop'), 'script payload intact');
+  const script = slice('hh_demo/0001_script_Loop.ls');
+  assert.equal(String.fromCharCode(script[0], script[1], script[2], script[3]), 'LBC1', 'script payload is compiled bytecode');
   const png = slice('hh_demo/0002_bitmap_Logo.png');
   assert.deepEqual([...png], [0x89, 0x50, 0x4e, 0x47, 1, 2, 3], 'binary payload byte-exact');
   const man = JSON.parse(new TextDecoder().decode(slice('bundle-manifest.json')));
   assert.equal(man.casts[0].name, 'hh_demo', 'manifest entry readable');
+  const loop = man.casts[0].members.find((m) => m.kind === 'script');
+  assert.equal(loop.bytecode, true, 'script member flagged as bytecode');
 });
 
 test('palettes ship as compact PALB binary; unparseable ones stay text', () => {
@@ -112,8 +115,13 @@ test('palettes ship as compact PALB binary; unparseable ones stay text', () => {
   const { zip, manifest } = buildBundle(dir);
   const unzipped = unzipSync(zip);
 
-  // The bitmap's companion .pal (2 real triplets) encodes to PALB binary.
-  const pal = unzipped['hh_demo/0002_bitmap_Logo.pal'];
+  // The bitmap's companion .pal (2 real triplets) encodes to PALB binary and
+  // rewires to a SINGLE shared palette entry (the CCT stores the cast palette
+  // once; the corpus repeats palettes across hundreds of companions).
+  const bitmap = manifest.casts[0].members.find((m) => m.kind === 'bitmap');
+  assert.match(bitmap.palRel, /^pals\/pal_\d+_[0-9a-f]+\.pal$/, 'companion rewired to a content-addressed shared entry');
+  assert.ok(!manifest.files.includes('hh_demo/0002_bitmap_Logo.pal'), 'pruned duplicate not shipped');
+  const pal = unzipped[bitmap.palRel];
   assert.ok(isPaletteBytes(pal), 'JASC companion .pal encoded to PALB');
   const count = pal[4] | (pal[5] << 8);
   assert.equal(count, 2, 'triplet count preserved');
@@ -123,20 +131,183 @@ test('palettes ship as compact PALB binary; unparseable ones stay text', () => {
   const enc = encodePalette(new Uint8Array(Buffer.from('JASC-PAL\n0100\n256\n255 255 255\n0 0 0\n')));
   assert.deepEqual([...enc.subarray(6)], [255, 255, 255, 0, 0, 0], 'encodePalette round-trips the fixture palette');
 
-  // A .pal that is not JASC triplets stays as raw text (no PALB magic).
+  // A .pal that is not JASC triplets stays as raw text (no PALB magic) and
+  // also lands on a shared entry.
   writeFileSync(join(dir, 'hh_demo', '0006_bitmap_odd.pal'), 'not a palette\n');
   writeFileSync(join(dir, 'hh_demo', '0006_bitmap_odd.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]));
-  const { zip: z2 } = buildBundle(dir);
+  const { zip: z2, manifest: man2 } = buildBundle(dir);
   const unz2 = unzipSync(z2);
-  assert.ok(!isPaletteBytes(unz2['hh_demo/0006_bitmap_odd.pal']), 'unparseable .pal ships as text');
-  assert.equal(new TextDecoder().decode(unz2['hh_demo/0006_bitmap_odd.pal']), 'not a palette\n');
+  const odd = man2.casts[0].members.find((m) => m.file === 'hh_demo/0006_bitmap_odd.png');
+  const oddPal = unz2[odd.palRel];
+  assert.ok(!isPaletteBytes(oddPal), 'unparseable .pal ships as text');
+  assert.equal(new TextDecoder().decode(oddPal), 'not a palette\n');
 
   // The single-stream spark carries the same binary palettes.
-  const { spark } = buildSparkBundle(dir);
+  const { spark, manifest: sm } = buildSparkBundle(dir);
   const { index, body } = readSpark(spark);
-  const [off, len] = index['hh_demo/0002_bitmap_Logo.pal'];
+  const reBmp = sm.casts[0].members.find((m) => m.kind === 'bitmap');
+  const [off, len] = index[reBmp.palRel];
   assert.ok(isPaletteBytes(body.subarray(off, off + len)), 'spark container ships PALB palettes');
   void manifest;
+});
+
+function buildIndexedPng(width, height, indices, palette) {
+  const stride = width;
+  const raw = new Uint8Array(height * (1 + stride));
+  for (let y = 0; y < height; y++) {
+    raw[y * (1 + stride)] = 0;
+    for (let x = 0; x < width; x++) raw[y * (1 + stride) + 1 + x] = indices[y * width + x];
+  }
+  const idat = zlibSync(raw, { level: 9 });
+  const chunk = (type, data) => {
+    const out = new Uint8Array(12 + data.length);
+    new DataView(out.buffer).setUint32(0, data.length);
+    out.set(new TextEncoder().encode(type), 4);
+    out.set(data, 8);
+    let crc = 0xffffffff;
+    for (const byte of [...new TextEncoder().encode(type), ...data]) {
+      crc ^= byte;
+      for (let k = 0; k < 8; k++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+    crc = (crc ^ 0xffffffff) >>> 0;
+    out.set([(crc >>> 24) & 0xff, (crc >>> 16) & 0xff, (crc >>> 8) & 0xff, crc & 0xff], 8 + data.length);
+    return out;
+  };
+  const ihdr = new Uint8Array(13);
+  new DataView(ihdr.buffer).setUint32(0, width);
+  new DataView(ihdr.buffer).setUint32(4, height);
+  ihdr[8] = 8;
+  ihdr[9] = 3;
+  const plte = new Uint8Array(palette.length * 3);
+  palette.forEach(([r, g, b], i) => {
+    plte[i * 3] = r;
+    plte[i * 3 + 1] = g;
+    plte[i * 3 + 2] = b;
+  });
+  const out = new Uint8Array(8 + chunk('IHDR', ihdr).length + chunk('PLTE', plte).length + chunk('IDAT', idat).length + 12);
+  out.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  let o = 8;
+  for (const c of [chunk('IHDR', ihdr), chunk('PLTE', plte), chunk('IDAT', idat)]) {
+    out.set(c, o);
+    o += c.length;
+  }
+  return out;
+}
+
+test('indexed PNGs with matching PLTE convert to PIX8 frames; pixels survive', async () => {
+  const dir = makeFixture();
+  // Replace the fixture's garbage PNG with a REAL indexed 3x2 badge art whose
+  // PLTE equals its .pal companion (the conversion gate).
+  const palette = [[255, 255, 255], [0, 0, 0]];
+  const indices = [0, 0, 1, 1, 0, 1];
+  const png = buildIndexedPng(3, 2, indices, palette);
+  writeFileSync(join(dir, 'hh_demo', '0002_bitmap_Logo.png'), png);
+
+  const { spark, manifest } = buildSparkBundle(dir);
+  const { index, body } = readSpark(spark);
+  const bmp = manifest.casts[0].members.find((m) => m.kind === 'bitmap');
+  const slice = (p) => {
+    const [off, len] = index[p];
+    return body.subarray(off, off + len);
+  };
+  const raw = slice(bmp.file);
+  assert.ok(isPix8(raw), 'bitmap shipped as a PIX8 frame');
+
+  // The palette the runtime attaches is the PALB companion: decode with it and
+  // compare against the reference PNG decode.
+  const palBytes = slice(bmp.palRel);
+  const tripletCount = palBytes[4] | (palBytes[5] << 8);
+  const triplets = [];
+  for (let i = 0; i < tripletCount; i++) triplets.push([palBytes[6 + i * 3], palBytes[6 + i * 3 + 1], palBytes[6 + i * 3 + 2]]);
+  const got = decodePix8(raw, triplets);
+  const ref = decodePng(png);
+  assert.deepEqual([...got.rgba], [...ref.rgba], 'PIX8 rgba identical to the PNG decode');
+  assert.deepEqual([...got.indices], indices);
+
+  // End-to-end through the engine: memberImage produces the same pixels.
+  const loader = new BundleLoader();
+  loader.register(spark);
+  const e = new DirectorEngine();
+  await e.loadCast(loader, 'hh_demo');
+  const member = e.casts[0].members.get(2);
+  const img = e.memberImage(member);
+  assert.deepEqual([...img.data], [...ref.rgba], 'engine member image pixel-identical');
+});
+
+function buildTruecolorPng(width, height, rgba) {
+  const stride = width * 4;
+  const raw = new Uint8Array(height * (1 + stride));
+  for (let y = 0; y < height; y++) {
+    raw[y * (1 + stride)] = 0;
+    raw.set(rgba.subarray(y * stride, (y + 1) * stride), y * (1 + stride) + 1);
+  }
+  const idat = zlibSync(raw, { level: 9 });
+  const chunk = (type, data) => {
+    const out = new Uint8Array(12 + data.length);
+    new DataView(out.buffer).setUint32(0, data.length);
+    out.set(new TextEncoder().encode(type), 4);
+    out.set(data, 8);
+    let crc = 0xffffffff;
+    for (const byte of [...new TextEncoder().encode(type), ...data]) {
+      crc ^= byte;
+      for (let k = 0; k < 8; k++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+    crc = (crc ^ 0xffffffff) >>> 0;
+    out.set([(crc >>> 24) & 0xff, (crc >>> 16) & 0xff, (crc >>> 8) & 0xff, crc & 0xff], 8 + data.length);
+    return out;
+  };
+  const ihdr = new Uint8Array(13);
+  new DataView(ihdr.buffer).setUint32(0, width);
+  new DataView(ihdr.buffer).setUint32(4, height);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  const out = new Uint8Array(8 + chunk('IHDR', ihdr).length + chunk('IDAT', idat).length + 12);
+  out.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  let o = 8;
+  for (const c of [chunk('IHDR', ihdr), chunk('IDAT', idat)]) {
+    out.set(c, o);
+    o += c.length;
+  }
+  return out;
+}
+
+test('truecolor PNGs with a palette companion re-index to NATURAL palette slots', async () => {
+  const dir = makeFixture();
+  // A corner-style shadow: white on the matte key slot (0), black on the
+  // shadow slot (255). Director convention — the runtime matte keys index 0
+  // transparent, and palette-ref remaps go through indices. Re-indexing must
+  // preserve those slots, or the shadow remaps/keyes to the wrong colors.
+  const rgba = new Uint8Array([
+    255, 255, 255, 255, 0, 0, 0, 255,
+    0, 0, 0, 255, 255, 255, 255, 255,
+  ]);
+  const png = buildTruecolorPng(2, 2, rgba);
+  writeFileSync(join(dir, 'hh_demo', '0005_bitmap_shadow.png'), png);
+  let palText = 'JASC-PAL\n0100\n256\n';
+  for (let i = 0; i < 256; i++) {
+    const c = i === 0 ? [255, 255, 255] : i === 255 ? [0, 0, 0] : [i, 0, 255 - i];
+    palText += `${c[0]} ${c[1]} ${c[2]}\n`;
+  }
+  writeFileSync(join(dir, 'hh_demo', '0005_bitmap_shadow.pal'), palText);
+
+  const { spark, manifest } = buildSparkBundle(dir);
+  const { index, body } = readSpark(spark);
+  const bmp = manifest.casts[0].members.find((m) => m.name === 'shadow');
+  const slice = (p) => {
+    const [off, len] = index[p];
+    return body.subarray(off, off + len);
+  };
+  const raw = slice(bmp.file);
+  assert.ok(isPix8(raw), 'truecolor shadow converted to a PIX8 frame');
+
+  const palBytes = slice(bmp.palRel);
+  const tripletCount = palBytes[4] | (palBytes[5] << 8);
+  assert.equal(tripletCount, 256, 'full 256-entry palette table, not first-seen order');
+  const triplets = [];
+  for (let i = 0; i < tripletCount; i++) triplets.push([palBytes[6 + i * 3], palBytes[6 + i * 3 + 1], palBytes[6 + i * 3 + 2]]);
+  const got = decodePix8(raw, triplets);
+  assert.deepEqual([...got.indices], [0, 255, 255, 0], 'white stays on matte key slot 0, black on slot 255');
+  assert.deepEqual([...got.rgba], [...rgba], 'PIX8 rgba pixel-identical to the truecolor source');
 });
 
 test('.pal companions attach to bitmap members; palette members stay separate', () => {
@@ -149,7 +320,7 @@ test('.pal companions attach to bitmap members; palette members stay separate', 
   const logos = cast.members.filter((m) => m.number === 2);
   assert.equal(logos.length, 1, 'one member 2 (the .pal is a companion, not a member)');
   assert.equal(logos[0].kind, 'bitmap');
-  assert.equal(logos[0].palRel, 'hh_demo/0002_bitmap_Logo.pal');
+  assert.match(logos[0].palRel, /^pals\/pal_\d+_[0-9a-f]+\.pal$/, 'companion rewired to a content-addressed shared palette entry');
 
   // The palettes/ dir .pal (palette token) is a real palette member.
   const paletteMember = cast.members.find((m) => m.kind === 'palette');
@@ -158,11 +329,45 @@ test('.pal companions attach to bitmap members; palette members stay separate', 
   assert.equal(paletteMember.file, 'hh_demo/0004_palette_citybg.pal');
   assert.equal(paletteMember.palRel, undefined, 'a palette member has no companion');
 
-  // Both .pal files ship in the zip.
+  // The palette MEMBER still ships under its own path; the bitmap companion
+  // ships once as a shared entry.
   const { zip } = buildBundle(dir);
   const unzipped = unzipSync(zip);
-  assert.ok(unzipped['hh_demo/0002_bitmap_Logo.pal']);
-  assert.ok(unzipped['hh_demo/0004_palette_citybg.pal']);
+  assert.ok(unzipped[logos[0].palRel], 'companion shipped as the shared entry');
+  assert.ok(unzipped['hh_demo/0004_palette_citybg.pal'], 'palette member ships under its own path');
+});
+
+test('shared palette names are content-addressed: no cross-bundle bleed in one loader', async () => {
+  // Regression: palettes ship as pals/pal_<len>_<hash>.pal, unique per content.
+  // A BundleLoader resolves a path against EVERY registered bundle (the live
+  // movie registers dozens); a flat shared name would hand members the first
+  // bundle's palette — the greyscale-drape bug. Two sparks with DIFFERENT
+  // palettes must keep their own colors when registered together.
+  const mk = (name, color) => {
+    const dir = mkdtempSync(join(tmpdir(), 'habbo-collide-'));
+    const cast = join(dir, name);
+    mkdirSync(cast, { recursive: true });
+    const palette = [[255, 255, 255], color];
+    writeFileSync(join(cast, '0001_bitmap_dot.png'), buildIndexedPng(1, 1, [1], palette));
+    writeFileSync(join(cast, '0001_bitmap_dot.pal'), `JASC-PAL\n0100\n2\n255 255 255\n${color[0]} ${color[1]} ${color[2]}\n`);
+    const { spark } = buildSparkBundle(dir);
+    return spark;
+  };
+  const sparkA = mk('hh_cast_a', [255, 0, 0]);
+  const sparkB = mk('hh_cast_b', [0, 0, 255]);
+  const loader = new BundleLoader();
+  loader.register(sparkA);
+  loader.register(sparkB);
+  const e = new DirectorEngine();
+  await e.loadCast(loader, 'hh_cast_a');
+  await e.loadCast(loader, 'hh_cast_b');
+  const a = e.casts.find((c) => c.name === 'hh_cast_a').members.get(1);
+  const b = e.casts.find((c) => c.name === 'hh_cast_b').members.get(1);
+  assert.deepEqual(a.palette[1], [255, 0, 0], 'cast A keeps its own palette (red)');
+  assert.deepEqual(b.palette[1], [0, 0, 255], 'cast B keeps its own palette (blue)');
+  // Under the old flat dedup_N names both members shared one path and the
+  // loader returned the first bundle's palette for both.
+  assert.notEqual(a.palette, b.palette, 'no shared table object across bundles');
 });
 
 test('container directories expand into sub-cast bundles under the group', () => {

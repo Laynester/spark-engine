@@ -38,3 +38,26 @@ export function encodePalette(bytes: Uint8Array): Uint8Array | null {
 export function isPaletteBytes(bytes: Uint8Array): boolean {
   return bytes.length >= 6 && bytes[0] === 0x50 && bytes[1] === 0x41 && bytes[2] === 0x4c && bytes[3] === 0x42;
 }
+
+/** Decode palette bytes (PALB binary or JASC-PAL text) into a color table.
+ *  Uses the SAME rules as the runtime's parsePaletteBytes, so index slots
+ *  always match what the engine computes for the member. */
+export function parsePalTable(bytes: Uint8Array): number[][] {
+  if (isPaletteBytes(bytes)) {
+    const count = bytes[4] | (bytes[5] << 8);
+    const colors: number[][] = [];
+    for (let i = 0; i < count; i++) {
+      const o = 6 + i * 3;
+      if (o + 2 >= bytes.length) break;
+      colors.push([bytes[o], bytes[o + 1], bytes[o + 2]]);
+    }
+    return colors;
+  }
+  const text = new TextDecoder().decode(bytes);
+  const colors: number[][] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^\s*(\d{1,3})\s+(\d{1,3})\s+(\d{1,3})\s*$/.exec(line);
+    if (m) colors.push([parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)]);
+  }
+  return colors;
+}

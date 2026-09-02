@@ -25,6 +25,9 @@ export interface MemberEntry {
   palRel?: string;
   /** True for small text payloads that we can cache inline. */
   inlineText?: string;
+  /** Script members: when true, `file` holds LBC1 bytecode instead of .ls
+   *  text (the bundler compiled it; the runtime decodes it without parsing). */
+  bytecode?: boolean;
 }
 
 export interface CastFont {

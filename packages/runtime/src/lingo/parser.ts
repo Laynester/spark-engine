@@ -687,6 +687,20 @@ export function parseLingo(source: string): Script {
   return new Parser(tokens).parseScript();
 }
 
+const SCRIPT_TYPE_RE = /^--\s*Type:\s*(\w+)/m;
+
+/** Infer the Director script type from the `-- Type:` header the exporter
+ *  writes above each cast script. `parseLingo` leaves type 'unknown'; the
+ *  engine (and the bundle-time compiler) stamp it from this header. */
+export function inferScriptType(source: string): Script['type'] {
+  const tm = SCRIPT_TYPE_RE.exec(source);
+  if (tm) {
+    const type = tm[1].toLowerCase();
+    return type === 'parent' || type === 'movie' || type === 'score' || type === 'behavior' ? type : 'unknown';
+  }
+  return 'unknown';
+}
+
 export function parseExpr(source: string): Expr {
   const tokens = tokenize(source);
   return new Parser(tokens).parseTopLevelExpr();

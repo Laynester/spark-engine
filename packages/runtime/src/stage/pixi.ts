@@ -6,7 +6,7 @@ import { LImage, LList, LObject, LPoint, LPropList, LSpriteRef, LSymbol } from '
 import type { ShapeDef } from '../engine/members.js';
 import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, blendModeForInk, cornersAreNearWhite, matteSpriteHitTest, tintSpriteBackground, tintSpriteDarken, SUBTRACT_BLEND_MODE, type BakeMode } from './matte.js';
 import { caretBlinkOn, caretX } from './caret.js';
-import { decodePng } from '../engine/png.js';
+import { decodeImage } from '../engine/pix8.js';
 
 
 interface ChannelNode {
@@ -535,11 +535,11 @@ export class PixiStage implements StageAdapter {
         let rgba: Uint8ClampedArray | null = null;
         let maskDec: { width: number; height: number; rgba: Uint8ClampedArray } | null = null;
         try {
-          const dec = decodePng(visual.bytes);
+          const dec = decodeImage(visual.bytes, ch.member?.palette);
           width = dec.width;
           height = dec.height;
           rgba = new Uint8ClampedArray(dec.rgba);
-          const md = decodePng(visual.maskBytes);
+          const md = decodeImage(visual.maskBytes, ch.member?.palette);
           maskDec = { width: md.width, height: md.height, rgba: new Uint8ClampedArray(md.rgba) };
           applyMaskAlpha(rgba, width, height, maskDec.rgba, maskDec.width, maskDec.height, offX, offY);
         } catch (e) {
@@ -572,7 +572,7 @@ export class PixiStage implements StageAdapter {
         let height = 0;
         let rgba: Uint8ClampedArray | null = null;
         try {
-          const dec = decodePng(visual.bytes);
+          const dec = decodeImage(visual.bytes, ch.member?.palette);
           width = dec.width;
           height = dec.height;
           rgba = new Uint8ClampedArray(dec.rgba);
@@ -674,7 +674,7 @@ export class PixiStage implements StageAdapter {
       let height = 0;
       let rgba: Uint8Array | null = null;
       try {
-        const dec = decodePng(bytes);
+        const dec = decodeImage(bytes, palette);
         width = dec.width;
         height = dec.height;
         rgba = new Uint8Array(dec.rgba);

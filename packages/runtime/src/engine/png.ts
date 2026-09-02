@@ -7,6 +7,7 @@ class BitReader {
   constructor(private data: Uint8Array) {}
   bits(n: number): number {
     while (this.cnt < n) {
+      if (this.pos >= this.data.length) throw new Error('deflate: truncated stream');
       this.buf |= this.data[this.pos++] << this.cnt;
       this.cnt += 8;
     }

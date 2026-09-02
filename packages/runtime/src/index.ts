@@ -10,7 +10,10 @@ export type {
 } from './bundle/types.js';
 export { Interpreter, Env, ReturnSignal, ExitSignal } from './lingo/interpreter.js';
 export type { InterpreterHost, GlobalHandlerRef } from './lingo/interpreter.js';
-export { parseLingo, parseExpr, Parser } from './lingo/parser.js';
+export { parseLingo, parseExpr, Parser, inferScriptType } from './lingo/parser.js';
+export { encodeScript, decodeScript } from './lingo/bytecode.js';
+export { decodeImage, decodePix8, isPix8 } from './engine/pix8.js';
+export { decodePng } from './engine/png.js';
 export { tokenize, LingoSyntaxError } from './lingo/tokenizer.js';
 export type { Token } from './lingo/tokenizer.js';
 export type { Script, Handler, Expr, Stmt, TheSegment, ChunkKind } from './lingo/ast.js';

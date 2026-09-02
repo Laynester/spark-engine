@@ -112,6 +112,11 @@ export class CastLib {
 }
 
 export function readPngSize(bytes: Uint8Array): { w: number; h: number } | null {
+  // PIX8 raw-indexed frames carry the size in the header (the bundler converts
+  // indexed PNGs; everything else stays a PNG and parses below).
+  if (bytes.length >= 8 && bytes[0] === 0x50 && bytes[1] === 0x49 && bytes[2] === 0x58 && bytes[3] === 0x38) {
+    return { w: bytes[4] | (bytes[5] << 8), h: bytes[6] | (bytes[7] << 8) };
+  }
   if (bytes.length < 24) return null;
   if (bytes[0] !== 0x89 || bytes[1] !== 0x50 || bytes[2] !== 0x4e || bytes[3] !== 0x47) return null;
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);

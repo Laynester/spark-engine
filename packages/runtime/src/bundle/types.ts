@@ -17,6 +17,10 @@ export interface MemberEntry {
   regY?: number;
   palRel?: string;
   inlineText?: string;
+  /** Script members: when true, `file` holds LBC1 bytecode (compileScript) —
+   *  the runtime decodes it instead of parsing .ls source text. Omitted or
+   *  false = the file is plain Lingo text (parse as before). */
+  bytecode?: boolean;
 }
 
 export interface CastFont {

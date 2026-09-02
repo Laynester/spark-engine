@@ -122,6 +122,9 @@ function countSubstringRuns(s: string, sub: string): number {
 
 export class Env {
   me: LObject | null = null;
+  /** Fast-path local-name set for handler-local assignments (null when the
+   *  handler runs with an instance or none was derived). */
+  locals: Set<string> | null = null;
   vars = new Map<string, LVal>();
   constructor(public parent: Env | null = null, public globals: Set<string> = new Set()) {}
 
@@ -130,17 +133,21 @@ export class Env {
   }
 
   getLower(key: string): LVal | undefined {
-    if (this.vars.has(key)) return this.vars.get(key);
-    if (this.parent) return this.parent.getLower(key);
+    let e: Env | null = this;
+    while (e) {
+      const v = e.vars.get(key);
+      if (v !== undefined) return v;
+      e = e.parent;
+    }
     return undefined;
   }
 
   set(name: string, value: LVal): void {
-    this.vars.set(name.toLowerCase(), value);
+    this.vars.set(name.toLowerCase(), value === undefined ? VOID : value);
   }
 
   setLower(key: string, value: LVal): void {
-    this.vars.set(key, value);
+    this.vars.set(key, value === undefined ? VOID : value);
   }
 
   has(name: string): boolean {
@@ -180,6 +187,63 @@ export class Interpreter {
     return scriptPropsLower(script);
   }
 
+  private identLowerCache = new WeakMap<Expr, string>();
+  private identLowerOf(e: Expr): string {
+    let s = this.identLowerCache.get(e);
+    if (s === undefined) {
+      if (e.kind === 'ident' || e.kind === 'prop') s = e.name.toLowerCase();
+      else s = '';
+      this.identLowerCache.set(e, s);
+    }
+    return s;
+  }
+
+  private handlerLocalsCache = new WeakMap<Handler, Set<string>>();
+  private handlerLocalsOf(script: Script, handler: Handler): Set<string> {
+    let s = this.handlerLocalsCache.get(handler);
+    if (s) return s;
+    s = new Set<string>();
+    const props = this.propsLowerOf(script);
+    const seen = new Set<string>();
+    const note = (name: string): void => {
+      const lower = name.toLowerCase();
+      if (seen.has(lower)) return;
+      seen.add(lower);
+      if (!props.has(lower)) s.add(lower);
+    };
+    const walk = (stmts: Stmt[]): void => {
+      for (const st of stmts) {
+        switch (st.kind) {
+          case 'assign':
+            if (st.target.kind === 'ident') note(st.target.name);
+            break;
+          case 'put':
+            if (st.into && st.into.kind === 'ident') note(st.into.name);
+            break;
+          case 'repeatWith':
+          case 'repeatIn':
+            note(st.varName);
+            walk(st.body);
+            break;
+          case 'if':
+            walk(st.then);
+            walk(st.els);
+            break;
+          case 'case':
+            for (const b of st.branches) walk(b.body);
+            break;
+          case 'repeatWhile':
+            walk(st.body);
+            break;
+        }
+      }
+    };
+    for (const p of handler.params) note(p);
+    walk(handler.body);
+    this.handlerLocalsCache.set(handler, s);
+    return s;
+  }
+
   constructor(public host: InterpreterHost) {}
 
   currentArgs(): LVal[] {
@@ -205,7 +269,7 @@ export class Interpreter {
       this.host.warn(`call depth exceeded in #${handler.name} (script ${script.name}); trail: ${trail}`);
       return VOID;
     }
-    this.floatVals.clear();
+    this.floatEpoch++;
     this.floatNames.clear();
     this.callTrail.push(`#${handler.name}@${script.name}`);
     if (this.callDepth >= 100 && this.callDepth % 25 === 0) {
@@ -228,29 +292,13 @@ export class Interpreter {
   ): LVal {
     const prevScript = this.currentScript;
     this.currentScript = script;
-    if (handler.name.toLowerCase() === 'soundmachinesetstate') {
-      const d = args[0];
-      const id = d && typeof d === 'object' && (d as LPropListClass).props ? (d as LPropListClass).props.get('id') : undefined;
-      const on = d && typeof d === 'object' && (d as LPropListClass).props ? (d as LPropListClass).props.get('furniOn') : undefined;
-      const obj = instance as LObject | null;
-      const playing = obj ? obj.props.get('pSongPlaying') : undefined;
-      const ready = obj ? obj.props.get('pTimeLineReady') : undefined;
-      this.host.log(`DBG song: soundMachineSetState id=${String(id)} on=${String(on)} pSongPlaying=${String(playing)} pTimeLineReady=${String(ready)}`);
-    }
-    if (handler.name.toLowerCase() === 'playsong') {
-      const obj = instance as LObject | null;
-      const len = obj ? obj.props.get('pSongLength') : undefined;
-      const playing = obj ? obj.props.get('pSongPlaying') : undefined;
-      const furniOn = obj ? obj.props.get('pSoundMachineFurniOn') : undefined;
-      this.host.log(`DBG song: playSong pSongLength=${String(len)} pSongPlaying=${String(playing)} furniOn=${String(furniOn)}`);
-    }
-
     const baseGlobals = this.globalsLowerOf(script);
     const env = new Env(null, scriptGlobals && scriptGlobals.size > 0 ? new Set([...baseGlobals, ...scriptGlobals]) : baseGlobals);
     env.me = instance;
+    if (!instance) env.locals = this.handlerLocalsOf(script, handler);
     let offset = 0;
     if (instance && handler.params.length > 0 && handler.params[0].toLowerCase() === 'me') {
-      env.vars.set('me', instance);
+      env.setLower('me', instance);
       offset = 1;
     }
     for (let i = offset; i < handler.params.length; i++) {
@@ -258,7 +306,7 @@ export class Interpreter {
     }
     if (instance && offset === 0) env.setLower('me', instance);
     if (!env.me && handler.params[0]?.toLowerCase() === 'me') {
-      const m = env.vars.get('me');
+      const m = env.getLower('me');
       if (m instanceof LObjectClass) env.me = m;
     }
     this.argStack.push(args);
@@ -396,12 +444,12 @@ export class Interpreter {
 
   execBody(stmts: Stmt[], env: Env): void {
     for (const stmt of stmts) {
-      this.floatVals.clear();
+      this.floatEpoch++;
       this.execStmt(stmt, env);
     }
   }
 
-  private lastAssignSrc = '';
+  private lastAssignExpr: Expr | null = null;
 
   private exprSrc(e: Expr): string {
     switch (e.kind) {
@@ -420,7 +468,7 @@ export class Interpreter {
       case 'assign': {
         const v = this.evalExpr(stmt.value, env);
         this.noteFloatAssign(stmt.target, stmt.value);
-        this.lastAssignSrc = this.exprSrc(stmt.target);
+        this.lastAssignExpr = stmt.target;
         this.execAssign(stmt.target, v, env);
         return;
       }
@@ -451,39 +499,9 @@ export class Interpreter {
           if (!(out.startsWith('Error:') && out.includes('Writer already exists'))) this.host.log(out);
         }
         return;
-      case 'delete': {
-        const target = stmt.target;
-        if (target.kind === 'chunk') {
-          const base = this.evalExpr(target.obj, env);
-          if (typeof base === 'string') {
-            const parts = this.chunkParts(base, target.chunk);
-            if (parts !== null) {
-              const n = parts.length;
-              const rawFrom = target.from !== undefined ? Math.round(asNum(this.evalExpr(target.from, env))) : 1;
-              const rawTo = target.to !== undefined ? Math.round(asNum(this.evalExpr(target.to, env))) : rawFrom;
-              if (rawFrom <= -30000) {
-                const sep = target.chunk === 'char' ? '' : target.chunk === 'word' ? ' ' : target.chunk === 'line' || target.chunk === 'paragraph' ? '\r' : this.host.itemDelimiter();
-                this.execAssign(target.obj, parts.slice(0, n - 1).join(sep), env);
-                return;
-              }
-              let from = rawFrom < 0 ? n + rawFrom + 1 : rawFrom;
-              let to = rawTo < 0 ? n + rawTo + 1 : rawTo;
-              if (from < 1 || to < 1) return;
-              from = Math.min(n, from);
-              to = Math.min(n, to);
-              if (from <= to) {
-                const kept = parts.slice(0, from - 1).concat(parts.slice(to));
-                const sep = target.chunk === 'char' ? '' : target.chunk === 'word' ? ' ' : target.chunk === 'line' || target.chunk === 'paragraph' ? '\r' : this.host.itemDelimiter();
-                this.execAssign(target.obj, kept.join(sep), env);
-              }
-            }
-          } else {
-          }
-        } else {
-          this.host.warn(`delete unsupported on ${target.kind} target`);
-        }
+      case 'delete':
+        this.execDelete(stmt.target, env);
         return;
-      }
       case 'if': {
         const branch = isTruthy(this.evalExpr(stmt.cond, env)) ? stmt.then : stmt.els;
         this.execBody(branch, env);
@@ -506,10 +524,10 @@ export class Interpreter {
         const to = Math.round(asNum(this.evalExpr(stmt.to, env)));
         const step = stmt.down ? -1 : 1;
         const key = stmt.varName.toLowerCase();
-        env.vars.set(key, from);
+        env.setLower(key, from);
         let iter = 0;
         while (true) {
-          const i = asNum(env.vars.get(key) ?? 0);
+          const i = asNum(env.getLower(key) ?? 0);
           if (stmt.down ? i < to : i > to) break;
           if (++iter > MAX_LOOP_ITERATIONS) {
             this.host.warn('repeat loop guard hit');
@@ -520,12 +538,12 @@ export class Interpreter {
           } catch (e) {
             if (e instanceof ExitRepeatSignal) break;
             if (e instanceof NextRepeatSignal) {
-              env.vars.set(key, asNum(env.vars.get(key) ?? 0) + step);
+              env.setLower(key, asNum(env.getLower(key) ?? 0) + step);
               continue;
             }
             throw e;
           }
-          env.vars.set(key, asNum(env.vars.get(key) ?? 0) + step);
+          env.setLower(key, asNum(env.getLower(key) ?? 0) + step);
         }
         return;
       }
@@ -538,7 +556,7 @@ export class Interpreter {
         let iter = 0;
         for (const item of items) {
           if (++iter > MAX_LOOP_ITERATIONS) break;
-          env.vars.set(stmt.varName.toLowerCase(), item);
+          env.setLower(stmt.varName.toLowerCase(), item);
           try {
             this.execBody(stmt.body, env);
           } catch (e) {
@@ -596,7 +614,40 @@ export class Interpreter {
     }
   }
 
-  private floatVals = new Set<number>();
+  private execDelete(target: Expr, env: Env): void {
+    if (target.kind === 'chunk') {
+      const base = this.evalExpr(target.obj, env);
+      if (typeof base === 'string') {
+        const parts = this.chunkParts(base, target.chunk);
+        if (parts !== null) {
+          const n = parts.length;
+          const rawFrom = target.from !== undefined ? Math.round(asNum(this.evalExpr(target.from, env))) : 1;
+          const rawTo = target.to !== undefined ? Math.round(asNum(this.evalExpr(target.to, env))) : rawFrom;
+          if (rawFrom <= -30000) {
+            const sep = target.chunk === 'char' ? '' : target.chunk === 'word' ? ' ' : target.chunk === 'line' || target.chunk === 'paragraph' ? '\r' : this.host.itemDelimiter();
+            this.execAssign(target.obj, parts.slice(0, n - 1).join(sep), env);
+            return;
+          }
+          let from = rawFrom < 0 ? n + rawFrom + 1 : rawFrom;
+          let to = rawTo < 0 ? n + rawTo + 1 : rawTo;
+          if (from < 1 || to < 1) return;
+          from = Math.min(n, from);
+          to = Math.min(n, to);
+          if (from <= to) {
+            const kept = parts.slice(0, from - 1).concat(parts.slice(to));
+            const sep = target.chunk === 'char' ? '' : target.chunk === 'word' ? ' ' : target.chunk === 'line' || target.chunk === 'paragraph' ? '\r' : this.host.itemDelimiter();
+            this.execAssign(target.obj, kept.join(sep), env);
+          }
+        }
+      }
+    } else {
+      this.host.warn(`delete unsupported on ${target.kind} target`);
+    }
+  }
+
+  private floatMarks = new Map<number, number>();
+
+  private floatEpoch = 0;
 
   private floatNames = new Map<string, boolean>();
 
@@ -617,37 +668,48 @@ export class Interpreter {
   }
 
   markFloatValue(v: LVal): LVal {
-    if (typeof v === 'number' && Number.isInteger(v)) this.floatVals.add(v);
+    if (typeof v === 'number' && Number.isInteger(v)) this.floatMarks.set(v, this.floatEpoch);
     return v;
   }
 
   isFloatValue(v: LVal): boolean {
-    return typeof v === 'number' && (!Number.isInteger(v) || this.floatVals.has(v));
+    return typeof v === 'number' && (!Number.isInteger(v) || this.floatMarks.get(v) === this.floatEpoch);
   }
 
   private noteFloatAssign(target: Expr, rhs: Expr): void {
-    const name = target.kind === 'ident' || target.kind === 'prop' ? target.name.toLowerCase() : null;
+    const name = target.kind === 'ident' || target.kind === 'prop' ? this.identLowerOf(target) : null;
     if (name) this.floatNames.set(name, this.isFloatExpr(rhs));
   }
 
+  private floatExprCache = new WeakMap<Expr, boolean>();
+
   private isFloatExpr(e: Expr): boolean {
+    const cached = this.floatExprCache.get(e);
+    if (cached !== undefined) return cached;
+    let r: boolean;
     switch (e.kind) {
       case 'num':
-        return !!e.float;
+        r = !!e.float;
+        break;
       case 'call':
-        return e.callee.kind === 'ident' && e.callee.name.toLowerCase() === 'float';
+        r = e.callee.kind === 'ident' && e.callee.name.toLowerCase() === 'float';
+        break;
       case 'binary':
-        return this.isFloatExpr(e.left) || this.isFloatExpr(e.right);
+        r = this.isFloatExpr(e.left) || this.isFloatExpr(e.right);
+        break;
       case 'unary':
-        return e.op === '-' || e.op === '+' ? this.isFloatExpr(e.arg) : false;
+        r = e.op === '-' || e.op === '+' ? this.isFloatExpr(e.arg) : false;
+        break;
       default:
-        return false;
+        r = false;
     }
+    this.floatExprCache.set(e, r);
+    return r;
   }
 
   private exprIsFloatName(e: Expr): boolean {
     if (e.kind === 'ident' || e.kind === 'prop') {
-      return this.floatNames.get(e.name.toLowerCase()) ?? false;
+      return this.floatNames.get(this.identLowerOf(e)) ?? false;
     }
     return false;
   }
@@ -662,7 +724,7 @@ export class Interpreter {
   }
 
   clearFloatMark(v: LVal): LVal {
-    if (typeof v === 'number') this.floatVals.delete(v);
+    if (typeof v === 'number') this.floatMarks.delete(v);
     return v;
   }
 
@@ -670,20 +732,27 @@ export class Interpreter {
     switch (target.kind) {
       case 'ident': {
         const name = target.name;
-        const lower = name.toLowerCase();
+        const lower = this.identLowerOf(target);
         if (lower === 'me') {
           this.host.warn('cannot assign to me');
           return;
         }
-        if (env.globals.has(lower)) this.host.globalSet(name, value);
-        else {
-          const owner = this.instancePropOwnerLower(env, name, lower);
-          if (owner) {
-            owner.props.set(name, value);
-            this.notePropFloat(owner, name, this.isFloatValue(value));
-          } else {
-            env.set(name, value);
-          }
+        if (env.globals.has(lower)) {
+          this.host.globalSet(name, value);
+          return;
+        }
+        // With no instance the prop-owner walk always fails, so a known
+        // handler-local assignment is exactly env.set without the walk.
+        if (!env.me && env.locals && env.locals.has(lower)) {
+          env.setLower(lower, value);
+          return;
+        }
+        const owner = this.instancePropOwnerLower(env, name, lower);
+        if (owner) {
+          owner.props.set(name, value);
+          this.notePropFloat(owner, name, this.isFloatValue(value));
+        } else {
+          env.set(name, value);
         }
         return;
       }
@@ -745,14 +814,14 @@ export class Interpreter {
     switch (expr.kind) {
       case 'num':
         if (expr.float) this.markFloatValue(expr.value);
-        else this.floatVals.delete(expr.value);
+        else this.floatMarks.delete(expr.value);
         return expr.value;
       case 'str':
         return expr.value;
       case 'symbol':
         return new LSymbol(expr.name);
       case 'ident':
-        return this.evalIdent(expr.name, env);
+        return this.evalIdent(expr, env);
       case 'list':
         return new LListClass(expr.items.map((i) => this.evalExpr(i, env)));
       case 'proplist': {
@@ -803,19 +872,22 @@ export class Interpreter {
     }
   }
 
-  private evalIdent(name: string, env: Env): LVal {
-    const lower = name.toLowerCase();
-    if (lower === 'me') return env.me ?? VOID;
-    if (lower === 'empty') return LEMPTY;
-    if (lower === 'void') return VOID;
-    if (lower === 'true') return 1;
-    if (lower === 'false') return 0;
-    if (lower === 'pi') return Math.PI;
-    if (lower === 'return') return '\r';
-    if (lower === 'tab') return '\t';
-    if (lower === 'enter') return '\x03';
-    if (lower === 'space') return ' ';
-    if (lower === 'quote') return '"';
+  private evalIdent(expr: { kind: 'ident'; name: string }, env: Env): LVal {
+    const name = expr.name;
+    const lower = this.identLowerOf(expr);
+    switch (lower) {
+      case 'me': return env.me ?? VOID;
+      case 'empty': return LEMPTY;
+      case 'void': return VOID;
+      case 'true': return 1;
+      case 'false': return 0;
+      case 'pi': return Math.PI;
+      case 'return': return '\r';
+      case 'tab': return '\t';
+      case 'enter': return '\x03';
+      case 'space': return ' ';
+      case 'quote': return '"';
+    }
     const local = env.getLower(lower);
     if (local !== undefined) return local;
     const global = this.host.globalGetLower ? this.host.globalGetLower(lower, name) : this.host.globalGet(name);
@@ -879,16 +951,29 @@ export class Interpreter {
       case '&&':
         return lingoConcat(l) + ' ' + lingoConcat(r);
       case '+': {
+        if (typeof l === 'number' && typeof r === 'number') {
+          const out = l + r;
+          return this.isFloatArith(l, r, leftE, rightE) ? this.markFloatValue(out) : out;
+        }
         const out = lingoAdd(l, r) ?? asNum(l) + asNum(r);
         return this.isFloatArith(l, r, leftE, rightE) ? this.markFloatValue(out) : out;
       }
       case '-': {
+        if (typeof l === 'number' && typeof r === 'number') {
+          const out = l - r;
+          return this.isFloatArith(l, r, leftE, rightE) ? this.markFloatValue(out) : out;
+        }
         const out = lingoSubtract(l, r) ?? asNum(l) - asNum(r);
         return this.isFloatArith(l, r, leftE, rightE) ? this.markFloatValue(out) : out;
       }
-      case '*':
+      case '*': {
+        if (typeof l === 'number' && typeof r === 'number') {
+          const out = l * r;
+          return this.isFloatArith(l, r, leftE, rightE) ? this.markFloatValue(out) : out;
+        }
         const mulOut = lingoMultiply(l, r) ?? asNum(l) * asNum(r);
         return this.isFloatArith(l, r, leftE, rightE) ? this.markFloatValue(mulOut) : mulOut;
+      }
       case '/': {
         const floatDiv = this.isFloatArith(l, r, leftE, rightE);
         if (l === VOID || r === VOID) return 0;
@@ -1888,7 +1973,7 @@ export class Interpreter {
       }
       return;
     }
-    this.host.warn(`cannot index-assign on ${toLingoString(obj)} (${this.lastAssignSrc}) [${this.callTrail.slice(-4).join(' <- ')}]`);
+    this.host.warn(`cannot index-assign on ${toLingoString(obj)} (${this.lastAssignExpr ? this.exprSrc(this.lastAssignExpr) : ''}) [${this.callTrail.slice(-4).join(' <- ')}]`);
   }
 
 

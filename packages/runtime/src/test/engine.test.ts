@@ -3921,7 +3921,30 @@ test('xtra stub methods return 0 (Connection Instance connect gate)', () => {
   const e = new DirectorEngine();
   assert.equal(e.interp.evalExpressionString('xtra("Multiuser").new().setNetMessageHandler(#h, 1)'), 0);
   assert.equal(e.interp.evalExpressionString('xtra("Multiuser").new().setNetBufferLimits(16 * 1024, 100 * 1024, 100)'), 0);
-  assert.equal(e.interp.evalExpressionString('xtra("Multiuser").new().connectToNetServer("*", "*", "localhost", 12321, "*", 0)'), 0);
+  // Stub WebSocket so the gate test never leaves a live connection open (a
+  // real ws://localhost:12321 connect would dangle the socket forever).
+  const g = globalThis as { WebSocket?: new (u: string) => unknown };
+  const origWs = g.WebSocket;
+  const opened: string[] = [];
+  class FakeWebSocket {
+    onopen: unknown = null;
+    onmessage: unknown = null;
+    onclose: unknown = null;
+    onerror: unknown = null;
+    readyState = 0;
+    constructor(public url: string) {
+      opened.push(url);
+    }
+    close(): void {}
+    send(): void {}
+  }
+  g.WebSocket = FakeWebSocket as unknown as new (u: string) => unknown;
+  try {
+    assert.equal(e.interp.evalExpressionString('xtra("Multiuser").new().connectToNetServer("*", "*", "localhost", 12321, "*", 0)'), 0);
+  } finally {
+    g.WebSocket = origWs;
+  }
+  assert.deepEqual(opened, ['ws://localhost:12321']);
 });
 
 test('member text props (bgColor/antialias/topSpacing) set+get silently', () => {
@@ -8053,7 +8076,7 @@ test('dynamic download rename (full CDN URL) fills the empty shell in place for 
   assert.equal(e.netDone(id), 1, 'furniture preload completes');
   assert.ok(loader.getCast('hh_furni_xx_club_sofa'), 'bundle fetched into the loader');
 
-  const indexLogCount = () => e.logs.filter((l) => l.startsWith('DBG indexCast')).length;
+  const indexLogCount = () => e.indexedSlots.length;
   const preIndex = indexLogCount();
 
   // setImportedCast: tCastLib.name = tCastName (the full CDN URL).
@@ -8087,10 +8110,7 @@ test('dynamic download rename (full CDN URL) fills the empty shell in place for 
   const bootIndex = indexLogCount();
   e.setCastLibProp(slotRef, 'name', 'hh_furni_xx_club_sofa');
   assert.equal(e.castByName.get('hh_furni_xx_club_sofa')?.loaded, true, 'boot-style bare rename registers the bundle');
-  assert.ok(
-    e.logs.slice(bootIndex).some((l) => l.startsWith(`DBG indexCast(${slot.number} `)),
-    'boot-style rename pre-indexes this exact slot (tDoIndexing=1)'
-  );
+  assert.ok(e.indexedSlots.slice(bootIndex).includes(slot.number), 'boot-style rename pre-indexes this exact slot (tDoIndexing=1)');
 });
 
 test('directorTransformFlip: rotation 180 + skew 180 is a horizontal mirror (Director semantics)', () => {
