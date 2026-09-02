@@ -442,6 +442,17 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   bundleLoader: BundleLoader | null = null;
   private uid = 0;
   private slotLastCast = new Map<number, string>();
+  private paletteCache = new Map<string, number[][]>();
+
+  private readPalette(loader: BundleLoader, path: string): number[][] | undefined {
+    const cached = this.paletteCache.get(path);
+    if (cached !== undefined) return cached;
+    const bytes = loader.readBytes(path);
+    if (bytes === undefined) return undefined;
+    const pal = parsePaletteBytes(bytes);
+    this.paletteCache.set(path, pal);
+    return pal;
+  }
   private goIssued = false;
   clickOnChannel = 0;
   interp: Interpreter;
@@ -605,14 +616,14 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         case 'bitmap':
           member.raw = loader.readBytes(entry.file);
           if (entry.palRel) {
-            const palBytes = loader.readBytes(entry.palRel);
-            if (palBytes !== undefined) member.palette = parsePaletteBytes(palBytes);
+            const pal = this.readPalette(loader, entry.palRel);
+            if (pal !== undefined) member.palette = pal;
           }
           break;
         case 'palette': {
-          const palBytes = loader.readBytes(entry.file);
-          if (palBytes !== undefined) {
-            member.palette = parsePaletteBytes(palBytes);
+          const pal = this.readPalette(loader, entry.file);
+          if (pal !== undefined) {
+            member.palette = pal;
             if (member.palette.length > 0) this.currentPalette = member.palette;
           }
           break;
