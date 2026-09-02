@@ -16,6 +16,7 @@ import {
   type MemberHost,
 } from './values.js';
 import { matteRegionMask } from '../stage/matte.js';
+import { compileHandlerBody } from './jit.js';
 
 export class ReturnSignal {
   constructor(public value: LVal) {}
@@ -125,7 +126,7 @@ export class Env {
   /** Fast-path local-name set for handler-local assignments (null when the
    *  handler runs with an instance or none was derived). */
   locals: Set<string> | null = null;
-  vars = new Map<string, LVal>();
+  private _vars: Map<string, LVal> | null = null;
   constructor(public parent: Env | null = null, public globals: Set<string> = new Set()) {}
 
   get(name: string): LVal | undefined {
@@ -135,7 +136,7 @@ export class Env {
   getLower(key: string): LVal | undefined {
     let e: Env | null = this;
     while (e) {
-      const v = e.vars.get(key);
+      const v = e._vars?.get(key);
       if (v !== undefined) return v;
       e = e.parent;
     }
@@ -143,11 +144,12 @@ export class Env {
   }
 
   set(name: string, value: LVal): void {
-    this.vars.set(name.toLowerCase(), value === undefined ? VOID : value);
+    this.setLower(name.toLowerCase(), value);
   }
 
   setLower(key: string, value: LVal): void {
-    this.vars.set(key, value === undefined ? VOID : value);
+    if (!this._vars) this._vars = new Map();
+    this._vars.set(key, value === undefined ? VOID : value);
   }
 
   has(name: string): boolean {
@@ -155,7 +157,7 @@ export class Env {
   }
 
   hasLower(key: string): boolean {
-    if (this.vars.has(key)) return true;
+    if (this._vars?.has(key)) return true;
     if (this.parent) return this.parent.hasLower(key);
     return false;
   }
@@ -283,6 +285,41 @@ export class Interpreter {
     }
   }
 
+  private jitCache = new WeakMap<Handler, { fn: Function; nodes: unknown[] } | null>();
+
+  private jitCompiledOf(script: Script, handler: Handler): { fn: Function; nodes: unknown[] } | null {
+    let entry = this.jitCache.get(handler);
+    if (entry !== undefined) return entry;
+    let result: { fn: Function; nodes: unknown[] } | null = null;
+    const compiled = compileHandlerBody(handler, this.propsLowerOf(script));
+    if (compiled) {
+      try {
+        result = {
+          fn: new Function(
+            'env', 'I', 'args', 'N', 'Ret', 'Exit', 'ExitR', 'NextR',
+            'LList', 'LPropList', 'PropPairs', 'LSym', 'LEMPTY', 'VOID',
+            'asNum', 'isTruthy', 'lingoEquals', 'lingoNegate',
+            compiled.src,
+          ),
+          nodes: compiled.nodes,
+        };
+      } catch {
+        result = null;
+      }
+    }
+    this.jitCache.set(handler, result);
+    return result;
+  }
+
+  private handlerParamsPropCollide(script: Script, handler: Handler): boolean {
+    const props = this.propsLowerOf(script);
+    for (const p of handler.params) {
+      const lower = p.toLowerCase();
+      if (lower !== 'me' && props.has(lower)) return true;
+    }
+    return false;
+  }
+
   private callHandlerInner(
     script: Script,
     handler: Handler,
@@ -295,22 +332,37 @@ export class Interpreter {
     const baseGlobals = this.globalsLowerOf(script);
     const env = new Env(null, scriptGlobals && scriptGlobals.size > 0 ? new Set([...baseGlobals, ...scriptGlobals]) : baseGlobals);
     env.me = instance;
-    if (!instance) env.locals = this.handlerLocalsOf(script, handler);
+    const compiled = this.jitCompiledOf(script, handler);
     let offset = 0;
-    if (instance && handler.params.length > 0 && handler.params[0].toLowerCase() === 'me') {
-      env.setLower('me', instance);
-      offset = 1;
+    if (instance && handler.params.length > 0 && handler.params[0].toLowerCase() === 'me') offset = 1;
+    // Compiled bodies read their locals from V slots; only interpreter bodies
+    // (and compiled ones whose params collide with script props, which never
+    // get V slots) need params mirrored into env.vars.
+    if (!compiled || this.handlerParamsPropCollide(script, handler)) {
+      if (instance && offset === 1) env.setLower('me', instance);
+      for (let i = offset; i < handler.params.length; i++) {
+        env.setLower(handler.params[i].toLowerCase(), args[i - offset] ?? VOID);
+      }
+      if (instance && offset === 0) env.setLower('me', instance);
     }
-    for (let i = offset; i < handler.params.length; i++) {
-      env.setLower(handler.params[i].toLowerCase(), args[i - offset] ?? VOID);
-    }
-    if (instance && offset === 0) env.setLower('me', instance);
-    if (!env.me && handler.params[0]?.toLowerCase() === 'me') {
-      const m = env.getLower('me');
-      if (m instanceof LObjectClass) env.me = m;
+    if (!compiled) {
+      if (!instance) env.locals = this.handlerLocalsOf(script, handler);
+      if (!env.me && handler.params[0]?.toLowerCase() === 'me') {
+        const m = env.getLower('me');
+        if (m instanceof LObjectClass) env.me = m;
+      }
     }
     this.argStack.push(args);
     try {
+      if (compiled) {
+        const r = compiled.fn(
+          env, this, args, compiled.nodes,
+          ReturnSignal, ExitSignal, ExitRepeatSignal, NextRepeatSignal,
+          LListClass, LPropListClass, PropPairsClass, LSymbol, LEMPTY, VOID,
+          asNum, isTruthy, lingoEquals, lingoNegate,
+        );
+        return r === undefined ? VOID : r;
+      }
       this.execBody(handler.body, env);
     } catch (e) {
       if (e instanceof ReturnSignal) return e.value;
@@ -647,7 +699,7 @@ export class Interpreter {
 
   private floatMarks = new Map<number, number>();
 
-  private floatEpoch = 0;
+  floatEpoch = 0;
 
   private floatNames = new Map<string, boolean>();
 
@@ -721,6 +773,80 @@ export class Interpreter {
       this.exprIsFloatName(leftE) ||
       this.exprIsFloatName(rightE)
     );
+  }
+
+  markNum(v: number, isFloat: boolean): LVal {
+    if (typeof v === 'number' && Number.isInteger(v)) {
+      if (isFloat) this.floatMarks.set(v, this.floatEpoch);
+      else this.floatMarks.delete(v);
+    }
+    return v;
+  }
+
+  noteFloatAssign2(target: Expr, rhs: Expr): void {
+    this.noteFloatAssign(target, rhs);
+  }
+
+  notePropFloat2(obj: LVal, name: string, value: LVal): void {
+    if (obj instanceof LObjectClass) this.notePropFloat(obj, name, this.isFloatValue(value));
+  }
+
+  notePropFloat3(obj: LVal, name: string, value: LVal, staticFloat: boolean): void {
+    if (obj instanceof LObjectClass) this.notePropFloat(obj, name, staticFloat || this.isFloatValue(value));
+  }
+
+  noteFloatAssign3(name: string, staticFloat: boolean): void {
+    this.floatNames.set(name, !!staticFloat);
+  }
+
+  floatNameIs(name: string): boolean {
+    return this.floatNames.get(name) ?? false;
+  }
+
+  evalIdentFull(expr: { kind: 'ident'; name: string }, env: Env): LVal {
+    return this.evalIdent(expr, env);
+  }
+
+  listItemsOf(list: LVal): LVal[] {
+    return list instanceof LListClass
+      ? list.items
+      : list instanceof LPropListClass
+        ? [...list.props.values()]
+        : [];
+  }
+
+  indexGet(obj: LVal, index: LVal): LVal {
+    return this.getIndexValue(obj, index);
+  }
+
+  indexSet(obj: LVal, index: LVal, value: LVal): void {
+    this.setIndexValue(obj, index, value);
+  }
+
+  invokePropCallee(obj: LVal, name: string, argVals: LVal[]): LVal {
+    return this.dispatchMethod(obj, name, argVals);
+  }
+
+  invokeIdentCallee(lower: string, name: string, argVals: LVal[], env: Env): LVal {
+    if (lower === 'call') return this.callBuiltin(argVals);
+    const global = lower === 'new' ? null : this.host.resolveGlobalHandler(name);
+    if (global) {
+      const selfCall = global.script === this.currentScript;
+      let instance: LObject | null = null;
+      if (selfCall) {
+        const firstHasHandler = argVals[0] instanceof LObjectClass && this.findHandler(argVals[0], name) !== null;
+        if (!firstHasHandler && env.me instanceof LObjectClass) instance = env.me;
+      }
+      return this.callHandler(global.script, global.handler, argVals, instance, NO_GLOBALS);
+    }
+    const b = this.host.builtin(name, argVals, this);
+    if (b !== undefined) return b;
+    this.host.warn(`unresolved handler/builtin: ${name}`);
+    return VOID;
+  }
+
+  execAssignNode(target: Expr, value: LVal, env: Env): void {
+    this.execAssign(target, value, env);
   }
 
   clearFloatMark(v: LVal): LVal {
@@ -927,6 +1053,18 @@ export class Interpreter {
   private evalBinary(op: string, leftE: Expr, rightE: Expr, env: Env): LVal {
     const l = this.evalExpr(leftE, env);
     const r = this.evalExpr(rightE, env);
+    return this.binaryOp(op, l, r, leftE, rightE);
+  }
+
+  binaryOp(op: string, l: LVal, r: LVal, leftE: Expr, rightE: Expr): LVal {
+    return this.binaryOpCore(op, l, r, this.isFloatArith(l, r, leftE, rightE));
+  }
+
+  binaryOpF(op: string, l: LVal, r: LVal, fL: boolean | number, fR: boolean | number): LVal {
+    return this.binaryOpCore(op, l, r, !!(fL || fR));
+  }
+
+  private binaryOpCore(op: string, l: LVal, r: LVal, floatArith: boolean): LVal {
     switch (op) {
       case '=':
         return lingoEquals(l, r) ? 1 : 0;
@@ -953,35 +1091,34 @@ export class Interpreter {
       case '+': {
         if (typeof l === 'number' && typeof r === 'number') {
           const out = l + r;
-          return this.isFloatArith(l, r, leftE, rightE) ? this.markFloatValue(out) : out;
+          return floatArith ? this.markFloatValue(out) : out;
         }
         const out = lingoAdd(l, r) ?? asNum(l) + asNum(r);
-        return this.isFloatArith(l, r, leftE, rightE) ? this.markFloatValue(out) : out;
+        return floatArith ? this.markFloatValue(out) : out;
       }
       case '-': {
         if (typeof l === 'number' && typeof r === 'number') {
           const out = l - r;
-          return this.isFloatArith(l, r, leftE, rightE) ? this.markFloatValue(out) : out;
+          return floatArith ? this.markFloatValue(out) : out;
         }
         const out = lingoSubtract(l, r) ?? asNum(l) - asNum(r);
-        return this.isFloatArith(l, r, leftE, rightE) ? this.markFloatValue(out) : out;
+        return floatArith ? this.markFloatValue(out) : out;
       }
       case '*': {
         if (typeof l === 'number' && typeof r === 'number') {
           const out = l * r;
-          return this.isFloatArith(l, r, leftE, rightE) ? this.markFloatValue(out) : out;
+          return floatArith ? this.markFloatValue(out) : out;
         }
         const mulOut = lingoMultiply(l, r) ?? asNum(l) * asNum(r);
-        return this.isFloatArith(l, r, leftE, rightE) ? this.markFloatValue(mulOut) : mulOut;
+        return floatArith ? this.markFloatValue(mulOut) : mulOut;
       }
       case '/': {
-        const floatDiv = this.isFloatArith(l, r, leftE, rightE);
         if (l === VOID || r === VOID) return 0;
         const a = asNum(l);
         const b = asNum(r);
         const divisor = b === 0 ? 1 : b;
-        const out = floatDiv ? a / divisor : Math.trunc(a / divisor);
-        return floatDiv ? this.markFloatValue(out) : out;
+        const out = floatArith ? a / divisor : Math.trunc(a / divisor);
+        return floatArith ? this.markFloatValue(out) : out;
       }
       case 'mod':
       case 'div': {
@@ -991,7 +1128,7 @@ export class Interpreter {
           if (l === VOID || r === VOID) return 0;
           const b = asNum(r);
           const out = b === 0 ? 0 : asNum(l) % b;
-          return this.isFloatArith(l, r, leftE, rightE) ? this.markFloatValue(out) : out;
+          return floatArith ? this.markFloatValue(out) : out;
         }
         const a = asNum(l);
         if (l === VOID || r === VOID) return 0;
@@ -1039,7 +1176,7 @@ export class Interpreter {
           const firstHasHandler = args[0] instanceof LObjectClass && this.findHandler(args[0], name) !== null;
           if (!firstHasHandler && env.me instanceof LObjectClass) instance = env.me;
         }
-        return this.callHandler(global.script, global.handler, args, instance, new Set());
+        return this.callHandler(global.script, global.handler, args, instance, NO_GLOBALS);
       }
       const b = this.host.builtin(name, args, this);
       if (b !== undefined) return b;
@@ -1767,9 +1904,7 @@ export class Interpreter {
       return VOID;
     }
     return VOID;
-  }
-
-  private setPropValue(obj: LVal, name: string, value: LVal): void {
+  }  setPropValue(obj: LVal, name: string, value: LVal): void {
     const lower = name.toLowerCase();
     if (obj === null || obj instanceof LEmptyValue) {
       return;
@@ -1851,13 +1986,15 @@ export class Interpreter {
 
   private propGet(pl: LPropList, key: string | undefined): LVal | undefined {
     if (key === undefined) return undefined;
-    if (pl.props.has(key)) return pl.props.get(key)!;
+    const direct = pl.props.get(key);
+    if (direct !== undefined) return direct;
     const variants: string[] = [];
     if (key.includes(' ')) variants.push(key.replaceAll(' ', '_'));
     if (key.includes('_')) variants.push(key.replaceAll('_', ' '));
     if (key.includes(' ') && key.includes('_')) variants.push(key.replaceAll(' ', '_').replaceAll('_', ' '));
     for (const variant of variants) {
-      if (pl.props.has(variant)) return pl.props.get(variant)!;
+      const v = pl.props.get(variant);
+      if (v !== undefined) return v;
     }
     if (key === 'marginH' || key === 'marginV' || key === 'marginbottom') {
       const lower = key.toLowerCase();
@@ -1868,7 +2005,7 @@ export class Interpreter {
     return undefined;
   }
 
-  private getIndexValue(obj: LVal, index: LVal): LVal {
+  getIndexValue(obj: LVal, index: LVal): LVal {
     if (obj instanceof LListClass) {
       const i = Math.round(asNum(index));
       return obj.items[i - 1] ?? VOID;
@@ -1922,7 +2059,7 @@ export class Interpreter {
     return VOID;
   }
 
-  private setIndexValue(obj: LVal, index: LVal, value: LVal): void {
+  setIndexValue(obj: LVal, index: LVal, value: LVal): void {
     if (obj instanceof LListClass) {
       const i = Math.round(asNum(index));
       if (i >= 1) {

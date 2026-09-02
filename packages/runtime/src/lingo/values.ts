@@ -44,53 +44,70 @@ export class LList {
 }
 
 export class PropPairs implements Map<string, LVal> {
-  private pairs: Array<[string, LVal]> = [];
+  private ks: string[] = [];
+  private vs: LVal[] = [];
   private index: Map<string, number> | null = null;
 
   constructor(entries?: Iterable<[string, LVal]> | null) {
-    if (entries) for (const [k, v] of entries) this.pairs.push([k, v]);
+    if (entries) {
+      for (const [k, v] of entries) {
+        this.ks.push(k);
+        this.vs.push(v);
+      }
+    }
   }
 
   get size(): number {
-    return this.pairs.length;
+    return this.ks.length;
   }
 
   private ensureIndex(): void {
     if (this.index) return;
     const idx = new Map<string, number>();
-    for (let i = 0; i < this.pairs.length; i++) {
-      const k = this.pairs[i][0];
+    const ks = this.ks;
+    for (let i = 0; i < ks.length; i++) {
+      const k = ks[i];
       if (!idx.has(k)) idx.set(k, i);
     }
     this.index = idx;
   }
 
   private firstIndex(key: string): number {
+    const ks = this.ks;
+    const n = ks.length;
+    if (n < 12) {
+      for (let i = 0; i < n; i++) if (ks[i] === key) return i;
+      return -1;
+    }
     this.ensureIndex();
     const i = this.index!.get(key);
     return i === undefined ? -1 : i;
   }
 
   clear(): void {
-    this.pairs = [];
+    this.ks = [];
+    this.vs = [];
     this.index = null;
   }
 
   delete(key: string): boolean {
     const i = this.firstIndex(key);
     if (i < 0) return false;
-    this.pairs.splice(i, 1);
+    this.ks.splice(i, 1);
+    this.vs.splice(i, 1);
     this.index = null;
     return true;
   }
 
   forEach(callbackfn: (value: LVal, key: string, map: Map<string, LVal>) => void, thisArg?: unknown): void {
-    for (const [k, v] of this.pairs) callbackfn.call(thisArg, v, k, this);
+    const ks = this.ks;
+    const vs = this.vs;
+    for (let i = 0; i < ks.length; i++) callbackfn.call(thisArg, vs[i], ks[i], this);
   }
 
   get(key: string): LVal | undefined {
     const i = this.firstIndex(key);
-    return i >= 0 ? this.pairs[i][1] : undefined;
+    return i >= 0 ? this.vs[i] : undefined;
   }
 
   has(key: string): boolean {
@@ -99,46 +116,50 @@ export class PropPairs implements Map<string, LVal> {
 
   set(key: string, value: LVal): this {
     const i = this.firstIndex(key);
-    if (i >= 0) this.pairs[i] = [key, value];
+    if (i >= 0) this.vs[i] = value;
     else {
-      this.pairs.push([key, value]);
-      this.index!.set(key, this.pairs.length - 1);
+      this.ks.push(key);
+      this.vs.push(value);
+      if (this.index) this.index.set(key, this.vs.length - 1);
     }
     return this;
   }
 
   append(key: string, value: LVal): void {
-    this.pairs.push([key, value]);
-    if (this.index && !this.index.has(key)) this.index.set(key, this.pairs.length - 1);
+    this.ks.push(key);
+    this.vs.push(value);
+    if (this.index && !this.index.has(key)) this.index.set(key, this.vs.length - 1);
   }
 
   getAt(n: number): LVal | undefined {
-    return this.pairs[n - 1]?.[1];
+    return this.vs[n - 1];
   }
 
   setAt(n: number, value: LVal): void {
-    const i = n - 1;
-    if (i >= 0 && i < this.pairs.length) this.pairs[i] = [this.pairs[i][0], value];
+    if (n >= 1 && n <= this.vs.length) this.vs[n - 1] = value;
   }
 
   deleteAt(n: number): void {
     const i = n - 1;
-    if (i >= 0 && i < this.pairs.length) {
-      this.pairs.splice(i, 1);
+    if (i >= 0 && i < this.vs.length) {
+      this.ks.splice(i, 1);
+      this.vs.splice(i, 1);
       this.index = null;
     }
   }
 
   *keys(): IterableIterator<string> {
-    for (const [k] of this.pairs) yield k;
+    for (const k of this.ks) yield k;
   }
 
   *values(): IterableIterator<LVal> {
-    for (const [, v] of this.pairs) yield v;
+    for (const v of this.vs) yield v;
   }
 
   *entries(): IterableIterator<[string, LVal]> {
-    for (const p of this.pairs) yield p;
+    const ks = this.ks;
+    const vs = this.vs;
+    for (let i = 0; i < ks.length; i++) yield [ks[i], vs[i]] as [string, LVal];
   }
 
   [Symbol.iterator](): IterableIterator<[string, LVal]> {
