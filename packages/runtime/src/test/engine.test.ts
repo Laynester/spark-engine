@@ -8176,6 +8176,49 @@ test('member change resets rotation/skew/flipH/flipV (releaseSprite reuse); cast
   assert.equal(e.interp.callHandler(s, run, [], null, new Set()), '180,180,1|0,0,0,0|0,0,0');
 });
 
+test('member set drops a stale explicit width/height so a recycled sprite renders at natural size (avatar shadow)', () => {
+  // FUSE releaseSprite resets pooled sprites with `rect(0, 0, 1, 1)`; the
+  // Human class then re-assigns the shadow member (`pShadowSpr.member =
+  // pDefShadowMem`) but never re-sizes the sprite, so a re-reserved shadow
+  // kept the pool's 1x1 override and rendered one pixel (DirPlayer shows the
+  // shadow at natural size — the Member setter re-derives geometry). A
+  // stretch set AFTER the member must still win.
+  const e = new DirectorEngine();
+  const cast = e.casts[0] ?? new CastLib(1, 'internal');
+  if (!e.casts.includes(cast)) e.casts.push(cast);
+  const m1 = new Member(1, 7, 'shadow_a', 'bitmap');
+  const m2 = new Member(1, 8, 'shadow_b', 'bitmap');
+  m1.raw = tinyRgbaPng(17, 9, [0, 0, 0, 255, 0, 0, 0, 255]);
+  m2.raw = tinyRgbaPng(34, 17, [0, 0, 0, 255, 0, 0, 0, 255]);
+  cast.members.set(7, m1);
+  cast.members.set(8, m2);
+  cast.byName.set('shadow_a', m1);
+  cast.byName.set('shadow_b', m2);
+  e.membersByGlobal.set((1 << 16) | 7, m1);
+  e.membersByGlobal.set((1 << 16) | 8, m2);
+  e.addScriptMember('T', 'movie', [
+    'on run',
+    '  sprite(3).member = member(7)',
+    '  sprite(3).rect = rect(0, 0, 1, 1)',
+    '  tPooled = sprite(3).width & "x" & sprite(3).height',
+    '  sprite(3).member = member(8)',
+    '  tNatural = sprite(3).width & "x" & sprite(3).height',
+    '  sprite(3).width = 40',
+    '  tStretch = sprite(3).width & "x" & sprite(3).height',
+    '  return tPooled & "|" & tNatural & "|" & tStretch',
+    'end',
+  ].join('\n'));
+  const s = e.resolveScript('T')!;
+  const run = s.handlers.find((h) => h.name.toLowerCase() === 'run')!;
+  assert.equal(e.interp.callHandler(s, run, [], null, new Set()), '1x1|34x17|40x17');
+  // Under the hood the pool's 1x1 override is gone (undefined = natural),
+  // not merely hidden behind the member fallback in the Lingo getter — and
+  // the post-member stretch (width = 40) is the only override left.
+  const ch = e.getChannel(3);
+  assert.equal(ch.width, 40);
+  assert.equal(ch.height, undefined);
+});
+
 test('inverseDirectorTransformPoint: hit tests mirror with the rendered sprite (furniture flip)', () => {
   // The corpus flip is `rotation 180 + skew 180` = horizontal mirror around
   // the sprite loc (DirPlayer concrete_sprite_hit_test inverse transform).

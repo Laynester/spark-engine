@@ -1,14 +1,17 @@
 #!/usr/bin/env node
-import { copyFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { copyFileSync, existsSync, writeFileSync, mkdirSync, renameSync, watch, readdirSync, statSync } from 'node:fs';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { availableParallelism } from 'node:os';
 import { Worker } from 'node:worker_threads';
 import { buildCastSparkBundle, buildSparkBundle } from './index.js';
-import { listCastUnits, nodeFs } from './manifest.js';
+import { isCastDir, listCastUnits, nodeFs } from './manifest.js';
+import type { CastUnit } from './manifest.js';
 import type { BundleWork, BundleWorkError, BundleWorkResult } from './worker.js';
 
 interface Args {
+  /** Watch mode: rebuild the cast whose files change. */
+  watch?: boolean;
   root: string;
   casts?: string[];
   out: string;
@@ -16,6 +19,8 @@ interface Args {
   ext?: string;
   /** Parallel bundle workers (default: CPU count). --jobs 1 = sequential. */
   jobs?: number;
+  /** Debounce between a file save and the rebuild (ms, default 150). */
+  debounce?: number;
 }
 
 const USAGE = `spark bundle <root> [<outDir>]   — bundle every cast under <root> into <outDir> (one .zip/.spark per cast)
@@ -23,18 +28,31 @@ const USAGE = `spark bundle <root> [<outDir>]   — bundle every cast under <roo
               <outDir>  output directory (defaults to a single bundle when omitted)
   flags: --root <dir> --out-dir <dir> --casts a,b,c --out <file> --ext zip|spark
          --jobs <n>     parallel workers (default: CPU count; 1 = sequential)
-  alias:  habbo-bundle (old name)`;
+  alias:  habbo-bundle (old name)
+
+spark watch <root> [<outDir>]      — rebuild the cast whose files change, on save
+  positional: <root>    exported cast directory (default "exported")
+              <outDir>  output directory (defaults to a single bundle when omitted)
+  flags: --root <dir> --watch-dir <dir> (alias) --out-dir <dir> --casts a,b,c
+         --ext zip|spark --debounce <ms> (default 150)
+  Keeps running; pair it with a dev server serving the outDir for auto-reload.`;
 
 function parseArgs(argv: string[]): Args {
-  // `spark bundle ...` — accept the optional subcommand so the CLI reads like
-  // a proper tool (the old `habbo-bundle <root> ...` form still works).
-  if (argv[0] === 'bundle') argv = argv.slice(1);
+  // `spark bundle ...` / `spark watch ...` — accept the optional subcommand so
+  // the CLI reads like a proper tool (the old `habbo-bundle <root> ...` form
+  // still works).
   const args: Args = { root: 'exported', out: 'bundle.spark' };
+  if (argv[0] === 'bundle') argv = argv.slice(1);
+  else if (argv[0] === 'watch') {
+    args.watch = true;
+    argv = argv.slice(1);
+  }
   const positional: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     switch (a) {
       case '--root':
+      case '--watch-dir':
         args.root = argv[++i];
         break;
       case '--casts':
@@ -49,6 +67,11 @@ function parseArgs(argv: string[]): Args {
       case '--ext':
         args.ext = argv[++i];
         break;
+      case '--debounce': {
+        const n = Number(argv[++i]);
+        args.debounce = Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
+        break;
+      }
       case '--jobs': {
         const n = Number(argv[++i]);
         args.jobs = Number.isFinite(n) && n >= 1 ? Math.floor(n) : undefined;
@@ -198,8 +221,202 @@ async function bundleAll(args: Args): Promise<void> {
   console.log(`bundled ${done} casts, ${total} members (${failed} skipped) -> ${outDir}`);
 }
 
+/** Watch mode: rebuild the cast that owns a changed file, debounced. Casts
+ *  are resolved lazily by walking up from the changed path, so startup is
+ *  instant (enumerating the export tree takes seconds on the full corpus). */
+async function watchAll(args: Args): Promise<void> {
+  const root = resolve(args.root);
+  const outDir = resolve(args.outDir!);
+  mkdirSync(outDir, { recursive: true });
+  const ext = args.ext ?? 'zip';
+  const debounceMs = args.debounce ?? 150;
+  const outAbs = resolve(outDir);
+  const filter = args.casts ? new Set(args.casts) : null;
+  // Cache of resolved cast dirs (absolute path -> unit).
+  const resolved = new Map<string, CastUnit>();
+
+  const fileFor = (unit: CastUnit): string =>
+    unit.group ? join(outDir, unit.group, `${unit.name}.${ext}`) : join(outDir, `${unit.name}.${ext}`);
+  const keyFor = (unit: CastUnit): string => (unit.group ? `${unit.group}/${unit.name}` : unit.name);
+
+  /** Mirror listCastUnits' filter semantics: a bare name, a group path
+   *  (container), or a `group/name` pair all match. */
+  const matchesFilter = (unit: CastUnit): boolean => {
+    if (!filter) return true;
+    const key = unit.group ? `${unit.group}/${unit.name}` : unit.name;
+    if (filter.has(key) || filter.has(unit.name)) return true;
+    return [...filter].some((f) => key.startsWith(f + '/'));
+  };
+
+  const statSafe = (p: string): ReturnType<typeof statSync> | null => {
+    try {
+      return statSync(p);
+    } catch {
+      return null;
+    }
+  };
+
+  const shipFontFiles = (rels: string[]): void => {
+    for (const rel of rels) {
+      const src = join(root, rel);
+      if (!existsSync(src)) continue;
+      const dst = join(outDir, rel);
+      mkdirSync(dirname(dst), { recursive: true });
+      copyFileSync(src, dst);
+    }
+  };
+
+  const buildOne = (unit: CastUnit, why: string): void => {
+    const key = keyFor(unit);
+    try {
+      const built = buildCastSparkBundle(root, unit);
+      if (!built) throw new Error('cast directory has no files');
+      const { spark, manifest } = built;
+      const file = fileFor(unit);
+      mkdirSync(dirname(file), { recursive: true });
+      // Atomic write (tmp + rename) so a dev server never serves a partial
+      // bundle while the cast is being rebuilt.
+      const tmp = `${file}.${process.pid}.tmp`;
+      writeFileSync(tmp, spark);
+      renameSync(tmp, file);
+      for (const cast of manifest.casts) shipFontFiles(cast.fontFiles ?? []);
+      const members = manifest.casts.reduce((n, c) => n + c.members.length, 0);
+      console.log(`watch: rebuilt ${key} (${members} members) -> ${file}  [${why}]`);
+    } catch (e) {
+      console.warn(`watch: SKIPPED ${key}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const timers = new Map<string, NodeJS.Timeout>();
+  const schedule = (unit: CastUnit, why: string): void => {
+    const key = keyFor(unit);
+    const existing = timers.get(key);
+    if (existing) clearTimeout(existing);
+    timers.set(
+      key,
+      setTimeout(() => {
+        timers.delete(key);
+        buildOne(unit, why);
+      }, debounceMs),
+    );
+  };
+
+  /** Walk up from a changed path and pick the SHALLOWEST directory that looks
+   *  like a cast. Member subdirs (scripts/, bitmaps/, …) also pass isCastDir
+   *  because their files parse as members, so the first hit is never taken —
+   *  the real cast is the outermost one (containers like 31/hof_furni are not
+   *  casts themselves). New cast dirs are picked up automatically, so no
+   *  separate adoption pass is needed. */
+  const resolveUnit = (abs: string): CastUnit | undefined => {
+    let dir = statSafe(abs)?.isDirectory() ? abs : dirname(abs);
+    let castDir: string | null = null;
+    while (dir.length >= root.length && (dir === root || dir.startsWith(root + sep))) {
+      if (dir !== root) {
+        const cached = resolved.get(dir);
+        if (cached) castDir = cached.path;
+        else if (isCastDir(dir, nodeFs)) castDir = dir;
+      }
+      const next = dirname(dir);
+      if (next === dir) break;
+      dir = next;
+    }
+    if (!castDir) return undefined;
+    let cached = resolved.get(castDir);
+    if (!cached) {
+      const rel = relative(root, castDir).split(sep).join('/');
+      const name = basename(castDir);
+      const group = rel === name ? undefined : rel.slice(0, rel.length - name.length - 1);
+      cached = group ? { group, name, path: castDir } : { name, path: castDir };
+      resolved.set(castDir, cached);
+    }
+    return matchesFilter(cached) ? cached : undefined;
+  };
+
+  let closed = false;
+  const onEvent = (dirAbs: string, filename: string | null): void => {
+    if (closed) return;
+    const abs = filename ? resolve(dirAbs, filename) : dirAbs;
+    // Ignore our own output (defends against outDir living under root) and
+    // transient temp files.
+    if (abs.startsWith(outAbs + sep) || abs === outAbs) return;
+    if (filename?.endsWith('.tmp')) return;
+    const unit = resolveUnit(abs);
+    if (unit) schedule(unit, 'changed');
+  };
+
+  const watcher: { close(): void } = (() => {
+    try {
+      const w = watch(root, { recursive: true }, (_ev, f) => onEvent(root, f ?? null));
+      return {
+        close: () => {
+          closed = true;
+          w.close();
+        },
+      };
+    } catch {
+      // Linux: no recursive watch — watch every directory under root
+      // individually and rescan on rename so new dirs get watchers.
+      const watchers = new Map<string, ReturnType<typeof watch>>();
+      const addDir = (dir: string): void => {
+        if (watchers.has(dir)) return;
+        watchers.set(dir, watch(dir, (_ev, f) => onEvent(dir, f ?? null)));
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          if (entry.isDirectory()) addDir(join(dir, entry.name));
+        }
+      };
+      addDir(root);
+      const rescan = (): void => {
+        const walk = (dir: string): void => {
+          for (const entry of readdirSync(dir, { withFileTypes: true })) {
+            if (!entry.isDirectory()) continue;
+            const sub = join(dir, entry.name);
+            if (!watchers.has(sub)) {
+              watchers.set(sub, watch(sub, (_ev, f) => onEvent(sub, f ?? null)));
+            }
+            walk(sub);
+          }
+        };
+        walk(root);
+      };
+      const rescanTimer = setInterval(rescan, 2000);
+      return {
+        close: () => {
+          closed = true;
+          clearInterval(rescanTimer);
+          for (const w of watchers.values()) w.close();
+        },
+      };
+    }
+  })();
+
+  console.log(`watch: watching ${root} -> ${outDir} (${ext}, ${debounceMs}ms debounce). Ctrl-C to stop.`);
+  console.log('watch: tip — a dev server serving outDir reloads when a cast lands; run `spark bundle` once first if casts are missing.');
+
+  const shutdown = (): void => {
+    watcher.close();
+    for (const t of timers.values()) clearTimeout(t);
+    timers.clear();
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  await new Promise<void>(() => undefined); // stay alive until signalled
+}
+
 function main(): void {
   const args = parseArgs(process.argv.slice(2));
+
+  if (args.watch) {
+    if (!args.outDir) {
+      console.error('spark watch requires --out-dir (or a positional <outDir>)');
+      process.exit(1);
+    }
+    void watchAll(args).catch((e) => {
+      console.error(e instanceof Error ? e.message : e);
+      process.exit(1);
+    });
+    return;
+  }
 
   if (args.outDir) {
     void bundleAll(args).then(

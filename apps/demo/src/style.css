@@ -52,7 +52,7 @@ canvas {
 }
 
 .log {
-  width: min(724px, 92vw);
+  width: min(964px, 92vw);
   height: 380px;
   overflow: auto;
   margin: 0 0 24px;

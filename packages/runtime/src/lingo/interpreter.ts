@@ -834,8 +834,13 @@ export class Interpreter {
       const selfCall = global.script === this.currentScript;
       let instance: LObject | null = null;
       if (selfCall) {
-        const firstHasHandler = argVals[0] instanceof LObjectClass && this.findHandler(argVals[0], name) !== null;
-        if (!firstHasHandler && env.me instanceof LObjectClass) instance = env.me;
+        const first = argVals[0];
+        if (first instanceof LObjectClass && this.findHandler(first, name) !== null) {
+          instance = first;
+          argVals = argVals.slice(1);
+        } else if (env.me instanceof LObjectClass) {
+          instance = env.me;
+        }
       }
       return this.callHandler(global.script, global.handler, argVals, instance, NO_GLOBALS);
     }
@@ -1161,7 +1166,7 @@ export class Interpreter {
   }
 
   private evalCall(call: Extract<Expr, { kind: 'call' }>, env: Env): LVal {
-    const args = call.args.map((a) => this.evalExpr(a, env));
+    let args = call.args.map((a) => this.evalExpr(a, env));
     const callee = call.callee;
 
     if (callee.kind === 'ident') {
@@ -1173,8 +1178,13 @@ export class Interpreter {
         const selfCall = global.script === this.currentScript;
         let instance: LObject | null = null;
         if (selfCall) {
-          const firstHasHandler = args[0] instanceof LObjectClass && this.findHandler(args[0], name) !== null;
-          if (!firstHasHandler && env.me instanceof LObjectClass) instance = env.me;
+          const first = args[0];
+          if (first instanceof LObjectClass && this.findHandler(first, name) !== null) {
+            instance = first;
+            args = args.slice(1);
+          } else if (env.me instanceof LObjectClass) {
+            instance = env.me;
+          }
         }
         return this.callHandler(global.script, global.handler, args, instance, NO_GLOBALS);
       }

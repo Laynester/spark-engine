@@ -15,7 +15,7 @@
   "scripts": {
     "build": "tsc",
     "bundle": "esbuild src/cli.ts --bundle --platform=node --format=esm --outfile=dist/bundler.js",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "npm run build -w @habbo/runtime && tsc --noEmit",
     "test": "node --test test/*.test.mjs",
     "prepublishOnly": "npm run build"
   },

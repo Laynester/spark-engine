@@ -137,13 +137,11 @@ export class PixiStage implements StageAdapter {
       this.lastFrameT = now;
       const frameMs = 1000 / Math.max(1, this.engine.frameTempo);
       this.frameAcc += dt;
-      let steps = 0;
-      while (this.frameAcc >= frameMs && steps < 4) {
+      if (this.frameAcc > frameMs * 2) this.frameAcc = frameMs * 2;
+      if (this.frameAcc >= frameMs) {
         this.frameAcc -= frameMs;
         this.engine.tick();
-        steps++;
       }
-      if (steps === 4) this.frameAcc = 0;
       this.syncChannelImages();
       this.syncCaret();
     });
@@ -239,6 +237,15 @@ export class PixiStage implements StageAdapter {
   private bakeForChannel(ch: { ink: number } | undefined, img: LImage, w: number, h: number): BakeMode | null {
     if (!ch) return null;
     if (ch.ink === 1 || ch.ink === 7 || ch.ink === 8 || ch.ink === 36 || ch.ink === 41) return bakeModeForInk(ch.ink);
+    // Ink 33/34/35/37/38/39/40 (AddPin/Add/SubPin/Sub/Lightest/Darkest/Lighten)
+    // composite the art additively/subtractively, so the opaque backing field
+    // must be flood-filled out first or it blends in as a solid box. The
+    // byte-fed blob path already bakes these via bakeModeForInk; this keeps the
+    // image-member path identical. Ink 32 (Blend) keeps its normal blend and is
+    // deliberately not baked.
+    if (ch.ink === 33 || ch.ink === 34 || ch.ink === 35 || ch.ink === 37 || ch.ink === 38 || ch.ink === 39 || ch.ink === 40) {
+      return bakeModeForInk(ch.ink);
+    }
     if (ch.ink === 0 && w > 0 && h > 0 && cornersAreNearWhite(img.ensure(), w, h)) return 'backgroundTransparent';
     return null;
   }
@@ -258,9 +265,13 @@ export class PixiStage implements StageAdapter {
     if (!node.bakeBuf || node.bakeBuf.length !== n) node.bakeBuf = new Uint8ClampedArray(n);
     const src = img.ensure();
     node.bakeBuf.set(src.subarray(0, n));
+    // Bake first (key/matte flood-fill carves the shape from the edge colors),
+    // then tint the survivors — both tint passes skip alpha-0 pixels, so the
+    // erasure is preserved. Tinting before the matte would paint the whole
+    // square and the flood could no longer find its edge color.
+    const changed = bake ? bakeEdgeBackground(node.bakeBuf, w, h, bake, undefined, undefined, ink7Key) : false;
     const tinted =
       tint !== null ? (ink === 41 ? tintSpriteDarken(node.bakeBuf, w, h, tint, fgRgb) : tintSpriteBackground(node.bakeBuf, w, h, tint)) : false;
-    const changed = bake ? bakeEdgeBackground(node.bakeBuf, w, h, bake, undefined, undefined, ink7Key) : false;
     return { pixels: node.bakeBuf, changed: changed || tinted };
   }
 
@@ -839,9 +850,7 @@ export class PixiStage implements StageAdapter {
               md instanceof LList && md.items.length >= 2
                 ? `${md.items[0] instanceof LSymbol ? '#' + md.items[0].name : String(md.items[0])} -> ${String(md.items[1])}`
                 : 'none';
-            parts.push(
-              `instId=${id instanceof LSymbol ? '#' + id.name : String(id)} sprNum=${String(sn)} keys=[${keys}] proc=[${mdDesc}]`,
-            );
+            parts.push(`instId=${id instanceof LSymbol ? '#' + id.name : String(id)} sprNum=${String(sn)} keys=[${keys}] proc=[${mdDesc}]`);
           }
           const sl = this.engine.interp.evalExpressionString('getObject("Room_visualizer").getProperty(#spriteList)');
           const slChans =

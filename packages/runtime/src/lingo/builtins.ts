@@ -16,6 +16,7 @@ export interface BuiltinBackend {
   getMember(number: number, castLibNumber?: number): LMemberRef | null;
   getMemberByName(name: string): LMemberRef | null;
   getMemberByNameInCast(name: string, castLibNumber: number): LMemberRef | null;
+  getMemberByImage(image: LImage): LMemberRef | null;
   resetTimer(): void;
   resolvePaletteTable(value: LVal): number[][] | null;
   newMember(kind: string, castLibNumber: number): LMemberRef | null;
@@ -503,6 +504,7 @@ export function createBuiltinTable(): Map<string, BuiltinFn> {
       return b.getMemberByName(v) ?? VOID;
     }
     if (v instanceof LMemberRefClass) return v;
+    if (v instanceof LImage) return b.getMemberByImage(v) ?? VOID;
     return VOID;
   });
   set(['createmember'], (b, a) => {

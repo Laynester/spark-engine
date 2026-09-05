@@ -1366,6 +1366,16 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
 
 
   log(msg: string): void {
+    // Per-frame net: traffic drowns the page log; keep it quiet unless the
+    // net debug toggle is on (window.SPARK_NET_LOG = 1). Tests run in node
+    // (process present) and must keep asserting on net: log lines.
+    if (msg.startsWith('net: ')) {
+      const isNode = typeof process !== 'undefined' && !!(process as { versions?: { node?: string } }).versions?.node;
+      if (!isNode) {
+        const w = typeof window !== 'undefined' ? (window as { SPARK_NET_LOG?: unknown }) : null;
+        if (!w || !w.SPARK_NET_LOG) return;
+      }
+    }
     this.logs.push(msg);
     if (this.logs.length > 4000) this.logs.splice(0, 2000);
   }
@@ -1441,6 +1451,12 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       if (member) return new LMemberRefClass(member.number, member.name, member.kind, member.castLibNumber, this);
     }
     return null;
+  }
+
+  getMemberByImage(image: LImage): LMemberRef | null {
+    const member = this.imageOwners.get(image);
+    if (!member) return null;
+    return new LMemberRefClass(member.number, member.name, member.kind, member.castLibNumber, this);
   }
 
   resolvePaletteTable(value: LVal): number[][] | null {
@@ -3361,6 +3377,16 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
           ch.bgColorIsRgb = false;
         }
         ch.member = member ?? undefined;
+        // Assigning a member re-derives the sprite's display size from the
+        // member. A recycled sprite may carry a stale explicit width/height
+        // (the Sprite Manager's releaseSprite sets rect(0,0,1,1)), so drop
+        // the override and render at the member's natural size — code that
+        // wants a stretch sets width/height *after* the member (Director
+        // semantics).
+        if (member?.kind === 'bitmap') {
+          ch.width = undefined;
+          ch.height = undefined;
+        }
         this.notifyChannel(ch);
         return;
       }
@@ -3369,6 +3395,9 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         ch.castNum = n;
         const member = this.membersByGlobal.get(n) ?? this.memberForStaleSlotNumber(n);
         ch.member = member ?? undefined;
+        // castNum deliberately keeps geometry (furniture sets rotation/skew
+        // before castNum) — the #member path above is where a recycled sprite
+        // re-adopts the member's natural size.
         this.notifyChannel(ch);
         return;
       }
@@ -3406,6 +3435,10 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
           this.notifyChannel(ch);
           return;
         }
+        // Same bake family (e.g. 41 -> 41): the bake buffer is mutated in
+        // place but nothing would re-upload it to the GPU — mark the member
+        // image dirty so syncChannelImages re-bakes and calls update().
+        if (ch.member?.image) ch.member.image.dirty = true;
         changed = false;
         break;
       }
@@ -3452,12 +3485,14 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       case 'color':
         ch.color = this.colorToInt(value);
         ch.colorSet = true;
+        if (ch.member?.image) ch.member.image.dirty = true;
         changed = false;
         break;
       case 'bgcolor':
       case 'backcolor':
         ch.bgColor = this.colorToInt(value);
         ch.bgColorIsRgb = value instanceof LColor || typeof value === 'string';
+        if (ch.member?.image) ch.member.image.dirty = true;
         changed = ch.bgColorIsRgb && ch.bgColor !== 0xffffff;
         break;
       case 'forecolor':
