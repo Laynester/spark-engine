@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import type { BundleManifest, CastManifest, MemberEntry } from './types.js';
+import type { BundleManifest, CastManifest, FilmLoopSprite, MemberEntry } from './types.js';
 import { buildMemberEntries, parseCastsTxt, parseFontsTxt, parseLinkedCastsTxt, parseMemberFileName, parseMovieTxt, scanCastFiles } from './scan.js';
 
 export interface FileSystemLike {
@@ -145,6 +145,113 @@ export function listCastUnits(
   return units;
 }
 
+/** Film-loop members are exported by the decompiler (sparkd) as
+ *  `filmloops/NNNN_filmloop_<name>.txt` carrying the loop's display size, its
+ *  frame count and the full per-frame sprite composition from the member's
+ *  SCVW mini-score in the original CCT. The bundler just parses that file
+ *  into the member's `frames`/`sprites` fields — no synthesis or naming
+ *  heuristics. */
+const SPRITE_LINE = /^sprite:\s*(.*)$/i;
+
+function parseFilmLoopSprites(content: string): {
+  frames: number[];
+  sprites: FilmLoopSprite[][];
+  loopX: number;
+  loopY: number;
+  loopW: number;
+  loopH: number;
+} {
+  const frames: number[] = [];
+  const sprites: FilmLoopSprite[][] = [];
+  let loopX = 0;
+  let loopY = 0;
+  let loopW = 0;
+  let loopH = 0;
+  let current: FilmLoopSprite[] | null = null;
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const frameM = /^frame\s+(\d+)\s*:$/i.exec(trimmed);
+    if (frameM) {
+      const idx = parseInt(frameM[1], 10) - 1;
+      while (sprites.length <= idx) sprites.push([]);
+      current = sprites[idx];
+      continue;
+    }
+    const spriteM = SPRITE_LINE.exec(trimmed);
+    if (spriteM && current) {
+      const fields = new Map<string, number>();
+      for (const tok of spriteM[1].split(/\s+/)) {
+        const kv = /^([a-zA-Z]+)=(-?\d+)$/.exec(tok);
+        if (kv) fields.set(kv[1].toLowerCase(), parseInt(kv[2], 10));
+      }
+      const member = fields.get('member');
+      const x = fields.get('x');
+      const y = fields.get('y');
+      const w = fields.get('w');
+      const h = fields.get('h');
+      if (member !== undefined && x !== undefined && y !== undefined && w !== undefined && h !== undefined) {
+        current.push({
+          member,
+          x,
+          y,
+          w,
+          h,
+          ink: fields.get('ink') ?? 0,
+          blend: fields.get('blend') ?? 0,
+        });
+      }
+    }
+    const membersM = /^members\s*:\s*(.+)$/i.exec(trimmed);
+    if (membersM) {
+      for (const tok of membersM[1].trim().split(/\s+/)) {
+        const n = parseInt(tok, 10);
+        if (Number.isFinite(n) && n > 0) frames.push(n);
+      }
+    }
+    // Older sparkd exports put the deduped frame-member list directly on the
+    // `frames:` line (e.g. `frames: 7 8 7 8`). The new format's `frames:` line
+    // is just the frame count, so only treat a multi-token line as a list.
+    const framesM = /^frames\s*:\s*(.+)$/i.exec(trimmed);
+    if (framesM) {
+      const toks = framesM[1].trim().split(/\s+/).filter(Boolean);
+      if (toks.length > 1) {
+        for (const tok of toks) {
+          const n = parseInt(tok, 10);
+          if (Number.isFinite(n) && n > 0) frames.push(n);
+        }
+      }
+    }
+    // Authored loop rect (CASt initialRect): width/height + mini-stage origin.
+    const kv = /^([a-zA-Z]+)\s*:\s*(-?\d+)$/i.exec(trimmed);
+    if (kv) {
+      const key = kv[1].toLowerCase();
+      const val = parseInt(kv[2], 10);
+      if (key === 'originx') loopX = val;
+      else if (key === 'originy') loopY = val;
+      else if (key === 'width') loopW = val;
+      else if (key === 'height') loopH = val;
+    }
+  }
+  return { frames, sprites: sprites.filter((f) => f.length > 0), loopX, loopY, loopW, loopH };
+}
+
+function readFilmLoopData(members: MemberEntry[], readCastText: (rel: string) => string | undefined): void {
+  for (const m of members) {
+    if (m.kind !== 'filmloop' || m.frames || m.sprites) continue;
+    const content = m.file ? readCastText(m.file) : undefined;
+    if (!content) continue;
+    const { frames, sprites, loopX, loopY, loopW, loopH } = parseFilmLoopSprites(content);
+    if (sprites.length > 0) m.sprites = sprites;
+    if (frames.length > 0) m.frames = frames;
+    if (loopW > 0 && loopH > 0) {
+      m.loopX = loopX;
+      m.loopY = loopY;
+      m.loopW = loopW;
+      m.loopH = loopH;
+    }
+  }
+}
+
 /** Build one cast's manifest entry from its directory. Nested casts (group set)
  *  keep a `<group>/<name>` bundle prefix so they can live under a container
  *  directory next to top-level casts without path collisions. */
@@ -169,6 +276,7 @@ export function buildCastManifest(
 
   const members: MemberEntry[] = buildMemberEntries(scanned.members, readCastText);
   members.sort((a, b) => a.number - b.number);
+  readFilmLoopData(members, readCastText);
 
   // Bundle paths are relative to the bundle root: <cast>/<rel>.
   const prefix = group ? `${group}/${castName}` : castName;
@@ -197,6 +305,13 @@ export function buildCastManifest(
     // too — it is unreferenced dead weight.
     files: relFiles
       .filter((f) => !f.endsWith('.regpoint'))
+      // Film-loop .txt files are consumed at BUILD time (frames are inlined
+      // into the member entry) and never read by the runtime — same dead
+      // weight as regpoints, so exclude them.
+      .filter((f) => {
+        const parsed = parseMemberFileName(f.split(/[\\/]/).pop() ?? f);
+        return !(parsed && parsed.kind === 'filmloop');
+      })
       .filter((f) => {
         const base = f.split(/[\\/]/).pop() ?? f;
         const parsed = parseMemberFileName(base);

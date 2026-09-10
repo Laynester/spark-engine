@@ -16,6 +16,7 @@ import { parseXmlToLingo } from '../lingo/xml.js';
 import type { BundleLoader } from '../bundle/loader.js';
 import type { CastListEntry, CastManifest, MemberEntry, MovieConfig } from '../bundle/types.js';
 import { CastLib, Member, normalizeTextLines, parsePaletteBytes, parseShapeText, type ShapeDef } from './members.js';
+import { composeFilmLoopFrame, filmLoopImage, planFilmLoopComposition, prepareFilmTexture, type FilmLoopPlan, type FilmTexture, type FilmTile } from './filmloop.js';
 import { decodeImage } from './pix8.js';
 import { decodePng } from './png.js';
 import { decodeGif } from './gif.js';
@@ -72,6 +73,7 @@ export interface ChannelVisual {
   bgColor?: string | null;
   alignment?: string;
   wordWrap?: boolean;
+  clipToBox?: boolean;
   width?: number;
   height?: number;
   regX: number;
@@ -459,6 +461,12 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   adapter: StageAdapter | null;
   private builtins = createBuiltinTable();
   private visualDirty = new Set<number>();
+  /** Film-loop members (room water) advanced each tick. */
+  private filmLoops = new Set<Member>();
+  /** Composed film-loop plan (canvas + per-frame placed tiles) per member. */
+  private filmPlans = new Map<Member, FilmLoopPlan>();
+  /** Matte-baked frame-member textures, cached per (member, ink). */
+  private filmTextures = new Map<Member, FilmTexture>();
   private visualFlushScheduled = false;
 
   constructor(adapter: StageAdapter | null = null) {
@@ -578,6 +586,14 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       member.fileName = entry.file;
       if (entry.regX !== undefined) member.regX = entry.regX;
       if (entry.regY !== undefined) member.regY = entry.regY;
+      if (entry.frames) member.filmRefs = entry.frames;
+      if (entry.sprites) member.filmSpriteRefs = entry.sprites;
+      if (entry.loopW !== undefined && entry.loopH !== undefined) {
+        member.filmX = entry.loopX ?? 0;
+        member.filmY = entry.loopY ?? 0;
+        member.filmW = entry.loopW;
+        member.filmH = entry.loopH;
+      }
 
       switch (entry.kind) {
         case 'script': {
@@ -653,6 +669,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     if (!this.casts.includes(cast)) this.casts.push(cast);
     this.castByName.set(castName, cast);
     this.castByName.set(cast.name, cast);
+    this.resolveFilmLoops(cast);
     this.log(`cast loaded: ${castName} (${manifest.members.length} members)`);
     this.onCastLoaded?.(castName);
     return cast;
@@ -721,6 +738,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     this.fireDelays();
     this.fireNetMessages();
     this.pumpObjectManager();
+    this.advanceFilmLoops();
     for (const fs of this.frameScripts) {
       if (fs.passed) continue;
       const enter = fs.handlers.get('enterframe');
@@ -2553,6 +2571,108 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
    *  for tests, kept off the log stream. */
   indexedSlots: number[] = [];
 
+  /** Resolve manifest film-loop members: bind their frame members (the
+   *  bundler emits filmloop entries from the decompiler's SCVW data; the
+   *  original client built these natively at room load). Simple loops seed the
+   *  current frame onto the member so the bitmap render path just works;
+   *  sprite-composed loops (waterloop) pre-plan their composition canvas and
+   *  compose frames on each tick.
+   */
+  private resolveFilmLoops(cast: CastLib): void {
+    for (const loop of cast.members.values()) {
+      if (loop.kind !== 'filmloop') continue;
+      if (loop.filmRefs && loop.filmRefs.length > 0) {
+        const frames = loop.filmRefs
+          .map((num) => cast.members.get(num))
+          .filter((m): m is Member => m !== undefined && m.kind === 'bitmap');
+        if (frames.length > 0) {
+          loop.film = frames;
+          loop.filmIndex = 0;
+          loop.raw = frames[0].raw;
+          if (frames[0].palette) loop.palette = frames[0].palette;
+          loop.regX = frames[0].regX;
+          loop.regY = frames[0].regY;
+        }
+      }
+      if (loop.filmSpriteRefs && loop.filmSpriteRefs.length > 0) {
+        const resolved: FilmTile[][] = [];
+        for (const frame of loop.filmSpriteRefs) {
+          const tiles: FilmTile[] = [];
+          for (const s of frame) {
+            const m = cast.members.get(s.member);
+            if (m && m.kind === 'bitmap' && m.raw) {
+              tiles.push({ member: m, x: s.x, y: s.y, w: s.w, h: s.h, ink: s.ink, blend: s.blend });
+            }
+          }
+          if (tiles.length > 0) resolved.push(tiles);
+        }
+        if (resolved.length > 0) {
+          loop.filmSprites = resolved;
+          const authored =
+            loop.filmW > 0 && loop.filmH > 0
+              ? { x: loop.filmX, y: loop.filmY, w: loop.filmW, h: loop.filmH }
+              : undefined;
+          const plan = planFilmLoopComposition(resolved, authored);
+          if (plan) {
+            this.filmPlans.set(loop, plan);
+            // Film loops always use center registration (DirPlayer
+            // get_concrete_sprite_rect: reg = display size / 2) — the composed
+            // image's center sits on the sprite's loc, not its top-left.
+            loop.regX = Math.floor(plan.width / 2);
+            loop.regY = Math.floor(plan.height / 2);
+            loop.filmW = plan.width;
+            loop.filmH = plan.height;
+            this.composeFilmLoop(loop, 0);
+          }
+        }
+      }
+      if (loop.film || loop.filmSprites) this.filmLoops.add(loop);
+    }
+  }
+
+  /** Compose one frame of a sprite-composed film loop into `filmImage`. */
+  private composeFilmLoop(loop: Member, index: number): void {
+    const plan = this.filmPlans.get(loop);
+    if (!plan || !loop.filmSprites || loop.filmSprites.length === 0) return;
+    for (const t of loop.filmSprites[index] ?? []) {
+      if (!this.filmTextures.has(t.member)) {
+        const tex = prepareFilmTexture(t.member, t.ink);
+        if (tex) this.filmTextures.set(t.member, tex);
+      }
+    }
+    const pixels = composeFilmLoopFrame(plan, index, this.filmTextures);
+    loop.filmImage = filmLoopImage(pixels, plan.width, plan.height, loop.filmImage);
+    loop.image = undefined;
+  }
+
+  /** Advance every film loop one frame and refresh the channels showing it. */
+  private advanceFilmLoops(): void {
+    if (this.filmLoops.size === 0) return;
+    let touched = false;
+    for (const loop of this.filmLoops) {
+      if (loop.filmSprites && loop.filmSprites.length > 0) {
+        loop.filmIndex = (loop.filmIndex + 1) % loop.filmSprites.length;
+        this.composeFilmLoop(loop, loop.filmIndex);
+        touched = true;
+        continue;
+      }
+      if (!loop.film || loop.film.length === 0) continue;
+      loop.filmIndex = (loop.filmIndex + 1) % loop.film.length;
+      const frame = loop.film[loop.filmIndex];
+      loop.raw = frame.raw;
+      if (frame.palette) loop.palette = frame.palette;
+      loop.regX = frame.regX;
+      loop.regY = frame.regY;
+      loop.image = undefined; // drop any cached rasterized surface
+      touched = true;
+    }
+    if (!touched) return;
+    for (let n = 1; n < this.channels.length; n++) {
+      const ch = this.channels[n];
+      if (ch.member && this.filmLoops.has(ch.member)) this.notifyChannel(ch);
+    }
+  }
+
   private indexCast(castNum: number): void {
     const cast = this.casts[castNum - 1];
     this.indexedSlots.push(castNum);
@@ -2899,7 +3019,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     const lower = msgName.toLowerCase();
     const procs = this.events.get(lower);
     if (procs) {
-      for (const p of procs) this.interp.callObjectHandler(p.obj, p.handler, [data]);
+      for (const p of procs) this.interp.callObjectHandler(p.obj, p.handler, Array.isArray(data) ? data : [data]);
     }
     this.log(`message: #${msgName}`);
   }
@@ -3000,7 +3120,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
           return img;
         }
       }
-      if (member.kind === 'bitmap' && member.raw) {
+      if ((member.kind === 'bitmap' || member.kind === 'filmloop') && member.raw) {
         try {
           const { width, height, rgba, indices } = decodeImage(member.raw, member.palette);
           const img = new LImage(width, height);
@@ -3028,17 +3148,17 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   private memberTextHeight(member: Member): number {
     const base = member.height;
     if (member.kind !== 'text' || member.textProps?.has('boxtype')) return base;
-    if (asNum(member.wordWrap ?? 0) === 1 && member.textProps?.has('boxtype')) return base;
     if (!member.text) return base;
+    // Route through memberImage so rasterizing also applies the Director
+    // #adjust rect-grow. fakeAlphaRender (Writer mode 2) reads pMember.height
+    // BEFORE pMember.rect; if height rasterized without growing the rect, the
+    // rect stays height-0 (e.g. `define([#rect: rect(0,0,w,0)])` in the
+    // navigator) and the copyPixels(pMember.image, pMember.rect, ...) source
+    // rect collapses to nothing -> blank text.
     let img = member.image;
     if (!img && this.textRasterizer) {
       try {
-        const rasterized = this.textRasterizer(member);
-        if (rasterized) {
-          img = rasterized;
-          member.image = rasterized;
-          this.imageOwners.set(rasterized, member);
-        }
+        img = this.memberImage(member);
       } catch {
         img = undefined;
       }
@@ -3375,6 +3495,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
           ch.colorSet = false;
           ch.bgColor = 0;
           ch.bgColorIsRgb = false;
+          ch.bgColorIndex = null;
         }
         ch.member = member ?? undefined;
         // Assigning a member re-derives the sprite's display size from the
@@ -3489,12 +3610,25 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         changed = false;
         break;
       case 'bgcolor':
-      case 'backcolor':
-        ch.bgColor = this.colorToInt(value);
-        ch.bgColorIsRgb = value instanceof LColor || typeof value === 'string';
+      case 'backcolor': {
+        // A JS number is a Director palette index (0-255): stored unresolved
+        // and resolved against the sprite member's own bitmap palette at tint
+        // time (DirPlayer sprite.rs/bitmap.rs parity). rgb()/strings tint
+        // directly, as before.
+        const raw = Math.round(asNum(value));
+        if (typeof value === 'number' && raw >= 0 && raw <= 255) {
+          ch.bgColorIndex = raw;
+          ch.bgColor = raw;
+          ch.bgColorIsRgb = false;
+        } else {
+          ch.bgColorIndex = null;
+          ch.bgColor = this.colorToInt(value);
+          ch.bgColorIsRgb = value instanceof LColor || typeof value === 'string';
+        }
         if (ch.member?.image) ch.member.image.dirty = true;
-        changed = ch.bgColorIsRgb && ch.bgColor !== 0xffffff;
+        changed = this.bgTintForChannel(ch) !== null;
         break;
+      }
       case 'forecolor':
         ch.foreColor = this.colorToInt(value);
         changed = false;
@@ -3557,6 +3691,31 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     return Math.round(asNum(v));
   }
 
+  /**
+   * Resolve a channel's bg tint for the render path. DirPlayer parity
+   * (bitmap.rs resolve_color_ref via src.palette_ref): an indexed backColor
+   * resolves against the sprite member's OWN bitmap palette; white (or no
+   * palette) means no filtering.
+   */
+  bgTintForChannel(ch: Channel): number | null {
+    if (ch.bgColorIsRgb) {
+      if (ch.bgColor === 0xffffff) return null;
+      if (ch.bgColor === 0 && ch.ink !== 41) return null;
+      return ch.bgColor;
+    }
+    if (ch.bgColorIndex != null) {
+      const pal = ch.member?.palette;
+      if (pal && pal[ch.bgColorIndex]) {
+        const [r, g, b] = pal[ch.bgColorIndex];
+        const rgb = ((r & 0xff) << 16) | ((g & 0xff) << 8) | (b & 0xff);
+        return rgb === 0xffffff ? null : rgb;
+      }
+      if (ch.bgColorIndex === 255) return 0x000000;
+      return null;
+    }
+    return null;
+  }
+
   private refreshSprite(ch: Channel): void {
     if (this.visualDirty.has(ch.number)) return;
     this.adapter?.refreshChannel(ch.number);
@@ -3606,26 +3765,53 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
 
   private buildChannelVisual(ch: Channel): void {
     if (!this.adapter) return;
-    const painted =
-      ch.member?.kind === 'bitmap' && !!ch.member.image && ch.member.imagePainted && ch.ink !== 9;
-    if (ch.member?.kind === 'bitmap' && ch.member.raw && !painted) {
-      const mask = ch.ink === 9 ? this.ink9MaskFor(ch.member) : null;
-      this.adapter.setChannel(ch.number, {
-        kind: 'bitmap',
-        bytes: ch.member.raw,
-        regX: ch.member.regX,
-        regY: ch.member.regY,
-        ...(mask ? { maskBytes: mask.raw, maskRegX: mask.regX, maskRegY: mask.regY } : {}),
-        ...(ch.member.paletteTarget ? { remapPalette: ch.member.paletteTarget } : {}),
-      });
-    } else if (ch.member?.kind === 'bitmap' && ch.member.image) {
-      this.adapter.setChannel(ch.number, {
-        kind: 'image',
-        image: ch.member.image,
-        regX: ch.member.regX,
-        regY: ch.member.regY,
-      });
-    } else if (ch.member?.kind === 'text') {
+    const member = ch.member;
+    if (member && member.kind === 'filmloop' && member.filmSprites && member.filmSprites.length > 0) {
+      // Sprite-composed film loop: the current frame is pre-composited into
+      // filmImage (per-tile matte baked in, loop-sized RGBA with alpha), so it
+      // renders as an image and the stage transform scales it to the element
+      // rect.
+      if (member.filmImage) {
+        this.adapter.setChannel(ch.number, {
+          kind: 'image',
+          image: member.filmImage,
+          regX: member.regX,
+          regY: member.regY,
+        });
+      } else {
+        this.adapter.setChannel(ch.number, null);
+      }
+      this.adapter.refreshChannel(ch.number);
+      return;
+    }
+    // Simple film loops render their current frame; the frame data is
+    // live-copied onto the loop member, so bitmap handling applies verbatim.
+    if (member && (member.kind === 'bitmap' || member.kind === 'filmloop')) {
+      const painted = !!member.image && member.imagePainted && ch.ink !== 9;
+      if (member.raw && !painted) {
+        const mask = ch.ink === 9 ? this.ink9MaskFor(member) : null;
+        this.adapter.setChannel(ch.number, {
+          kind: 'bitmap',
+          bytes: member.raw,
+          regX: member.regX,
+          regY: member.regY,
+          ...(mask ? { maskBytes: mask.raw, maskRegX: mask.regX, maskRegY: mask.regY } : {}),
+          ...(member.paletteTarget ? { remapPalette: member.paletteTarget } : {}),
+        });
+      } else if (member.image) {
+        this.adapter.setChannel(ch.number, {
+          kind: 'image',
+          image: member.image,
+          regX: member.regX,
+          regY: member.regY,
+        });
+      } else {
+        this.adapter.setChannel(ch.number, null);
+      }
+      this.adapter.refreshChannel(ch.number);
+      return;
+    }
+    if (ch.member?.kind === 'text') {
       const m = ch.member;
       const r = m.rect;
       const font = cssFontFor(m.font);
@@ -3642,6 +3828,11 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         bgColor: cssColorFor(textPropOf(m, 'bgcolor')),
         alignment: alignmentName(m.alignment),
         wordWrap: asNum(m.wordWrap ?? 0) === 1,
+        // boxType present (any value incl. #limit/#fixed/#adjust) = a FIXED
+        // box: live text must clip at the rect like the rasterizer does
+        // (autoSize is boxType-unset only). DirPlayer cuts #limit fields
+        // (chat input, tooltips) off at the box edge.
+        clipToBox: !!m.textProps?.has('boxtype'),
         width: r ? Math.max(1, Math.round(r.width)) : undefined,
         height: r ? Math.max(1, Math.round(r.height)) : undefined,
         regX: m.regX,

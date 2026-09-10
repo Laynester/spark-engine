@@ -519,6 +519,43 @@ export function blendModeForInk(ink: number): 'normal' | 'add' | typeof SUBTRACT
   }
 }
 
+/**
+ * Bake + tint a decoded RGBA surface exactly like the image-member render path
+ * (PixiStage.bakeImagePixels). Shared so the palette-forwarding rule is
+ * unit-testable: key/matte/notGhost bakes key against the member's palette-0
+ * (DirPlayer resolves the sprite bg color against the source bitmap's
+ * palette), while the backgroundTransparent heuristic keeps its no-palette
+ * path (ink-0 painted images with near-white corners). Dropping the palette
+ * here made ink-36 members with a black palette-0 (hh_entry_jp's screen3d,
+ * once the imagescroller paints onto its image) key white instead and render
+ * as a black rectangle.
+ */
+export function bakeSurface(
+  src: Uint8Array | Uint8ClampedArray,
+  w: number,
+  h: number,
+  bake: BakeMode | null,
+  tint: number | null,
+  ink7Key?: number | null,
+  ink = 0,
+  fgRgb = 0,
+  palette?: number[][],
+): { pixels: Uint8ClampedArray; changed: boolean } {
+  const n = w * h * 4;
+  const buf = new Uint8ClampedArray(n);
+  buf.set(src.subarray(0, n));
+  // Bake first (key/matte flood-fill carves the shape from the edge colors),
+  // then tint the survivors — both tint passes skip alpha-0 pixels, so the
+  // erasure is preserved. Tinting before the matte would paint the whole
+  // square and the flood could no longer find its edge color.
+  const changed = bake
+    ? bakeEdgeBackground(buf, w, h, bake, bake === 'backgroundTransparent' ? undefined : palette, undefined, ink7Key)
+    : false;
+  const tinted =
+    tint !== null ? (ink === 41 ? tintSpriteDarken(buf, w, h, tint, fgRgb) : tintSpriteBackground(buf, w, h, tint)) : false;
+  return { pixels: buf, changed: changed || tinted };
+}
+
 export function matteSpriteHitTest(
   ink: number,
   pixels: Uint8Array | Uint8ClampedArray | null | undefined,

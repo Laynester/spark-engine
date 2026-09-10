@@ -6,6 +6,7 @@ export type MemberKind =
   | 'sound'
   | 'font'
   | 'shape'
+  | 'filmloop'
   | 'unknown';
 
 export interface MemberEntry {
@@ -28,6 +29,38 @@ export interface MemberEntry {
   /** Script members: when true, `file` holds LBC1 bytecode instead of .ls
    *  text (the bundler compiled it; the runtime decodes it without parsing). */
   bytecode?: boolean;
+  /** Film-loop members: cast member numbers of the frames, in playback order
+   *  (simple loops with one member per frame). */
+  frames?: number[];
+  /** Film-loop members: per-frame sprite composition from the member's SCVW
+   *  mini-score (the decompiler exports it as `filmloops/NNNN_...txt`). Each
+   *  frame lists the cast members to draw with their mini-stage position,
+   *  display size and ink. When present, the runtime composes the loop from
+   *  these instead of showing a single member per frame. */
+  sprites?: FilmLoopSprite[][];
+  /** Film-loop members: the authored loop rect (the CASt initialRect) — the
+   *  mini-stage viewport the loop composes into. The runtime renders tiles at
+   *  natural bitmap size when this matches the sprites' natural bounding box
+   *  (DirPlayer prefer_bitmap_dims), else at the sprite display size. */
+  loopX?: number;
+  loopY?: number;
+  loopW?: number;
+  loopH?: number;
+}
+
+export interface FilmLoopSprite {
+  /** Cast member number to draw (same cast library as the loop). */
+  member: number;
+  /** Mini-stage position of the sprite's (scaled) registration point. */
+  x: number;
+  y: number;
+  /** Display size: the member bitmap is scaled to this rect. */
+  w: number;
+  h: number;
+  /** Sprite ink (8 = matte: palette-0 background keyed transparent). */
+  ink: number;
+  /** Sprite blend amount. */
+  blend: number;
 }
 
 export interface CastFont {

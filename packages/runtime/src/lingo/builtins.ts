@@ -715,7 +715,7 @@ export function createBuiltinTable(): Map<string, BuiltinFn> {
 
   set(['executeMessage'], (b, a) => {
     const msg = a[0] instanceof LSymbol ? a[0].name : toLingoString(a[0]);
-    b.dispatchMessage(msg, a[1] ?? VOID);
+    b.dispatchMessage(msg, a.slice(1));
     return VOID;
   });
   set(['createWindow'], (b, a) => b.createWindow(toLingoString(a[0])) ?? VOID);

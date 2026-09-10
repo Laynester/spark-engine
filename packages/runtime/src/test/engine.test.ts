@@ -4041,6 +4041,34 @@ test('sprite.color accepts rgb() LColor + hex strings (Visualizer buildVisual)',
   assert.equal(e.getSpriteProp(s, 'scale'), 2);
 });
 
+test('sprite.backColor palette index resolves via the member bitmap palette (Entry Car)', () => {
+  // Entry Car Class: ink=41 + backColor=random(150)+20. DirPlayer keeps the
+  // number as a palette INDEX and resolves it against the sprite member's OWN
+  // bitmap palette at render time (sprite.rs ColorRef + bitmap.rs
+  // resolve_color_ref via src.palette_ref) — never the movie palette.
+  const e = new DirectorEngine();
+  const bm = e.addScriptMember('car2', 'unknown', '');
+  bm.kind = 'bitmap';
+  const table: number[][] = Array.from({ length: 256 }, (_, i) => [i, i, i]);
+  table[0] = [255, 255, 255];
+  table[100] = [16, 32, 48];
+  bm.palette = table;
+  const s = e.getSprite(3);
+  e.setSpriteProp(s, 'member', (bm.castLibNumber << 16) | bm.number);
+  e.setSpriteProp(s, 'ink', 41);
+  e.setSpriteProp(s, 'backcolor', 100);
+  const ch = e.getChannel(3);
+  assert.equal(ch.bgColorIndex, 100, 'numeric backColor stored as a palette index');
+  assert.equal(e.bgTintForChannel(ch), (16 << 16) | (32 << 8) | 48, 'index resolves via the member palette');
+  // Index 0 (white) = no filtering, like the Director defaults.
+  e.setSpriteProp(s, 'backcolor', 0);
+  assert.equal(e.bgTintForChannel(e.getChannel(3)), null, 'white index means no tint');
+  // rgb() colors keep working exactly as before.
+  e.setSpriteProp(s, 'backcolor', new LColor(1, 2, 3));
+  assert.equal(e.getChannel(3).bgColorIndex, null, 'rgb clears the index');
+  assert.equal(e.bgTintForChannel(e.getChannel(3)), (1 << 16) | (2 << 8) | 3, 'rgb tints directly');
+});
+
 test('shape members emit kind:shape visuals with parsed dims (entry sky/box)', () => {
   const calls: { ch: number; kind: string; shape?: { width: number; height: number } }[] = [];
   const adapter = {
@@ -4661,6 +4689,266 @@ test('number/string .integer and .float chunk properties (roller slide arg)', ()
   const arg = e.interp.evalExpressionString('"sld" && "10,3,0.45" && 0.integer && 1788233716731') as string;
   assert.strictEqual(arg, 'sld 10,3,0.45 0 1788233716731');
   assert.strictEqual(e.interp.evalExpressionString(`"${arg}".word[4]`), '1788233716731');
+});
+
+test('.string chunk property converts numbers and strings (roller addSlideObject key)', () => {
+  // Room Component addSlideObject/removeSlideObject normalize the wire id with
+  // `tID = tID.string` before keying pActiveObjList/pCurrentSlidingObjects.
+  // `.string` was VOID, so the proplist lookup missed, the furniture never
+  // entered the sliding list, and rollers didn't move furniture (avatars use
+  // a different path and were unaffected). Director: string(x).string is the
+  // string itself, integer.string stringifies, symbol.string keeps the #.
+  const e = new DirectorEngine();
+  assert.strictEqual(e.interp.evalExpressionString('"100".string'), '100');
+  assert.strictEqual(e.interp.evalExpressionString('100.string'), '100');
+  assert.strictEqual(e.interp.evalExpressionString('2.9.string'), '2.9');
+});
+
+test('roller furniture slide lerps and finalizes (real v31 exported handlers)', () => {
+  // handle_slideobjectbundle (0005:951) -> addSlideObject (0004:748) -> Active
+  // Object setSlideTo (0003:198); per frame Room Component prepare (0004:170)
+  // -> updateSlideObjects (0004:1381) -> call(#animateSlide, tList, tTimeNow)
+  // -> animateSlide (0003:217) -> updateLocation (0003:593). The handlers below
+  // are the exported v31 bodies verbatim, with only the room thread/geometry
+  // wired to fakes. Regression: the tile-space lerp must move pLocX toward the
+  // dest and the finalize branch must snap and self-remove.
+  const e = new DirectorEngine();
+  const geomScript = e.addScriptMember(
+    'Room Geometry',
+    'parent',
+    [
+      'property pXFactor, pYFactor, pXOffset, pYOffset, pHFactor, pZOffset',
+      'on construct me',
+      '  pXFactor = 32',
+      '  pYFactor = 26',
+      '  pXOffset = 0',
+      '  pYOffset = 0',
+      '  pHFactor = 8',
+      '  pZOffset = 0',
+      'end',
+      'on getScreenCoordinate me, tLocX, tLocY, tHeight',
+      '  tPrecision = the floatPrecision',
+      '  set the floatPrecision to 2',
+      '  tLocH = (tLocX - tLocY) * (pXFactor * 0.5) + pXOffset',
+      '  tLocV = float((tLocY + tLocX) * pYFactor * 0.5 + pYOffset) - tHeight * pHFactor',
+      '  tlocz = 1000 * (tLocX + tLocY + 1) + pZOffset',
+      '  set the floatPrecision to tPrecision',
+      '  return [integer(tLocH), integer(tLocV), integer(tlocz)]',
+      'end',
+    ].join('\n'),
+  );
+  const compScript = e.addScriptMember(
+    'Room Component',
+    'parent',
+    [
+      'property pActiveObjList',
+      'property pCurrentSlidingObjects',
+      'on construct me',
+      '  pActiveObjList = [:]',
+      '  pCurrentSlidingObjects = [:]',
+      'end',
+      'on addSlideObject me, tID, tFromLoc, tToLoc, tTimeNow, tHasCharacter',
+      '  if the paramCount < 4 then',
+      '    return error(me, "Wrong parameter count", #addSlideObject, #major)',
+      '  end if',
+      '  tID = tID.string',
+      '  if voidp(tTimeNow) then',
+      '    tTimeNow = the milliSeconds',
+      '  end if',
+      '  if voidp(tHasCharacter) then',
+      '    tHasCharacter = 0',
+      '  end if',
+      '  if not voidp(pActiveObjList[tID]) then',
+      '    tObj = pActiveObjList[tID]',
+      '    tObj.setSlideTo(tFromLoc, tToLoc, tTimeNow, tHasCharacter)',
+      '    pCurrentSlidingObjects[tID] = tObj',
+      '  end if',
+      'end',
+      'on removeSlideObject me, tID',
+      '  tID = tID.string',
+      '  if not voidp(pCurrentSlidingObjects[tID]) then',
+      '    pCurrentSlidingObjects.deleteProp(tID)',
+      '  end if',
+      'end',
+      'on updateSlideObjects me, tTimeNow',
+      '  if voidp(tTimeNow) then',
+      '    tTimeNow = the milliSeconds',
+      '  end if',
+      '  tList = pCurrentSlidingObjects.duplicate()',
+      '  call(#animateSlide, tList, tTimeNow)',
+      'end',
+    ].join('\n'),
+  );
+  const aoScript = e.addScriptMember(
+    'Active Object',
+    'parent',
+    [
+      'property pSprList, pDirection, pLocShiftList, pLoczList, pCorrectLocZ',
+      'property pSlideTimePerTile, pLocX, pLocY, pLocH, pStartloc, pDestLoc',
+      'property pSlideStartTime, pSlideEndTime',
+      'on construct me',
+      '  pSprList = []',
+      '  pDirection = [0]',
+      '  pLocShiftList = []',
+      '  pLoczList = []',
+      '  pCorrectLocZ = 0',
+      '  pSlideTimePerTile = 500',
+      'end',
+      'on setSlideTo me, tFromLoc, tToLoc, tTimeNow, tHasCharacter',
+      '  if voidp(tTimeNow) then',
+      '    tTimeNow = the milliSeconds',
+      '  end if',
+      '  pSlideStartTime = tTimeNow',
+      '  pLastSlideUpdateTime = pSlideStartTime',
+      '  pLocX = getLocalFloat(tFromLoc[1])',
+      '  pLocY = getLocalFloat(tFromLoc[2])',
+      '  pLocH = getLocalFloat(tFromLoc[3])',
+      '  tDistances = []',
+      '  tDistances[1] = abs(tFromLoc[1] - tToLoc[1])',
+      '  tDistances[2] = abs(tFromLoc[2] - tToLoc[2])',
+      '  tDistances[3] = abs(tFromLoc[3] - tToLoc[3])',
+      '  tMoveTime = max(tDistances) * pSlideTimePerTile',
+      '  pSlideEndTime = pSlideStartTime + tMoveTime',
+      '  pStartloc = [pLocX, pLocY, pLocH]',
+      '  pDestLoc = tToLoc',
+      '  me.updateLocation()',
+      'end',
+      'on animateSlide me, tTimeNow',
+      '  if voidp(tTimeNow) then',
+      '    tTimeNow = the milliSeconds',
+      '  end if',
+      '  if pSlideEndTime < tTimeNow then',
+      '    pLocX = pDestLoc[1].integer',
+      '    pLocY = pDestLoc[2].integer',
+      '    pLocH = pDestLoc[3]',
+      '    getThread("room").getComponent().removeSlideObject(me.ancestor.id)',
+      '    me.updateLocation()',
+      '    return 1',
+      '  end if',
+      '  tTimeUsed = float(tTimeNow - pSlideStartTime)',
+      '  tPercentSlided = tTimeUsed / float(pSlideEndTime - pSlideStartTime)',
+      '  pLocX = float(pDestLoc[1] - pStartloc[1]) * tPercentSlided + pStartloc[1]',
+      '  pLocY = float(pDestLoc[2] - pStartloc[2]) * tPercentSlided + pStartloc[2]',
+      '  pLocH = float(pDestLoc[3] - pStartloc[3]) * tPercentSlided + pStartloc[3]',
+      '  me.updateLocation()',
+      '  return 1',
+      'end',
+      'on updateLocation me',
+      '  tScreenLocs = getThread(#room).getInterface().getGeometry().getScreenCoordinate(pLocX, pLocY, pLocH)',
+      '  i = 0',
+      '  repeat with tSpr in pSprList',
+      '    i = i + 1',
+      '    tSpr.locH = tScreenLocs[1]',
+      '    tSpr.locV = tScreenLocs[2]',
+      '    if tSpr.rotation = 180 then',
+      '      tSpr.locH = tSpr.locH + pXFactor',
+      '    end if',
+      '    if pDirection[1] < 0 then',
+      '      pDirection[1] = 0',
+      '    end if',
+      '    if pDirection[1] + 1 > pLocShiftList[i].count then',
+      '      pDirection[1] = 0',
+      '    end if',
+      '    tLocShift = pLocShiftList[i][pDirection[1] + 1]',
+      '    tSpr.loc = tSpr.loc + tLocShift',
+      '    tZ = pLoczList[i][pDirection[1] + 1]',
+      '    if pCorrectLocZ then',
+      '      tSpr.locZ = tScreenLocs[3] + pLocH * 1000 + tZ - 1',
+      '      next repeat',
+      '    end if',
+      '    tSpr.locZ = tScreenLocs[3] + tZ - 1',
+      '  end repeat',
+      '  me.relocate(pSprList)',
+      'end',
+      'on relocate me, tSpriteList',
+      '  return 1',
+      'end',
+    ].join('\n'),
+  );
+  const threadScript = e.addScriptMember('Fake Thread', 'parent', [
+    'on getInterface me',
+    '  return getObject(#roomInterface)',
+    'end',
+    'on getComponent me',
+    '  return getObject(#roomComponent)',
+    'end',
+  ].join('\n'));
+  const ifaceScript = e.addScriptMember('Fake Interface', 'parent', [
+    'on getGeometry me',
+    '  return getObject(#roomGeometry)',
+    'end',
+  ].join('\n'));
+  e.addScriptMember(
+    'RoomGlobals',
+    'movie',
+    [
+      'on getThread tName',
+      '  return getObject(#roomThread)',
+      'end',
+      'on getLocalFloat tStrFloat',
+      '  if not stringp(tStrFloat) then',
+      '    return float(tStrFloat)',
+      '  end if',
+      '  if not (tStrFloat contains ".") then',
+      '    return float(tStrFloat)',
+      '  end if',
+      '  tStrFloatLocal = tStrFloat',
+      '  if not (value("1.2") > value("1.0")) then',
+      '    put "," into char offset(".", tStrFloat) of tStrFloatLocal',
+      '  end if',
+      '  return float(tStrFloatLocal)',
+      'end',
+    ].join('\n'),
+  );
+  const geom = e.interp.newInstance(geomScript.script!, []);
+  e.interp.callObjectHandler(geom, 'construct', []);
+  const comp = e.interp.newInstance(compScript.script!, []);
+  e.interp.callObjectHandler(comp, 'construct', []);
+  e.setObjectById('roomThread', e.interp.newInstance(threadScript.script!, []));
+  e.setObjectById('roomInterface', e.interp.newInstance(ifaceScript.script!, []));
+  e.setObjectById('roomGeometry', geom);
+  e.setObjectById('roomComponent', comp);
+
+  // Furniture object: a real sprite on channel 3 plus a tiny ancestor so the
+  // finalize branch (me.ancestor.id) works like the real client.
+  const ao = e.interp.newInstance(aoScript.script!, []);
+  e.interp.callObjectHandler(ao, 'construct', []);
+  const anc = e.interp.newInstance(aoScript.script!, []);
+  anc.props.set('id', '100');
+  e.interp.setPropValue(ao, 'ancestor', anc);
+  const spr = e.getSprite(3);
+  e.setSpriteProp(spr, 'member', (e.addScriptMember('furni', 'unknown', '') as unknown as { number: number }).number);
+  e.setSpriteProp(spr, 'rotation', 0);
+  e.interp.setPropValue(ao, 'pSprList', e.interp.evalExpressionString('[sprite(3)]'));
+  e.interp.setPropValue(ao, 'pLocShiftList', e.interp.evalExpressionString('[[point(0, 0)]]'));
+  e.interp.setPropValue(ao, 'pLoczList', e.interp.evalExpressionString('[[0]]'));
+  const active = e.interp.evalExpressionString('[:]') as { props: Map<string, unknown> };
+  active.props.set('100', ao);
+  e.interp.setPropValue(comp, 'pActiveObjList', active);
+
+  // handle_slideobjectbundle equivalent: one tile east at constant height.
+  const t0 = 1000000;
+  e.interp.callObjectHandler(comp, 'addSlideObject', [
+    '100',
+    e.interp.evalExpressionString('[10, 3, 0.45]'),
+    e.interp.evalExpressionString('[11, 3, 0.45]'),
+    t0,
+    0,
+  ]);
+  const sliding = e.interp.getPropValue(comp, 'pCurrentSlidingObjects') as { props: Map<string, unknown> };
+  assert.equal(sliding.props.has('100'), true, 'object entered pCurrentSlidingObjects');
+  assert.equal(e.interp.getPropValue(ao, 'pSlideEndTime'), t0 + 500, '500ms per tile');
+
+  // Mid-slide frame: prepare -> updateSlideObjects(tTimeNow).
+  e.interp.callObjectHandler(comp, 'updateSlideObjects', [t0 + 250]);
+  assert.ok(Math.abs((e.interp.getPropValue(ao, 'pLocX') as number) - 10.5) < 0.001, 'mid-slide pLocX lerps to 10.5');
+  assert.ok(Math.abs((e.interp.getPropValue(ao, 'pLocH') as number) - 0.45) < 0.001, 'height unchanged while sliding');
+  assert.ok((e.getSpriteProp(spr, 'loch') as number) > 0, 'updateLocation rendered the sprite');
+
+  // Past-end frame: finalize snaps to dest and self-removes.
+  e.interp.callObjectHandler(comp, 'updateSlideObjects', [t0 + 600]);
+  assert.equal(e.interp.getPropValue(ao, 'pLocX'), 11, 'finalized pLocX snaps to dest');
+  assert.equal(sliding.props.has('100'), false, 'finalize removed the object from pCurrentSlidingObjects');
 });
 
 test('createMember makes a named bitmap member the cloud can paint and assign', () => {
@@ -6029,6 +6317,87 @@ test('typing goes into the focused editable field member (Director native editin
   e.setSpriteProp(e.getSprite(12), 'member', 0);
   e.dispatchKeyEvent('keyDown', 'q', 81);
   assert.equal(e.getMemberProp(ref, 'text'), 'h');
+});
+
+test('boxType #limit live text clips at the field box (chat input / tooltips)', () => {
+  // The room bar chat input (0035_text_room_bar.window.txt): #boxType: #limit,
+  // #wordWrap: 0 — DirPlayer cuts the typed text off at the field width. The
+  // live PIXI text path has no canvas to clip against (only the rasterizer
+  // does), so the channel visual must ask the stage to mask the text node to
+  // its rect. boxType presence = fixed box, exactly like the rasterizer's
+  // autoSize rule (boxType-unset only).
+  const calls: { ch: number; kind: string; clipToBox?: boolean; wordWrap?: boolean; width?: number; height?: number }[] = [];
+  const adapter = {
+    setBackground() {},
+    resize() {},
+    refreshChannel() {},
+    setChannel(ch: number, v: { kind: string; clipToBox?: boolean; wordWrap?: boolean; width?: number; height?: number } | null) {
+      calls.push(v ? { ch, kind: v.kind, clipToBox: v.clipToBox, wordWrap: v.wordWrap, width: v.width, height: v.height } : { ch, kind: 'null' });
+    },
+  };
+  const e = new DirectorEngine(adapter as never);
+  const m = e.addScriptMember('int_speechtext_text', 'unknown', '');
+  m.kind = 'text'; // Field Wrapper dynamic field member
+  const ref = e.getMember(m.number, m.castLibNumber)!;
+  e.setMemberProp(ref, 'rect', new LRect(0, 0, 420, 10));
+  e.setMemberProp(ref, 'boxtype', new LSymbol('limit'));
+  e.setMemberProp(ref, 'wordwrap', 0);
+  e.setMemberProp(ref, 'editable', 1);
+  const s = { channel: 12, script: null };
+  e.setSpriteProp(s, 'member', (m.castLibNumber << 16) | m.number);
+  e.flushChannelVisuals();
+  const hit = calls.find((c) => c.ch === 12 && c.kind === 'text');
+  assert.ok(hit, `expected 12:text, got ${calls.map((c) => `${c.ch}:${c.kind}`).join(', ')}`);
+  assert.equal(hit.clipToBox, true, 'boxType-set text clips at the box');
+  assert.equal(hit.wordWrap, false, 'chat field wordWrap 0');
+  assert.equal(hit.width, 420);
+  assert.equal(hit.height, 10);
+
+  // boxType-unset (auto-size) text members must NOT clip.
+  const m2 = e.addScriptMember('writer_1', 'unknown', '');
+  m2.kind = 'text';
+  const ref2 = e.getMember(m2.number, m2.castLibNumber)!;
+  e.setMemberProp(ref2, 'rect', new LRect(0, 0, 420, 10));
+  e.setMemberProp(ref2, 'wordwrap', 0);
+  e.setSpriteProp(s, 'member', (m2.castLibNumber << 16) | m2.number);
+  e.flushChannelVisuals();
+  const hit2 = [...calls].reverse().find((c) => c.ch === 12 && c.kind === 'text')!;
+  assert.equal(hit2.clipToBox, false, 'boxType-unset text stays auto-size');
+
+  // Rasterizer parity: #limit keeps the fixed rect box and the unbroken line
+  // clips at the canvas edge (the window-buffer path).
+  const { document } = globalThis as { document?: unknown };
+  const draws: string[] = [];
+  const ctxMock = {
+    font: '', fillStyle: '', textAlign: '', textBaseline: '',
+    measureText: (str: string) => ({ width: str.length * 8 }),
+    fillRect: () => undefined,
+    fillText: (t: string) => { draws.push(t); },
+    getImageData: (_x: number, _y: number, w: number, h: number) => ({ data: new Uint8ClampedArray(w * h * 4) }),
+  };
+  (globalThis as Record<string, unknown>).document = {
+    createElement: () => ({ width: 0, height: 0, getContext: () => ctxMock }),
+  };
+  try {
+    const rm = new Member(1, 1, 'int_speechtext_text', 'text');
+    rm.text = 'hello this is a very long typed chat message that goes way beyond the box';
+    rm.font = 'Volter';
+    rm.fontSize = 9;
+    rm.fixedLineSpace = 11;
+    rm.color = new LColor(0, 0, 0);
+    rm.wordWrap = 0;
+    rm.textProps = new Map<string, LVal>([['boxtype', new LSymbol('limit')]]);
+    rm.rect = new LRect(0, 0, 420, 10);
+    const img = rasterizeTextMember(rm);
+    assert.ok(img);
+    assert.equal(img.width, 420, 'boxType #limit keeps the rect width (no content auto-size)');
+    assert.equal(img.height, 10);
+    assert.equal(draws.length, 1, 'wordWrap 0 stays a single clipped line');
+    assert.equal(draws[0], rm.text);
+  } finally {
+    if (document) (globalThis as Record<string, unknown>).document = document;
+    else delete (globalThis as Record<string, unknown>).document;
+  }
 });
 
 test('keyDown dispatches to the focused sprite behavior list (Event Broker gate)', () => {

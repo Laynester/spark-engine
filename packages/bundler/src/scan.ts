@@ -29,6 +29,7 @@ const TYPE_TOKENS: Record<string, MemberKind> = {
   sound: 'sound',
   font: 'font',
   shape: 'shape',
+  filmloop: 'filmloop',
 };
 
 const MEMBER_RE = /^(\d{3,4})_([a-z]+)_(.+)$/i;

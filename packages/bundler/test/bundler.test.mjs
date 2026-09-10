@@ -76,6 +76,69 @@ test('bundler builds a zip with a correct manifest', () => {
   assert.equal(new TextDecoder().decode(unzipped['bundle-manifest.json']).includes('hh_demo'), true);
 });
 
+test('film loop export: filmloops/NNNN_filmloop_*.txt becomes a filmloop member', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'habbo-water-'));
+  const cast = join(dir, 'hh_room_gold');
+  mkdirSync(join(cast, 'filmloops'), { recursive: true });
+  // water frames + the decompiler's film loop export (frames straight from the
+  // original CCT's SCVW mini-score, not synthesized from the room layout)
+  writeFileSync(join(cast, '0007_bitmap_gold_water2a.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]));
+  writeFileSync(join(cast, '0007_bitmap_gold_water2a.pal'), 'JASC-PAL\n0100\n256\n255 255 255\n0 0 0\n');
+  writeFileSync(join(cast, '0008_bitmap_gold_water2b.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]));
+  writeFileSync(join(cast, '0008_bitmap_gold_water2b.pal'), 'JASC-PAL\n0100\n256\n255 255 255\n0 0 0\n');
+  // The decompiler's film loop export: display size, frame count, the deduped
+  // member sequence, and the per-frame sprite composition from the original
+  // CCT's SCVW mini-score (no synthesis from the room layout).
+  writeFileSync(
+    join(cast, 'filmloops', '0019_filmloop_waterloop.txt'),
+    [
+      'width: 313',
+      'height: 92',
+      'originX: 162',
+      'originY: 391',
+      'frames: 4',
+      'members: 7 8 7 8',
+      'frame 1:',
+      '  sprite: member=7 x=287 y=402 w=250 h=12 ink=8 blend=0',
+      '  sprite: member=7 x=350 y=412 w=250 h=12 ink=8 blend=0',
+      'frame 2:',
+      '  sprite: member=8 x=288 y=402 w=250 h=12 ink=8 blend=0',
+      '  sprite: member=8 x=349 y=412 w=250 h=12 ink=8 blend=0',
+      'frame 3:',
+      '  sprite: member=7 x=299 y=402 w=250 h=12 ink=8 blend=0',
+      'frame 4:',
+      '  sprite: member=8 x=300 y=402 w=250 h=12 ink=8 blend=0',
+      '',
+    ].join('\n'),
+  );
+  const { manifest } = buildBundle(dir);
+  const castManifest = manifest.casts[0];
+  const loop = castManifest.members.find((m) => m.name === 'waterloop');
+  assert.ok(loop, 'waterloop member emitted');
+  assert.equal(loop.kind, 'filmloop');
+  assert.equal(loop.number, 19, 'member number comes from the export file name');
+  assert.deepEqual(loop.frames, [7, 8, 7, 8], 'frames are the deduped member sequence');
+  assert.equal(loop.loopX, 162, 'authored loop origin parsed');
+  assert.equal(loop.loopY, 391, 'authored loop origin parsed');
+  assert.equal(loop.loopW, 313, 'authored loop width parsed');
+  assert.equal(loop.loopH, 92, 'authored loop height parsed');
+  assert.ok(loop.sprites && loop.sprites.length === 4, 'per-frame sprite composition parsed');
+  assert.deepEqual(
+    loop.sprites[0].map((s) => [s.member, s.x, s.y, s.w, s.h, s.ink, s.blend]),
+    [[7, 287, 402, 250, 12, 8, 0], [7, 350, 412, 250, 12, 8, 0]],
+    'frame 1 sprites carry member, position, display size, ink and blend',
+  );
+
+  // The runtime must be able to load it end-to-end.
+  const { zip } = buildBundle(dir);
+  const loader = new BundleLoader();
+  loader.register(zip);
+  const e = new DirectorEngine();
+  await e.loadCast(loader, 'hh_room_gold');
+  const num = e.getmemnum('waterloop');
+  assert.ok(num > 0, 'runtime resolves the bundled waterloop');
+});
+
 test('spark container: single-stream, round-trips every file, smaller than the zip', () => {
   const dir = makeFixture();
   // Real casts carry hundreds of near-identical palette files; repeat one here

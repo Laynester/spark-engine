@@ -1806,6 +1806,7 @@ export class Interpreter {
     if (typeof obj === 'string') {
       if (lower === 'length') return obj.length;
       if (lower === 'ilk') return ilkOf(obj);
+      if (lower === 'string') return obj;
       if (lower === 'integer') {
         const m = /^[+-]?\d+/.exec(obj.trim());
         return m ? parseInt(m[0], 10) : VOID;
@@ -1820,10 +1821,12 @@ export class Interpreter {
       if (lower === 'ilk') return ilkOf(obj);
       if (lower === 'integer') return Math.trunc(obj);
       if (lower === 'float') return obj;
+      if (lower === 'string') return String(obj);
       return VOID;
     }
     if (obj instanceof LSymbol) {
       if (lower === 'ilk') return ilkOf(obj);
+      if (lower === 'string') return `#${obj.name}`;
       return VOID;
     }
     if (obj instanceof LPointClass) {

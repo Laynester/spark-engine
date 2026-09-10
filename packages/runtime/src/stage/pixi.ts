@@ -4,7 +4,7 @@ import { alignmentName, type ChannelVisual, type DirectorEngine, type StageAdapt
 import type { Channel } from '../engine/sprites.js';
 import { LImage, LList, LObject, LPoint, LPropList, LSpriteRef, LSymbol } from '../lingo/values.js';
 import type { ShapeDef } from '../engine/members.js';
-import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, blendModeForInk, cornersAreNearWhite, matteSpriteHitTest, tintSpriteBackground, tintSpriteDarken, SUBTRACT_BLEND_MODE, type BakeMode } from './matte.js';
+import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, bakeSurface, blendModeForInk, cornersAreNearWhite, matteSpriteHitTest, tintSpriteBackground, tintSpriteDarken, SUBTRACT_BLEND_MODE, type BakeMode } from './matte.js';
 import { caretBlinkOn, caretX } from './caret.js';
 import { decodeImage } from '../engine/pix8.js';
 
@@ -202,7 +202,7 @@ export class PixiStage implements StageAdapter {
       const ch = this.engine.getChannel(channel);
       const bake = this.bakeForChannel(ch, img, w, h);
       const tint = this.tintForChannel(ch);
-      const baked = bake || tint ? this.bakeImagePixels(node, img, w, h, bake, tint, this.ink7KeyForChannel(ch), ch.ink ?? 0, ch.colorSet ? ch.color : 0) : null;
+      const baked = bake || tint ? this.bakeImagePixels(node, img, w, h, bake, tint, this.ink7KeyForChannel(ch), ch.ink ?? 0, ch.colorSet ? ch.color : 0, ch.member?.palette) : null;
       const pixels = baked && baked.changed ? baked.pixels : img.ensure();
       const finalBake = baked && baked.changed ? bake : null;
       if (!node.visual || !(node.visual instanceof Sprite)) {
@@ -234,8 +234,13 @@ export class PixiStage implements StageAdapter {
     }
   }
 
-  private bakeForChannel(ch: { ink: number } | undefined, img: LImage, w: number, h: number): BakeMode | null {
+  private bakeForChannel(ch: { ink: number; member?: { kind: string } } | undefined, img: LImage, w: number, h: number): BakeMode | null {
     if (!ch) return null;
+    // Sprite-composed film loops arrive as alpha-bearing RGBA (the per-tile
+    // matte is baked in during composition) — the ink flood would key the
+    // surface color itself (waterloop tiles are edge-to-edge teal), so never
+    // re-bake them.
+    if (ch.member?.kind === 'filmloop') return null;
     if (ch.ink === 1 || ch.ink === 7 || ch.ink === 8 || ch.ink === 36 || ch.ink === 41) return bakeModeForInk(ch.ink);
     // Ink 33/34/35/37/38/39/40 (AddPin/Add/SubPin/Sub/Lightest/Darkest/Lighten)
     // composite the art additively/subtractively, so the opaque backing field
@@ -260,26 +265,20 @@ export class PixiStage implements StageAdapter {
     ink7Key?: number | null,
     ink = 0,
     fgRgb = 0,
+    palette?: number[][],
   ): { pixels: Uint8ClampedArray; changed: boolean } {
     const n = w * h * 4;
     if (!node.bakeBuf || node.bakeBuf.length !== n) node.bakeBuf = new Uint8ClampedArray(n);
-    const src = img.ensure();
-    node.bakeBuf.set(src.subarray(0, n));
-    // Bake first (key/matte flood-fill carves the shape from the edge colors),
-    // then tint the survivors — both tint passes skip alpha-0 pixels, so the
-    // erasure is preserved. Tinting before the matte would paint the whole
-    // square and the flood could no longer find its edge color.
-    const changed = bake ? bakeEdgeBackground(node.bakeBuf, w, h, bake, undefined, undefined, ink7Key) : false;
-    const tinted =
-      tint !== null ? (ink === 41 ? tintSpriteDarken(node.bakeBuf, w, h, tint, fgRgb) : tintSpriteBackground(node.bakeBuf, w, h, tint)) : false;
-    return { pixels: node.bakeBuf, changed: changed || tinted };
+    const out = bakeSurface(img.ensure(), w, h, bake, tint, ink7Key, ink, fgRgb, palette);
+    node.bakeBuf.set(out.pixels);
+    return { pixels: node.bakeBuf, changed: out.changed };
   }
 
-  private tintForChannel(ch: { ink?: number; bgColorIsRgb?: boolean; bgColor?: number } | undefined): number | null {
-    if (!ch?.bgColorIsRgb || ch.bgColor === undefined || ch.bgColor === null) return null;
-    if (ch.bgColor === 0xffffff) return null;
-    if (ch.bgColor === 0 && ch.ink !== 41) return null;
-    return ch.bgColor;
+  private tintForChannel(ch: Channel | undefined): number | null {
+    // Tint resolution (incl. indexed backColors) lives on the engine for
+    // DirPlayer parity — see bgTintForChannel.
+    if (!ch) return null;
+    return this.engine.bgTintForChannel(ch);
   }
 
   private ink7KeyForChannel(ch: { ink?: number; bgColorIsRgb?: boolean; bgColor?: number } | undefined): number | null | undefined {
@@ -499,6 +498,16 @@ export class PixiStage implements StageAdapter {
         },
       });
       group.addChild(text);
+      if (visual.clipToBox) {
+        // Fixed-box text (#boxType: #limit/#fixed/#scroll) clips at the box
+        // edge like Director/DirPlayer — non-wrapping chat input text is cut
+        // off at the field width, wrapped tooltips clip at the box height.
+        // v8 masks are not rendered themselves but must be in the display
+        // list, so the mask doubles as a group child.
+        const clip = new Graphics().rect(0, 0, w, h).fill(0xffffff);
+        group.addChild(clip);
+        group.mask = clip;
+      }
       node.textObj = text;
       node.caretColor = visual.color ?? 0xffffff;
       node.visual = group;
@@ -516,7 +525,7 @@ export class PixiStage implements StageAdapter {
         const ch = this.engine.getChannel(channel);
         const bake = this.bakeForChannel(ch, img, w, h);
         const tint = this.tintForChannel(ch);
-        const baked = bake || tint ? this.bakeImagePixels(node, img, w, h, bake, tint, this.ink7KeyForChannel(ch), ch.ink ?? 0, ch.colorSet ? ch.color : 0) : null;
+        const baked = bake || tint ? this.bakeImagePixels(node, img, w, h, bake, tint, this.ink7KeyForChannel(ch), ch.ink ?? 0, ch.colorSet ? ch.color : 0, ch.member?.palette) : null;
         const pixels = baked && baked.changed ? baked.pixels : img.ensure();
         node.bakeMode = baked && baked.changed ? bake : null;
         node.imgBuffer = pixels;
@@ -575,7 +584,10 @@ export class PixiStage implements StageAdapter {
           node.container.addChild(sprite);
         }
       } else {
-      const bake: BakeMode | null = bakeModeForInk(ch.ink);
+      // Film-loop frames are full-bleed opaque strips (water animation): no
+      // single palette-0 background to matte-key, and the flood would eat the
+      // frame's interior highlight bands (alternating rows touch the edges).
+      const bake: BakeMode | null = ch.member?.kind === 'filmloop' ? null : bakeModeForInk(ch.ink);
       const ink7Key = this.ink7KeyForChannel(ch);
       const tint = this.tintForChannel(ch);
       if (tint !== null) {

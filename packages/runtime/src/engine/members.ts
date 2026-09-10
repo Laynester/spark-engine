@@ -52,6 +52,32 @@ export class Member {
   fileName?: string;
   image?: LImage;
   imagePainted = false;
+  /** Film-loop members: ordered frame members, resolved from the manifest's
+   *  `frames` numbers at cast load (filmRefs). The member's raw/palette/
+   *  regpoint track the CURRENT frame — advanceFilmLoops live-copies them so
+   *  the ordinary bitmap render path just works. */
+  film?: Member[];
+  /** Manifest frame numbers, resolved into `film` once the whole cast loads. */
+  filmRefs?: number[];
+  /** Film-loop members: per-frame sprite composition (member numbers + mini-
+   *  stage placement), resolved from the manifest's `sprites`. When present
+   *  the runtime composes each frame from these instead of showing a single
+   *  member per frame. */
+  filmSprites?: { member: Member; x: number; y: number; w: number; h: number; ink: number; blend: number }[][];
+  /** Manifest sprite composition, resolved into `filmSprites` at cast load. */
+  filmSpriteRefs?: { member: number; x: number; y: number; w: number; h: number; ink: number; blend: number }[][];
+  /** Composed current frame of a sprite-composed film loop (RGBA, loop-sized). */
+  filmImage?: LImage;
+  /** Authored loop rect (the CASt initialRect): the mini-stage viewport the
+   *  loop composes into. Canvas size lives in filmW/filmH; the origin anchors
+   *  sprite placements. */
+  filmX = 0;
+  filmY = 0;
+  /** Composed loop canvas size (the authored loop rect, else the bounding box
+   *  of the sprite placements). */
+  filmW = 0;
+  filmH = 0;
+  filmIndex = 0;
   color?: LVal;
   rect?: LRect;
   font?: LVal;
@@ -74,7 +100,7 @@ export class Member {
 
   get width(): number {
     if (this.kind === 'text' && this.rect) return this.rect.width;
-    if (this.kind === 'bitmap' && this.raw) {
+    if ((this.kind === 'bitmap' || this.kind === 'filmloop') && this.raw) {
       const size = readPngSize(this.raw);
       return size ? size.w : 0;
     }
@@ -89,7 +115,7 @@ export class Member {
       const size = Math.round(Number(this.fontSize)) || 12;
       return size + 2;
     }
-    if (this.kind === 'bitmap' && this.raw) {
+    if ((this.kind === 'bitmap' || this.kind === 'filmloop') && this.raw) {
       const size = readPngSize(this.raw);
       return size ? size.h : 0;
     }

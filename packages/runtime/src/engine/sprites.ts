@@ -21,6 +21,11 @@ export class Channel {
   foreColor = 255;
   colorSet = false;
   bgColorIsRgb = false;
+  // Numeric backColor is a Director palette index (Entry Car random(150)+20).
+  // DirPlayer keeps it unresolved (sprite.rs ColorRef::PaletteIndex) and
+  // resolves it against the sprite member's OWN bitmap palette at render
+  // time — never the movie palette.
+  bgColorIndex: number | null = null;
   castNum = 0;
   rotation = 0;
   skew = 0;
