@@ -290,6 +290,8 @@ export function createBuiltinTable(): Map<string, BuiltinFn> {
     if (v instanceof LSymbol) return v.name;
     return toLingoString(v);
   });
+  set(['lower'], (b, a) => toLingoString(a[0]).toLowerCase());
+  set(['upper'], (b, a) => toLingoString(a[0]).toUpperCase());
   const normalizeValueExpr = (input: string): string => {
     let s = stripLingoComments(input);
     s = stripLingoContinuations(s);
