@@ -2766,20 +2766,21 @@ test('rasterizeTextMember: wordWrap soft-wraps FIXED boxes to the rect width', (
     // Fixed box keeps the rect height (extra lines clip like a scroll field).
     assert.equal(img.height, 76);
     // 8px/char: "one" (24) fits, "one two" (56) does not -> one word per
-    // line, seven lines, each drawn at its own baseline step.
-    assert.equal(draws.length, 7);
-    // wrapLines keeps the trailing separator on the pushed line.
-    assert.equal(draws[0][0].trimEnd(), 'one');
+    // line, seven lines. Text draws per-character (integer-column snapping),
+    // so rebuild each line from the draw y positions.
+    const byLine = new Map<number, string>();
+    for (const [t, , y] of draws) byLine.set(y, (byLine.get(y) ?? '') + t);
+    assert.equal(byLine.size, 7);
+    assert.equal([...byLine.values()][0].trim(), 'one', 'wrapLines keeps the trailing separator on the pushed line');
     // Each line lands on its own baseline, stepping by the line height.
-    const ys = draws.map(([, , y]) => y);
-    assert.equal(new Set(ys).size, 7);
-    assert.equal(ys[1] - ys[0], ys[2] - ys[1]);
+    const ys = [...byLine.keys()].sort((a, b) => a - b);
+    const steps = ys.slice(1).map((y, i) => y - ys[i]);
+    assert.equal(new Set(steps).size, 1);
     // Without wordWrap the whole string stays on one line.
     draws.length = 0;
     m.wordWrap = 0;
     rasterizeTextMember(m);
-    assert.equal(draws.length, 1);
-    assert.equal(draws[0][0], 'one two three four five six seven');
+    assert.equal(draws.map(([t]) => t).join(''), 'one two three four five six seven');
   } finally {
     if (document) (globalThis as Record<string, unknown>).document = document;
     else delete (globalThis as Record<string, unknown>).document;
@@ -6392,8 +6393,8 @@ test('boxType #limit live text clips at the field box (chat input / tooltips)', 
     assert.ok(img);
     assert.equal(img.width, 420, 'boxType #limit keeps the rect width (no content auto-size)');
     assert.equal(img.height, 10);
-    assert.equal(draws.length, 1, 'wordWrap 0 stays a single clipped line');
-    assert.equal(draws[0], rm.text);
+    assert.equal(draws.length, rm.text.length, 'wordWrap 0 stays a single unbroken line (per-char draw)');
+    assert.equal(draws.join(''), rm.text);
   } finally {
     if (document) (globalThis as Record<string, unknown>).document = document;
     else delete (globalThis as Record<string, unknown>).document;
@@ -6850,11 +6851,19 @@ test('rasterizeTextMember: chunk styles render the styled range in its own font/
     m.chunkStyles = [{ from: 1, to: 4, font: 'vb', fontStyle: new LList([new LSymbol('plain')]), color: new LColor(0, 0, 0) }];
     const img = rasterizeTextMember(m);
     assert.ok(img);
-    assert.equal(draws.length, 2, 'two runs: styled name + plain message');
-    assert.equal(draws[0].t, 'Jem:');
-    assert.match(draws[0].font, /700/, 'name range draws in the bold face');
-    assert.equal(draws[1].t, ' hello');
-    assert.match(draws[1].font, /400/, 'message stays in the member face');
+    // Text draws per-character (integer-column snapping); group the calls back
+    // into style runs by font+fill to verify the styled range uses its own face.
+    const runs: Array<{ t: string; font: string; fill: string }> = [];
+    for (const d of draws) {
+      const cur = runs[runs.length - 1];
+      if (cur && cur.font === d.font && cur.fill === d.fill) cur.t += d.t;
+      else runs.push({ ...d });
+    }
+    assert.equal(runs.length, 2, 'two runs: styled name + plain message');
+    assert.equal(runs[0].t, 'Jem:');
+    assert.match(runs[0].font, /700/, 'name range draws in the bold face');
+    assert.equal(runs[1].t, ' hello');
+    assert.match(runs[1].font, /400/, 'message stays in the member face');
   } finally {
     if (document) (globalThis as Record<string, unknown>).document = document;
     else delete (globalThis as Record<string, unknown>).document;

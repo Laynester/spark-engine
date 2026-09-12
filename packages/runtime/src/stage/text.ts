@@ -72,16 +72,22 @@ export function rasterizeTextMember(member: Member): LImage | null {
 
   if (text) {
     const align = alignmentName(member.alignment);
-    ctx.textAlign = align === 'right' || align === 'center' ? align : 'left';
+    ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
+    ctx.font = fontStr;
     const styles = member.chunkStyles;
     const hasChunkStyles = !!styles && styles.length > 0;
     let y = glyphTop0;
     for (const ln of lines) {
       if (ln.text) {
-        const x = align === 'center' ? w / 2 : align === 'right' ? w - 1 : 0;
+        // Per-character fillText snaps every glyph to an integer column so a
+        // whole-run blob's subpixel advance drift can't flip stroke thickness
+        // with the box width parity (pixel fonts render fatter at even widths
+        // otherwise). Center/right start from the measured line width, rounded.
+        const tw = Math.max(0, ctx.measureText(ln.text).width);
+        const x0 = align === 'center' ? Math.round((w - tw) / 2) : align === 'right' ? Math.max(0, Math.round(w - 1 - tw)) : 0;
         if (hasChunkStyles) {
-          let cx = x;
+          let cx = x0;
           let i = 0;
           while (i < ln.text.length) {
             const st = chunkStyleAt(styles!, ln.start + i);
@@ -97,19 +103,23 @@ export function rasterizeTextMember(member: Member): LImage | null {
             const rc = runColVal !== undefined && runColVal !== null ? colorFrom(runColVal) : null;
             const runCol = rc ?? effCol;
             ctx.fillStyle = `rgb(${runCol.red},${runCol.green},${runCol.blue})`;
-            ctx.fillText(run, cx, y);
-            cx += ctx.measureText(run).width;
+            for (let k = 0; k < run.length; k++) {
+              ctx.fillText(run[k], Math.round(cx), y);
+              cx += ctx.measureText(run[k]).width;
+            }
             i = j;
           }
         } else {
-          ctx.font = fontStr;
           ctx.fillStyle = `rgb(${effCol.red},${effCol.green},${effCol.blue})`;
-          ctx.fillText(ln.text, x, y);
+          let cx = x0;
+          for (let k = 0; k < ln.text.length; k++) {
+            const ch = ln.text[k];
+            ctx.fillText(ch, Math.round(cx), y);
+            cx += ctx.measureText(ch).width;
+          }
           if (style.underline && ln.text) {
-            const tw = ctx.measureText(ln.text).width;
-            const tx = align === 'center' ? w / 2 - tw / 2 : align === 'right' ? w - 1 - tw : 0;
             const ty = Math.min(h - 1, Math.round(y + size * 0.9));
-            ctx.fillRect(Math.round(tx), ty, Math.max(1, Math.ceil(tw)), 1);
+            ctx.fillRect(Math.round(x0), ty, Math.max(1, Math.ceil(tw)), 1);
           }
         }
       }

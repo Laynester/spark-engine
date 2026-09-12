@@ -1,3 +1,7 @@
+// Imported before pixi.js on purpose: a legacy page bundle (Prototype 1.6) can have
+// clobbered the built-ins Pixi needs by the time we get here, and Pixi reads
+// Array.prototype.reduce while its module initializes (see legacy/reclaim.ts).
+import '../legacy/reclaim.js';
 import { Application, BufferImageSource, Container, Graphics, Rectangle, Sprite, Text, Texture, type BLEND_MODES } from 'pixi.js';
 import 'pixi.js/advanced-blend-modes';
 import { alignmentName, type ChannelVisual, type DirectorEngine, type StageAdapter } from '../engine/engine.js';
@@ -108,7 +112,7 @@ export class PixiStage implements StageAdapter {
   constructor(
     private engine: DirectorEngine,
     private parent: HTMLElement,
-  ) {}
+  ) { }
 
   async init(): Promise<void> {
     const { stageWidth: w, stageHeight: h, stageBackground: bg } = this.engine;
@@ -499,11 +503,6 @@ export class PixiStage implements StageAdapter {
       });
       group.addChild(text);
       if (visual.clipToBox) {
-        // Fixed-box text (#boxType: #limit/#fixed/#scroll) clips at the box
-        // edge like Director/DirPlayer — non-wrapping chat input text is cut
-        // off at the field width, wrapped tooltips clip at the box height.
-        // v8 masks are not rendered themselves but must be in the display
-        // list, so the mask doubles as a group child.
         const clip = new Graphics().rect(0, 0, w, h).fill(0xffffff);
         group.addChild(clip);
         group.mask = clip;
@@ -584,55 +583,55 @@ export class PixiStage implements StageAdapter {
           node.container.addChild(sprite);
         }
       } else {
-      // Film-loop frames are full-bleed opaque strips (water animation): no
-      // single palette-0 background to matte-key, and the flood would eat the
-      // frame's interior highlight bands (alternating rows touch the edges).
-      const bake: BakeMode | null = ch.member?.kind === 'filmloop' ? null : bakeModeForInk(ch.ink);
-      const ink7Key = this.ink7KeyForChannel(ch);
-      const tint = this.tintForChannel(ch);
-      if (tint !== null) {
-        let width = 0;
-        let height = 0;
-        let rgba: Uint8ClampedArray | null = null;
-        try {
-          const dec = decodeImage(visual.bytes, ch.member?.palette);
-          width = dec.width;
-          height = dec.height;
-          rgba = new Uint8ClampedArray(dec.rgba);
-          if (visual.remapPalette) PixiStage.remapPixels(rgba, dec.indices, ch.member?.palette, visual.remapPalette);
-          if (bake && width > 0 && height > 0) bakeEdgeBackground(rgba, width, height, bake, ch.member?.palette, dec.indices, ink7Key);
-          if (ch.ink === 41) tintSpriteDarken(rgba, width, height, tint, ch.colorSet ? ch.color : 0);
-          else tintSpriteBackground(rgba, width, height, tint);
-        } catch (e) {
-          this.engine.warn(`bitmap decode failed (tint): ${e instanceof Error ? e.message : String(e)}`);
-          rgba = null;
-        }
-        if (!rgba || width < 1 || height < 1) {
-          node.imgSource = new BufferImageSource({ resource: new Uint8Array(4), width: 1, height: 1, format: 'rgba8unorm', scaleMode: 'nearest' });
-          node.imgTexture = new Texture({ source: node.imgSource });
-          const sprite = new Sprite(node.imgTexture);
-          node.baseW = Math.max(1, width);
-          node.baseH = Math.max(1, height);
-          node.visual = sprite;
-          node.container.addChild(sprite);
+        // Film-loop frames are full-bleed opaque strips (water animation): no
+        // single palette-0 background to matte-key, and the flood would eat the
+        // frame's interior highlight bands (alternating rows touch the edges).
+        const bake: BakeMode | null = ch.member?.kind === 'filmloop' ? null : bakeModeForInk(ch.ink);
+        const ink7Key = this.ink7KeyForChannel(ch);
+        const tint = this.tintForChannel(ch);
+        if (tint !== null) {
+          let width = 0;
+          let height = 0;
+          let rgba: Uint8ClampedArray | null = null;
+          try {
+            const dec = decodeImage(visual.bytes, ch.member?.palette);
+            width = dec.width;
+            height = dec.height;
+            rgba = new Uint8ClampedArray(dec.rgba);
+            if (visual.remapPalette) PixiStage.remapPixels(rgba, dec.indices, ch.member?.palette, visual.remapPalette);
+            if (bake && width > 0 && height > 0) bakeEdgeBackground(rgba, width, height, bake, ch.member?.palette, dec.indices, ink7Key);
+            if (ch.ink === 41) tintSpriteDarken(rgba, width, height, tint, ch.colorSet ? ch.color : 0);
+            else tintSpriteBackground(rgba, width, height, tint);
+          } catch (e) {
+            this.engine.warn(`bitmap decode failed (tint): ${e instanceof Error ? e.message : String(e)}`);
+            rgba = null;
+          }
+          if (!rgba || width < 1 || height < 1) {
+            node.imgSource = new BufferImageSource({ resource: new Uint8Array(4), width: 1, height: 1, format: 'rgba8unorm', scaleMode: 'nearest' });
+            node.imgTexture = new Texture({ source: node.imgSource });
+            const sprite = new Sprite(node.imgTexture);
+            node.baseW = Math.max(1, width);
+            node.baseH = Math.max(1, height);
+            node.visual = sprite;
+            node.container.addChild(sprite);
+          } else {
+            node.imgSource = new BufferImageSource({ resource: rgba, width, height, format: 'rgba8unorm', scaleMode: 'nearest' });
+            node.imgTexture = new Texture({ source: node.imgSource });
+            const sprite = new Sprite(node.imgTexture);
+            node.baseW = width;
+            node.baseH = height;
+            node.visual = sprite;
+            node.container.addChild(sprite);
+          }
         } else {
-          node.imgSource = new BufferImageSource({ resource: rgba, width, height, format: 'rgba8unorm', scaleMode: 'nearest' });
-          node.imgTexture = new Texture({ source: node.imgSource });
-          const sprite = new Sprite(node.imgTexture);
-          node.baseW = width;
-          node.baseH = height;
+          const entry = this.acquireBlob(visual.bytes, bake, ch.member?.palette, visual.remapPalette, ink7Key);
+          node.blobEntry = entry;
+          const sprite = new Sprite(entry.texture);
+          node.baseW = entry.width;
+          node.baseH = entry.height;
           node.visual = sprite;
           node.container.addChild(sprite);
         }
-      } else {
-        const entry = this.acquireBlob(visual.bytes, bake, ch.member?.palette, visual.remapPalette, ink7Key);
-        node.blobEntry = entry;
-        const sprite = new Sprite(entry.texture);
-        node.baseW = entry.width;
-        node.baseH = entry.height;
-        node.visual = sprite;
-        node.container.addChild(sprite);
-      }
       }
     }
     this.refreshChannel(channel);
@@ -783,12 +782,12 @@ export class PixiStage implements StageAdapter {
         imgTransparent,
         bgFill: node.bgFill
           ? {
-              w: Math.round(node.bgFill.width),
-              h: Math.round(node.bgFill.height),
-              scaleX: +node.bgFill.scale.x.toFixed(2),
-              scaleY: +node.bgFill.scale.y.toFixed(2),
-              visible: node.bgFill.visible,
-            }
+            w: Math.round(node.bgFill.width),
+            h: Math.round(node.bgFill.height),
+            scaleX: +node.bgFill.scale.x.toFixed(2),
+            scaleY: +node.bgFill.scale.y.toFixed(2),
+            visible: node.bgFill.visible,
+          }
           : null,
       });
     }

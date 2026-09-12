@@ -4,6 +4,7 @@ import { DirectorEngine } from './engine/engine.js';
 import { WebAudioPlayer } from './engine/audio.js';
 import { PixiStage } from './stage/pixi.js';
 import { rasterizeTextMember } from './stage/text.js';
+import { reclaimIfLegacyPage } from './legacy/reclaim.js';
 import { PersistWorker } from './worker/persist.js';
 
 const SparkBase = (typeof HTMLElement !== 'undefined' ? HTMLElement : class {}) as typeof HTMLElement;
@@ -62,6 +63,17 @@ export class SparkElement extends SparkBase {
 
       const engine = new DirectorEngine(null);
       this.engine = engine;
+      // Retry the realm repair here too: an IIFE bundle loaded from <head> runs it
+      // before <body> exists, and the reference frame needs a host element.
+      const reclaimed = reclaimIfLegacyPage();
+      if (reclaimed && reclaimed.changed) {
+        const sample = [...reclaimed.restored, ...reclaimed.unshadowed, ...reclaimed.dropped].slice(0, 5).join(', ');
+        engine.log(
+          `legacy page realm reclaimed: ${reclaimed.restored.length} standard members restored, ` +
+          `${reclaimed.unshadowed.length} DOM shadows removed, ${reclaimed.dropped.length} toJSON hooks dropped, ` +
+          `${reclaimed.hidden.length} legacy additions hidden from for..in (${sample}${reclaimed.changed > 5 ? ', …' : ''})`,
+        );
+      }
       engine.runMode = 'Plugin';
       engine.audioHost = new WebAudioPlayer();
       engine.textRasterizer = rasterizeTextMember;

@@ -1,3 +1,9 @@
+// Must stay first: repairs a Prototype-era page realm (restores the built-ins such
+// a page clobbers) before any later module -- pixi.js above all -- is evaluated.
+import './legacy/reclaim.js';
+
+export { reclaimIfLegacyPage, reclaimLegacyGlobals, legacyReclaimReport, looksLikeLegacyPage } from './legacy/reclaim.js';
+export type { ReclaimReport } from './legacy/reclaim.js';
 export { DirectorEngine } from './engine/engine.js';
 export type { StageAdapter, ChannelVisual, MemberHostApi } from './engine/engine.js';
 export { Channel } from './engine/sprites.js';

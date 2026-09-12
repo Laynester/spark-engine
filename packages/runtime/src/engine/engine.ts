@@ -857,7 +857,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         const host = toLingoString(args[2] ?? '');
         const port = toLingoString(args[3] ?? '');
         const mode = Math.round(asNum(args[5] ?? 0));
-        const url = host && port ? `${wsScheme()}://${host}:${port}` : this.multiuserUrl ?? '';
+        const url = host && port ? `${wsScheme()}://${host}${port == "0" ? '' : ':' + port}` : this.multiuserUrl ?? '';
         if (!url) {
           this.log(`net: multiuser connect (no ws url): no WebSocket in this environment — stub`);
           return 0;
@@ -916,7 +916,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
             } else if (ArrayBuffer.isView(d)) {
               this.ingestNetBytes(st, new Uint8Array(d.buffer, d.byteOffset, d.byteLength));
             } else if (typeof Blob !== 'undefined' && d instanceof Blob) {
-              d.arrayBuffer().then((ab) => this.ingestNetBytes(st, new Uint8Array(ab))).catch(() => {  });
+              d.arrayBuffer().then((ab) => this.ingestNetBytes(st, new Uint8Array(ab))).catch(() => { });
             } else if (typeof d === 'string') {
               this.ingestNetText(st, d);
             }
@@ -941,7 +941,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         if (isRawBytesSend) {
           data = toLingoString(args[2] ?? '');
           if (data.length === 1 && data.charCodeAt(0) === 0) {
-            try { st.socket.close(); } catch {  }
+            try { st.socket.close(); } catch { }
             st.socket = null;
             return 0;
           }
@@ -992,7 +992,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       case 'flushnetmessages': {
         const st = this.multiuserState.get(obj.id);
         if (st?.socket) {
-          try { st.socket.close(); } catch {  }
+          try { st.socket.close(); } catch { }
           st.socket = null;
         }
         return 0;
@@ -1076,7 +1076,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
           if (st.mode === 0 && st.logon) {
             try {
               this.persistWorker?.send(msg.url, st.logon);
-            } catch {  }
+            } catch { }
           }
           st.queue.push({ subject: 'ConnectToNetServer', content: '' });
         }
@@ -1727,9 +1727,9 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         if (typeof v === 'string' && ['char', 'word', 'line', 'item', 'paragraph'].includes(seg.name)) {
           const parts =
             seg.name === 'char' ? v.split('') :
-            seg.name === 'word' ? v.split(/\s+/).filter(Boolean) :
-            seg.name === 'item' ? v.split(this.itemDelim) :
-            v.split('\n');
+              seg.name === 'word' ? v.split(/\s+/).filter(Boolean) :
+                seg.name === 'item' ? v.split(this.itemDelim) :
+                  v.split('\n');
           if (parts.length === 0) return '';
           if (seg.qualifier === 'last') return parts[parts.length - 1];
           if (seg.qualifier === 'first') return parts[0];
@@ -2763,8 +2763,8 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   private soundMemberRef(member: LVal): LMemberRef | null {
     return member instanceof LMemberRefClass ? member :
       typeof member === 'number' ? this.getMember(Math.round(member)) :
-      typeof member === 'string' ? this.getMemberByName(member) :
-      null;
+        typeof member === 'string' ? this.getMemberByName(member) :
+          null;
   }
 
   puppetSound(channel: number, member: LVal): void {
@@ -2898,9 +2898,9 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       if (memberVal !== VOID && memberVal !== undefined && memberVal !== 0) {
         ref =
           memberVal instanceof LMemberRefClass ? memberVal :
-          typeof memberVal === 'number' ? this.getMember(Math.round(memberVal)) :
-          typeof memberVal === 'string' ? this.getMemberByName(memberVal) :
-          null;
+            typeof memberVal === 'number' ? this.getMember(Math.round(memberVal)) :
+              typeof memberVal === 'string' ? this.getMemberByName(memberVal) :
+                null;
       }
       if (!ref) {
         ref = this.soundChannel(channel).memberRef;
@@ -2965,9 +2965,9 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       const memberVal = next instanceof LPropListClass ? (next.props.get('member') ?? VOID) : next;
       const ref =
         memberVal instanceof LMemberRefClass ? memberVal :
-        typeof memberVal === 'number' ? this.getMember(Math.round(memberVal)) :
-        typeof memberVal === 'string' ? this.getMemberByName(memberVal) :
-        null;
+          typeof memberVal === 'number' ? this.getMember(Math.round(memberVal)) :
+            typeof memberVal === 'string' ? this.getMemberByName(memberVal) :
+              null;
       if (!ref) continue;
       this.playSoundChannel(channel, ref, false);
       return;
@@ -3216,7 +3216,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       case 'fixedlinespace':
         return member.fixedLineSpace ?? 0;
       case 'fontstyle':
-        return member.fontStyle ?? new LList([new LSymbol('plain')]);      case 'filename':
+        return member.fontStyle ?? new LList([new LSymbol('plain')]); case 'filename':
         return member.fileName ?? '';
       case 'duration':
         if (member.kind === 'sound' && member.raw) {
@@ -3382,11 +3382,11 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
             member.kind = src.kind;
             member.text = src.text;
             member.script = src.script;
-          }                  if (src.raw) {
-                    member.raw = src.raw;
-                    member.palette = src.palette;
-                  }
-                  else if (src.image) {
+          } if (src.raw) {
+            member.raw = src.raw;
+            member.palette = src.palette;
+          }
+          else if (src.image) {
             member.image = src.image;
             this.imageOwners.set(src.image, member);
           }
@@ -3879,7 +3879,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     if (!cast) return;
     const p = prop.toLowerCase();
     if (p === 'preloadmode') cast.preloadMode = Math.round(asNum(value));
-    else    if (p === 'name') {
+    else if (p === 'name') {
       const old = cast.name;
       const newName = toLingoString(value);
       const prior = this.castByName.get(newName);
