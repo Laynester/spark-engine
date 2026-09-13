@@ -445,6 +445,17 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   private uid = 0;
   private slotLastCast = new Map<number, string>();
   private paletteCache = new Map<string, number[][]>();
+  private theCache = new Map<string, LVal>();
+  private theCacheFrame = -1;
+
+  private getTheCacheKey(head: string, chain: TheSegment[]): string {
+    let key = head.toLowerCase();
+    for (const seg of chain) {
+      key += '|' + seg.name.toLowerCase();
+      if (seg.arg) key += ':' + JSON.stringify(seg.arg);
+    }
+    return key;
+  }
 
   private readPalette(loader: BundleLoader, path: string): number[][] | undefined {
     const cached = this.paletteCache.get(path);
@@ -733,6 +744,10 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   tick(): void {
     if (!this.booted) return;
     this.frameCount++;
+    if (this.theCacheFrame !== this.frameCount) {
+      this.theCache.clear();
+      this.theCacheFrame = this.frameCount;
+    }
     this.completeNetRequests();
     this.fireTimeouts();
     this.fireDelays();
@@ -1633,67 +1648,75 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
 
   getThe(head: string, chain: TheSegment[]): LVal {
     const h = head.toLowerCase();
+    const cacheKey = this.getTheCacheKey(head, chain);
+    const cached = this.theCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    let result: LVal = VOID;
+    let cacheable = false;
+
     if (chain.length === 0) {
       switch (h) {
-        case 'frame': return this.frame;
-        case 'frametempo': return this.frameTempo;
-        case 'rollover': return this.rollover();
-        case 'stage': return this.getStage();
-        case 'stageleft': return this.stageLeft;
-        case 'stageright': return this.stageRight;
-        case 'stagetop': return this.stageTop;
-        case 'stagebottom': return this.stageBottom;
-        case 'tracescript': return this.traceScript;
-        case 'tracelogfile': return this.traceLogFile;
-        case 'activewindow': return new LWindowRefClass(this.activeWindow, this);
-        case 'title': return '';
-        case 'runmode': return this.runMode;
-        case 'platform': return 'Windows,32';
-        case 'exitlock': return 0;
-        case 'debugplaybackenabled': return 0;
-        case 'itemdelimiter': return this.itemDelim;
-        case 'moviepath': return this.moviePath;
-        case 'paramcount': return this.interp.currentArgs().length;
-        case 'lastchannel': return this.lastChannel;
-        case 'alerthook': return this.alertHookValue;
-        case 'clickloc': return new LPointClass(0, 0);
-        case 'clickon': return this.clickOnChannel;
-        case 'doubleclick': return this.doubleClick ? 1 : 0;
-        case 'mousedown': return this.mouseButton === 'down' ? 1 : 0;
-        case 'mouseup': return this.mouseButton === 'down' ? 0 : 1;
-        case 'mouseh': return this.mouseH;
-        case 'mousev': return this.mouseV;
-        case 'mouseloc': return new LPointClass(this.mouseH, this.mouseV);
-        case 'keyboardfocussprite': return this.keyboardFocusSprite;
-        case 'key': return this.lastKey;
-        case 'keypressed': return this.keyPressed;
-        case 'keycode': return this.lastKeyCode;
-        case 'keydown': return this.keyDownActive ? 1 : 0;
-        case 'keyup': return this.keyDownActive ? 0 : 1;
-        case 'lastkey': return this.lastKey;
-        case 'floatprecision': return this.floatPrecision;
-        case 'maxinteger': return 2147483647;
-        case 'shiftdown': return this.shiftDown ? 1 : 0;
-        case 'optiondown': return this.optionDown ? 1 : 0;
-        case 'commanddown': return this.commandDown ? 1 : 0;
-        case 'controldown': return this.controlDown ? 1 : 0;
-        case 'colordepth': return 32;
-        case 'longtime': return new Date().toLocaleString('en-US');
-        case 'shorttime': return new Date().toLocaleTimeString('en-US');
-        case 'abbrevtime': return new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: 'numeric' });
-        case 'longdate': return new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-        case 'shortdate': return new Date().toLocaleDateString('en-US');
-        case 'abbrevdate': return new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-        case 'time': return new Date().toLocaleTimeString('en-US');
-        case 'date': return new Date().toLocaleDateString('en-US');
+        case 'frame': result = this.frame; cacheable = true; break;
+        case 'frametempo': result = this.frameTempo; cacheable = true; break;
+        case 'rollover': result = this.rollover(); break;
+        case 'stage': result = this.getStage(); cacheable = true; break;
+        case 'stageleft': result = this.stageLeft; cacheable = true; break;
+        case 'stageright': result = this.stageRight; cacheable = true; break;
+        case 'stagetop': result = this.stageTop; cacheable = true; break;
+        case 'stagebottom': result = this.stageBottom; cacheable = true; break;
+        case 'tracescript': result = this.traceScript; break;
+        case 'tracelogfile': result = this.traceLogFile; break;
+        case 'activewindow': result = new LWindowRefClass(this.activeWindow, this); break;
+        case 'title': result = ''; cacheable = true; break;
+        case 'runmode': result = this.runMode; cacheable = true; break;
+        case 'platform': result = 'Windows,32'; cacheable = true; break;
+        case 'exitlock': result = 0; cacheable = true; break;
+        case 'debugplaybackenabled': result = 0; cacheable = true; break;
+        case 'itemdelimiter': result = this.itemDelim; cacheable = true; break;
+        case 'moviepath': result = this.moviePath; cacheable = true; break;
+        case 'paramcount': result = this.interp.currentArgs().length; break;
+        case 'lastchannel': result = this.lastChannel; cacheable = true; break;
+        case 'alerthook': result = this.alertHookValue; cacheable = true; break;
+        case 'clickloc': result = new LPointClass(0, 0); break;
+        case 'clickon': result = this.clickOnChannel; break;
+        case 'doubleclick': result = this.doubleClick ? 1 : 0; break;
+        case 'mousedown': result = this.mouseButton === 'down' ? 1 : 0; break;
+        case 'mouseup': result = this.mouseButton === 'down' ? 0 : 1; break;
+        case 'mouseh': result = this.mouseH; break;
+        case 'mousev': result = this.mouseV; break;
+        case 'mouseloc': result = new LPointClass(this.mouseH, this.mouseV); break;
+        case 'keyboardfocussprite': result = this.keyboardFocusSprite; break;
+        case 'key': result = this.lastKey; break;
+        case 'keypressed': result = this.keyPressed; break;
+        case 'keycode': result = this.lastKeyCode; break;
+        case 'keydown': result = this.keyDownActive ? 1 : 0; break;
+        case 'keyup': result = this.keyDownActive ? 0 : 1; break;
+        case 'lastkey': result = this.lastKey; break;
+        case 'floatprecision': result = this.floatPrecision; cacheable = true; break;
+        case 'maxinteger': result = 2147483647; cacheable = true; break;
+        case 'shiftdown': result = this.shiftDown ? 1 : 0; cacheable = true; break;
+        case 'optiondown': result = this.optionDown ? 1 : 0; cacheable = true; break;
+        case 'commanddown': result = this.commandDown ? 1 : 0; cacheable = true; break;
+        case 'controldown': result = this.controlDown ? 1 : 0; cacheable = true; break;
+        case 'colordepth': result = 32; cacheable = true; break;
+        case 'longtime': result = new Date().toLocaleString('en-US'); break;
+        case 'shorttime': result = new Date().toLocaleTimeString('en-US'); break;
+        case 'abbrevtime': result = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: 'numeric' }); break;
+        case 'longdate': result = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }); break;
+        case 'shortdate': result = new Date().toLocaleDateString('en-US'); break;
+        case 'abbrevdate': result = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); break;
+        case 'time': result = new Date().toLocaleTimeString('en-US'); break;
+        case 'date': result = new Date().toLocaleDateString('en-US'); break;
         case 'xtralist': {
           const xtras = new LList([
             new LPropListClass(new PropPairs([['name', 'Multiusr'], ['fileName', 'Multiusr.x32']])),
           ]);
-          return xtras;
+          result = xtras;
+          break;
         }
         case 'environment': {
-          return new LPropListClass(new PropPairs([
+          result = new LPropListClass(new PropPairs([
             ['productName', 'Macromedia Director'],
             ['productVersion', '10.1'],
             ['productBuildVersion', 'R31'],
@@ -1702,25 +1725,24 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
             ['runMode', 'Plugin'],
             ['colorDepth', 32],
           ]));
+          break;
         }
-        case 'seconds': return Math.floor(Date.now() / 1000);
-        case 'ticks': return Math.floor(Date.now() / 60);
-        case 'milliseconds': return Date.now();
-        case 'timer': return Date.now() - this.timerStart;
+        case 'seconds': result = Math.floor(Date.now() / 1000); break;
+        case 'ticks': result = Math.floor(Date.now() / 60); break;
+        case 'milliseconds': result = Date.now(); break;
+        case 'timer': result = Date.now() - this.timerStart; break;
         default:
           this.warn(`the ${head}: unsupported property`);
-          return VOID;
+          result = VOID;
       }
-    }
-    if (h === 'count' && chain.length === 1) {
+    } else if (h === 'count' && chain.length === 1) {
       const argE = chain[0].arg ?? { kind: 'ident', name: chain[0].name } as Expr;
       const v = this.evalExprNode(argE);
-      if (v instanceof LList) return v.items.length;
-      if (v instanceof LPropListClass) return v.props.size;
-      if (typeof v === 'string') return v.length;
-      return 0;
-    }
-    if (h === 'chunk') {
+      if (v instanceof LList) result = v.items.length;
+      else if (v instanceof LPropListClass) result = v.props.size;
+      else if (typeof v === 'string') result = v.length;
+      else result = 0;
+    } else if (h === 'chunk') {
       const seg = chain[0];
       if (seg.arg) {
         const v = this.evalExprNode(seg.arg);
@@ -1730,141 +1752,164 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
               seg.name === 'word' ? v.split(/\s+/).filter(Boolean) :
                 seg.name === 'item' ? v.split(this.itemDelim) :
                   v.split('\n');
-          if (parts.length === 0) return '';
-          if (seg.qualifier === 'last') return parts[parts.length - 1];
-          if (seg.qualifier === 'first') return parts[0];
-          if (seg.qualifier === 'middle') return parts[Math.floor(parts.length / 2)];
-          return parts[parts.length - 1];
+          if (parts.length === 0) result = '';
+          else if (seg.qualifier === 'last') result = parts[parts.length - 1];
+          else if (seg.qualifier === 'first') result = parts[0];
+          else if (seg.qualifier === 'middle') result = parts[Math.floor(parts.length / 2)];
+          else result = parts[parts.length - 1];
+        } else {
+          result = VOID;
         }
-        return VOID;
+      } else {
+        result = VOID;
       }
-    }
-    if (h === 'number') {
+    } else if (h === 'number') {
       const seg0 = chain[0];
       const name = seg0.name.toLowerCase();
       if (name === 'castlib' && seg0.arg) {
         const cast = this.getCastLib(this.evalExprNode(seg0.arg));
-        return cast?.number ?? 0;
-      }
-      if (name === 'castlibs') return this.casts.length;
-      if (name === 'members') return this.casts[0]?.members.size ?? 0;
-      if (name === 'castmembers') {
+        result = cast?.number ?? 0;
+      } else if (name === 'castlibs') {
+        result = this.casts.length;
+      } else if (name === 'members') {
+        result = this.casts[0]?.members.size ?? 0;
+      } else if (name === 'castmembers') {
         const seg1 = chain[1];
         if (seg1 && seg1.name.toLowerCase() === 'castlib' && seg1.arg) {
           const cast = this.getCastLib(this.evalExprNode(seg1.arg));
-          if (!cast) return 0;
-          const c = this.casts[cast.number - 1];
-          let max = 0;
-          if (c) for (const num of c.members.keys()) if (num > max) max = num;
-          return max;
+          if (!cast) result = 0;
+          else {
+            const c = this.casts[cast.number - 1];
+            let max = 0;
+            if (c) for (const num of c.members.keys()) if (num > max) max = num;
+            result = max;
+          }
+        } else {
+          result = 0;
         }
-        return 0;
-      }
-      if (name === 'lines' || name === 'items' || name === 'words' || name === 'chars') {
+      } else if (name === 'lines' || name === 'items' || name === 'words' || name === 'chars') {
         const subjectE = chain[1]
           ? (chain[1].arg ?? { kind: 'ident', name: chain[1].name } as Expr)
           : (seg0.arg ?? { kind: 'ident', name: seg0.name } as Expr);
         const v = this.evalExprNode(subjectE);
         if (typeof v === 'string') {
-          if (name === 'lines') return v.split('\n').length;
-          if (name === 'items') return v.split(this.itemDelim).length;
-          if (name === 'words') return v.split(/\s+/).filter(Boolean).length;
-          return v.length;
+          if (name === 'lines') result = v.split('\n').length;
+          else if (name === 'items') result = v.split(this.itemDelim).length;
+          else if (name === 'words') result = v.split(/\s+/).filter(Boolean).length;
+          else result = v.length;
+        } else {
+          result = 0;
         }
-        return 0;
-      }
-    }
-    const seg0 = chain[0];
-    const subjectE = seg0.arg ?? (chain.length === 1 ? { kind: 'ident', name: seg0.name } as Expr : undefined);
-    if (subjectE) {
-      const subject = this.evalExprNode(subjectE);
-      if (subject instanceof LMemberRefClass) {
-        return this.getMemberProp(subject, head);
-      }
-      if (h === 'image' && subject instanceof LMemberRefClass) {
-        const member = this.memberFor(subject);
-        return member ? this.memberImage(member) : new LImage(0, 0);
-      }
-      if (subject instanceof LSpriteRefClass) {
-        return this.getSpriteProp(subject, head);
-      }
-      if (subject instanceof LImage) {
-        switch (h) {
-          case 'rect':
-            return new LRectClass(0, 0, subject.width, subject.height);
-          case 'depth':
-            return subject.depth ?? 32;
-          case 'width':
-            return subject.width;
-          case 'height':
-            return subject.height;
-          case 'paletteref':
-            return subject.paletteRef ?? VOID;
-          case 'usealpha':
-            return subject.useAlpha ? 1 : 0;
-          default:
-            return VOID;
-        }
-      }
-      if (subject instanceof LObjectClass) {
-        let cur: LObjectClass | null = subject;
-        let hops = 0;
-        while (cur) {
-          if (cur.script && scriptPropsLower(cur.script).has(h)) {
-            if (cur.props.has(head)) return cur.props.get(head)!;
-            if (cur.props.has(h)) return cur.props.get(h)!;
-            return VOID;
+      } else {
+        // Fall through to subject evaluation for arbitrary expressions that may yield a castLibRef
+        const subjectE = seg0.arg ?? (chain.length === 1 ? { kind: 'ident', name: seg0.name } as Expr : undefined);
+        if (subjectE) {
+          const subject = this.evalExprNode(subjectE);
+          if (subject instanceof LCastLibRefClass) {
+            result = subject.number;
+          } else {
+            result = VOID;
           }
-          if (++hops > 32) break;
-          const anc = cur.props.get('ancestor');
-          cur = anc instanceof LObjectClass ? anc : null;
+        } else {
+          result = VOID;
         }
-        if (subject.props.has(head)) return subject.props.get(head)!;
-        if (subject.props.has(h)) return subject.props.get(h)!;
-        return VOID;
       }
-      if (subject instanceof LPropListClass) {
-        const k = subject.props.has(head) ? head : subject.props.has(h) ? h : undefined;
-        return k !== undefined ? subject.props.get(k) ?? VOID : VOID;
+    } else {
+      const seg0 = chain[0];
+      const subjectE = seg0.arg ?? (chain.length === 1 ? { kind: 'ident', name: seg0.name } as Expr : undefined);
+      if (subjectE) {
+        const subject = this.evalExprNode(subjectE);
+        if (subject instanceof LMemberRefClass) {
+          result = this.getMemberProp(subject, head);
+        } else if (h === 'image' && subject instanceof LMemberRefClass) {
+          const member = this.memberFor(subject);
+          result = member ? this.memberImage(member) : new LImage(0, 0);
+        } else if (subject instanceof LSpriteRefClass) {
+          result = this.getSpriteProp(subject, head);
+        } else if (subject instanceof LImage) {
+          switch (h) {
+            case 'rect': result = new LRectClass(0, 0, subject.width, subject.height); break;
+            case 'depth': result = subject.depth ?? 32; break;
+            case 'width': result = subject.width; break;
+            case 'height': result = subject.height; break;
+            case 'paletteref': result = subject.paletteRef ?? VOID; break;
+            case 'usealpha': result = subject.useAlpha ? 1 : 0; break;
+            default: result = VOID;
+          }
+        } else if (subject instanceof LObjectClass) {
+          let cur: LObjectClass | null = subject;
+          let hops = 0;
+          while (cur) {
+            if (cur.script && scriptPropsLower(cur.script).has(h)) {
+              if (cur.props.has(head)) { result = cur.props.get(head)!; break; }
+              if (cur.props.has(h)) { result = cur.props.get(h)!; break; }
+              result = VOID; break;
+            }
+            if (++hops > 32) break;
+            const anc = cur.props.get('ancestor');
+            cur = anc instanceof LObjectClass ? anc : null;
+          }
+          if (result === VOID) {
+            if (subject.props.has(head)) result = subject.props.get(head)!;
+            else if (subject.props.has(h)) result = subject.props.get(h)!;
+            else result = VOID;
+          }
+        } else if (subject instanceof LPropListClass) {
+          const k = subject.props.has(head) ? head : subject.props.has(h) ? h : undefined;
+          result = k !== undefined ? subject.props.get(k) ?? VOID : VOID;
+        } else if (subject instanceof LCastLibRefClass) {
+          if (h === 'number') result = subject.number;
+          else if (h === 'name') result = subject.name;
+          else result = VOID;
+        } else if (subject instanceof LPointClass) {
+          if (h === 'loch') result = subject.locH;
+          else if (h === 'locv') result = subject.locV;
+          else result = VOID;
+        } else if (h === 'rollover') {
+          result = this.rollover();
+        } else {
+          result = VOID;
+        }
+      } else {
+        this.warn(`the ${head} of ...: unsupported [${chain.map((s) => s.name + (s.arg ? '(arg)' : '')).join(' <- ')}]`);
+        result = VOID;
       }
-      if (subject instanceof LCastLibRefClass) {
-        if (h === 'number') return subject.number;
-        if (h === 'name') return subject.name;
-        return VOID;
-      }
-      if (subject instanceof LPointClass) {
-        if (h === 'loch') return subject.locH;
-        if (h === 'locv') return subject.locV;
-        return VOID;
-      }
-      if (h === 'rollover') return this.rollover();
     }
-    this.warn(`the ${head} of ...: unsupported [${chain.map((s) => s.name + (s.arg ? '(arg)' : '')).join(' <- ')}]`);
-    return VOID;
+
+    if (cacheable) this.theCache.set(cacheKey, result);
+    return result;
   }
 
   setThe(head: string, chain: TheSegment[], value: LVal): void {
     void chain;
     const h = head.toLowerCase();
+    const cacheableKeys = new Set([
+      'frame', 'frametempo', 'stage', 'stageleft', 'stageright', 'stagetop', 'stagebottom',
+      'tracescript', 'tracelogfile', 'title', 'runmode', 'platform', 'exitlock', 'debugplaybackenabled',
+      'itemdelimiter', 'moviepath', 'lastchannel', 'alerthook', 'clickon', 'doubleclick',
+      'mousedown', 'mouseup', 'mouseh', 'mousev', 'keyboardfocussprite', 'key', 'keypressed',
+      'keycode', 'keydown', 'keyup', 'lastkey', 'floatprecision', 'maxinteger', 'shiftdown',
+      'optiondown', 'commanddown', 'controldown', 'colordepth', 'castlibs', 'members',
+    ]);
     switch (h) {
       case 'frame':
         this.frame = Math.round(asNum(value));
-        return;
+        break;
       case 'frametempo':
         this.frameTempo = Math.round(asNum(value));
-        return;
+        break;
       case 'itemdelimiter':
         this.itemDelim = toLingoString(value);
-        return;
+        break;
       case 'alerthook':
         this.alertHookValue = value;
-        return;
+        break;
       case 'tracescript':
         this.traceScript = asNum(value) === 0 ? 0 : 1;
-        return;
+        break;
       case 'tracelogfile':
         this.traceLogFile = toLingoString(value);
-        return;
+        break;
       case 'activewindow':
         this.activeWindow =
           (value instanceof LWindowRefClass && this.windows.has(value.id))
@@ -1872,7 +1917,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
             : (typeof value === 'string' && this.windows.has(value))
               ? value
               : 'stage';
-        return;
+        break;
       case 'exitlock':
       case 'debugplaybackenabled':
       case 'selstart':
@@ -1881,21 +1926,30 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       case 'mouseh':
       case 'keyboardfocussprite':
         this.keyboardFocusSprite = Math.max(0, Math.round(asNum(value)));
-        return;
+        break;
       case 'mousev':
       case 'title':
-        return;
+        break;
       case 'floatprecision':
         this.floatPrecision = Math.max(0, Math.min(255, Math.round(asNum(value))));
-        return;
+        break;
       case 'shiftdown':
       case 'optiondown':
       case 'commanddown':
       case 'controldown':
-        return;
+        break;
       default:
         this.warn(`set the ${head}: unsupported`);
     }
+    // Invalidate cache for settable properties that we cache
+    const cacheableSetKeys = new Set([
+      'frame', 'frametempo', 'stage', 'stageleft', 'stageright', 'stagetop', 'stagebottom',
+      'tracescript', 'tracelogfile', 'title', 'runmode', 'platform', 'exitlock', 'debugplaybackenabled',
+      'itemdelimiter', 'moviepath', 'lastchannel', 'alerthook',
+      'key', 'keypressed', 'keycode',
+      'floatprecision', 'maxinteger',
+    ]);
+    if (cacheableSetKeys.has(h)) this.theCache.clear();
   }
 
   resolveGlobalHandler(name: string): GlobalHandlerRef | null {
