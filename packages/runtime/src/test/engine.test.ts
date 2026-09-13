@@ -3467,6 +3467,52 @@ test('rgb()/color() return #color objects; ilk(x, #color) gates pass', () => {
   assert.equal(e.interp.callHandler(script, run, [], null, new Set()), 'color:111:128,64,32:1');
 });
 
+/**
+ * `color(#rgb, r, g, b)` — the colour SPACE is its own argument (Director
+ * scripting reference, "color()": `color(#rgb, redValue, greenValue,
+ * blueValue)` / `color(#paletteIndex, paletteIndexNumber)`). The 1-arg
+ * `color(int)` path read a[0..2] as the channels whenever there were 3 or more,
+ * so the 4-argument form shifted by one: `#rgb` became red 0 and the blue
+ * channel was dropped.
+ *
+ * That IS the respect flash — `hh_human/0016 Respect Flash Effect Class` does
+ *   tsprite.ink = 41
+ *   pHostSpriteData[#sprite].color = color(#rgb, 247, 204, 59)
+ * and rgb(0, 247, 204) is a cyan, which is why a flash authored as GOLD looks
+ * blue. The same call in `hh_room_utils/0075 Cloud Animation Effect Class`
+ * (`color(#rgb, 255,255,255)` white, `color(#rgb, 50,50,50)` grey) made the
+ * clouds cyan-tinted too.
+ */
+test('color(#rgb, r, g, b) reads the channels AFTER the colour space', () => {
+  const e = new DirectorEngine();
+  const chan = (expr: string): string => {
+    const c = e.interp.evalExpressionString(expr);
+    assert.ok(c instanceof LColor, `${expr} -> expected an LColor, got ${String(c)}`);
+    const col = c as LColor;
+    return `${col.red},${col.green},${col.blue}`;
+  };
+  // The respect flash's gold and the two darker steps of that same ramp.
+  assert.equal(chan('color(#rgb, 247, 204, 59)'), '247,204,59');
+  assert.equal(chan('color(#rgb, 124, 102, 29)'), '124,102,29');
+  assert.equal(chan('color(#rgb, 62, 51, 15)'), '62,51,15');
+  // The Cloud Animation Effect's white and greys.
+  assert.equal(chan('color(#rgb, 255, 255, 255)'), '255,255,255');
+  assert.equal(chan('color(#rgb, 50, 50, 50)'), '50,50,50');
+  // Unchanged: three bare channels, and the hex-string forms of rgb()/color().
+  assert.equal(chan('color(1, 2, 3)'), '1,2,3');
+  assert.equal(chan('rgb(1, 2, 3)'), '1,2,3');
+  assert.equal(chan('rgb("#00FF00")'), '0,255,0');
+  assert.equal(chan('color("#00FF00")'), '0,255,0');
+  // The other documented space must agree with the `paletteIndex()` builtin
+  // rather than fall through to the black default.
+  const raw = (v: unknown): string => {
+    assert.ok(v instanceof LColor, `expected an LColor, got ${String(v)}`);
+    const col = v as LColor;
+    return `${col.red},${col.green},${col.blue}`;
+  };
+  assert.equal(raw(e.interp.evalExpressionString('color(#paletteIndex, 3)')), raw(e.interp.evalExpressionString('paletteIndex(3)')));
+});
+
 test('image fill/draw/setPixel/crop paint real RGBA and read back size/rect/ilk', () => {
   const e = new DirectorEngine();
   e.addScriptMember(
@@ -4473,6 +4519,40 @@ test('a burst of sprite prop sets coalesces into ONE visual build per sprite', (
   assert.equal(e.getSpriteProp(s, 'locH'), 100);
   e.flushChannelVisuals();
   assert.equal(builds, 1, 'a second flush with no new dirty channels builds nothing');
+});
+
+test('re-assigning a sprite the same castNum does not rebuild its visual', () => {
+  // Avatar Effect Class::setMember rewrites `tsprite.castNum` on EVERY frame: its
+  // #frm list has 16 entries, so the frame counter always advances and tChanges
+  // stays 1 while the effect is on. For fx.3 (UFO) all 16 frames resolve to the
+  // same member name, so the lookup result never actually changes — measured live
+  // as 24 identical writes a second to the effect's extra sprite. Director treats
+  // an identical sprite assignment as a no-op (nothing that is drawn can have
+  // changed); the runtime rebuilt the channel visual — a destroyed and recreated
+  // pixi node + texture — on every one of them.
+  let builds = 0;
+  const adapter = {
+    setBackground() {},
+    resize() {},
+    refreshChannel() {},
+    setChannel() { builds++; },
+  };
+  const e = new DirectorEngine(adapter as never);
+  const m = e.addScriptMember('Bmp', 'unknown', '');
+  m.kind = 'bitmap';
+  const s = e.getSprite(11);
+  const num = (m.castLibNumber << 16) | m.number;
+  e.setSpriteProp(s, 'castNum', num);
+  e.flushChannelVisuals();
+  assert.equal(builds, 1, 'the first assignment builds the visual');
+  for (let i = 0; i < 10; i++) e.setSpriteProp(s, 'castNum', num);
+  e.flushChannelVisuals();
+  assert.equal(builds, 1, 'ten identical castNum writes must not rebuild the visual');
+  const m2 = e.addScriptMember('Bmp2', 'unknown', '');
+  m2.kind = 'bitmap';
+  e.setSpriteProp(s, 'castNum', (m2.castLibNumber << 16) | m2.number);
+  e.flushChannelVisuals();
+  assert.equal(builds, 2, 'a different castNum still rebuilds');
 });
 
 test('ink entering/leaving an alpha-bake mode rebuilds the visual (late matte)', () => {

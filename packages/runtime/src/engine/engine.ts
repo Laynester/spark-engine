@@ -3641,8 +3641,22 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       }
       case 'castnum': {
         const n = Math.round(asNum(value));
-        ch.castNum = n;
         const member = this.membersByGlobal.get(n) ?? this.memberForStaleSlotNumber(n);
+        // Director treats writing a sprite's own cast member back to it as a
+        // no-op: nothing that is drawn can have changed. The corpus leans on
+        // that. Avatar Effect Class::setMember rewrites `tsprite.castNum` on
+        // EVERY frame — its #frm list has 16 entries, so the frame counter always
+        // advances and tChanges stays 1 for the whole life of the effect — and
+        // for the fx.3 UFO all 16 frames resolve to the same member name, so the
+        // lookup result never actually changes (measured live: 24 identical
+        // writes a second to the effect's extra sprite). Rebuilding the channel
+        // visual for each one destroyed and recreated the pixi node and its
+        // texture every frame, which is pure churn for a sprite that cannot have
+        // changed. A genuinely different number — including `castNum = 0` to
+        // clear a sprite whose member was set through `sprite.member` — still
+        // notifies, since the resolved member differs.
+        if (ch.castNum === n && ch.member === (member ?? undefined)) return;
+        ch.castNum = n;
         ch.member = member ?? undefined;
         // castNum deliberately keeps geometry (furniture sets rotation/skew
         // before castNum) — the #member path above is where a recycled sprite

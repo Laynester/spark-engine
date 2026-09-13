@@ -462,6 +462,22 @@ export function createBuiltinTable(): Map<string, BuiltinFn> {
     return colorFrom(a[0] ?? VOID) ?? new LColor(0, 0, 0);
   });
   set(['color'], (b, a) => {
+    // `color(#rgb, r, g, b)` and `color(#paletteIndex, n)` — the leading SYMBOL
+    // is the colour SPACE, not a channel (Director scripting reference,
+    // "color()"). The old `a.length >= 3` read a[0..2] straight, which shifted
+    // the 4-argument form by one: `#rgb` coerced to red 0 and the blue channel
+    // was dropped. That is the respect flash — `hh_human/0016 Respect Flash
+    // Effect Class` sets `#rgb, 247, 204, 59` (gold) and got rgb(0, 247, 204),
+    // a cyan, which is why an authored-gold flash rendered blue; the Cloud
+    // Animation Effect's `#rgb, 255,255,255` white / `50,50,50` grey were
+    // shifted the same way. `color(r, g, b)` with no space still works.
+    const space = a[0] instanceof LSymbol ? a[0].name.toLowerCase() : null;
+    if (space === 'rgb') {
+      return new LColor(Math.round(numArgs(a, 1)), Math.round(numArgs(a, 2)), Math.round(numArgs(a, 3)));
+    }
+    if (space === 'paletteindex') {
+      return b.paletteColor(Math.round(asNum(a[1])));
+    }
     if (a.length >= 3) {
       return new LColor(Math.round(numArgs(a, 0)), Math.round(numArgs(a, 1)), Math.round(numArgs(a, 2)));
     }
