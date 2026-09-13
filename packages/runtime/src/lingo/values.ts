@@ -459,7 +459,7 @@ export class LImage {
 
     const srcPalette = src.palette;
     const hasPalette = srcPalette && srcPalette.length > 0;
-    const matteMask = (ink === 8 || ink === 7) ? matteRegionMask(s, sw, sh, sx0, sy0, srcW, srcH, srcPalette, src.indices) : null;
+    const matteMask = (ink === 8 || ink === 7) ? matteRegionMask(s, sw, sh, sx0, sy0, srcW, srcH, srcPalette, src.indices, ink === 8) : null;
     const srcBgRgb = ink === 36 && hasPalette && (src.depth ?? 32) <= 8 ? srcPalette[0] : null;
 
     const orientDet = orient ? orient.a * orient.e - orient.b * orient.d : 0;
@@ -553,12 +553,29 @@ function combineAlpha(srcAlpha: number, blendAlpha: number): number {
 function alphaBlendPixel(sr: number, sg: number, sb: number, sa: number, dr: number, dg: number, db: number, da: number): [number, number, number, number] {
   if (sa <= 0) return [dr, dg, db, da];
   if (sa >= 255) return [sr, sg, sb, 255];
-  const inv = 255 - sa;
-  const r = Math.trunc((sr * sa + dr * inv) / 255);
-  const g = Math.trunc((sg * sa + dg * inv) / 255);
-  const b = Math.trunc((sb * sa + db * inv) / 255);
-  const a = Math.trunc((sa * sa + da * inv) / 255);
-  return [r, g, b, Math.max(a, sa)];
+  // Straight-alpha "over": a_out = sa + da * (1 - sa).
+  //
+  // The old formula divided the SOURCE term by sa a second time
+  // (`(sa * sa + da * inv) / 255`) and clamped with max(., sa), which silently
+  // DROPPED the destination alpha on every blended draw: an ink-36 element at
+  // blend 50 over a solid panel left the panel at alpha 191, so the room showed
+  // through it. That is the catalogue purse/credits row (`habbo_catalogue.window`
+  // blends 20/30) and the kiosk roommatic input veils (`whitepixel`, blends 70
+  // and 20); measuring the element buffers showed exactly the broken outputs,
+  // alpha 201/214 where a 21%-transparent hole sat over the panel.
+  //
+  // The destination weight also has to carry da, not 255, or the colour is
+  // darkened when drawing onto a still-transparent buffer. For an opaque
+  // destination (da = 255, the common case) both terms collapse to the previous
+  // colour maths, so only the alpha — and the transparent-destination colour —
+  // change.
+  const dw = (da * (255 - sa)) / 255;
+  const a = sa + dw;
+  if (a <= 0) return [dr, dg, db, da];
+  const r = Math.round((sr * sa + dr * dw) / a);
+  const g = Math.round((sg * sa + dg * dw) / a);
+  const b = Math.round((sb * sa + db * dw) / a);
+  return [r, g, b, Math.round(a)];
 }
 
 function maskAlphaFromPixel(s: Uint8Array, si: number): number {
@@ -1085,6 +1102,44 @@ export function lingoMultiply(a: LVal, b: LVal): LVal {
   if (a instanceof LList && b instanceof LList) return listMulList(a, b);
   if (a instanceof LList && !(b instanceof LList)) return listMulScalar(a, b);
   if (b instanceof LList && !(a instanceof LList)) return listMulScalar(b, a);
+  return null;
+}
+
+function divSafe(x: number, d: number): number {
+  return d === 0 ? 0 : x / d;
+}
+
+function listDivScalar(a: LList, s: LVal): LList {
+  const n = asNum(s);
+  return new LList(a.items.map((it) => divSafe(asNum(it), n)));
+}
+
+function scalarDivList(s: LVal, a: LList): LList {
+  const n = asNum(s);
+  return new LList(a.items.map((it) => divSafe(n, asNum(it))));
+}
+
+function listDivList(a: LList, b: LList): LList {
+  return new LList(a.items.map((it, i) => divSafe(asNum(it), asNum(b.items[i] ?? 0))));
+}
+
+/**
+ * Element-wise list division, the `/` counterpart of lingoAdd/lingoSubtract/
+ * lingoMultiply. Director applies an arithmetic operator to every element when
+ * one side is a list (`[255, 128, 0] / 255.0` -> `[1.0, 0.50196, 0]`), but `/`
+ * had no list branch and fell through to `asNum(list)` = 0, so the whole
+ * expression became 0 (or truncated toward zero for integer lists).
+ *
+ * hh_roomdimmer's Color Converter Class opens both converters with a list
+ * divide (`RGBtoHSL`: `tRGB = tRGB / 255.0`, `HSLtoRGB`: `tHSL = tHSL / 255.0`),
+ * so without this the room dimmer's entire colour pipeline evaluates to 0 and
+ * the dimmer never applies a preset. Returns null when neither side is a list
+ * so the interpreter keeps its float-aware scalar path.
+ */
+export function lingoDivide(a: LVal, b: LVal): LVal {
+  if (a instanceof LList && b instanceof LList) return listDivList(a, b);
+  if (a instanceof LList) return listDivScalar(a, b);
+  if (b instanceof LList) return scalarDivList(a, b);
   return null;
 }
 

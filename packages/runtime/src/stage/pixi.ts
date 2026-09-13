@@ -8,8 +8,11 @@ import { alignmentName, type ChannelVisual, type DirectorEngine, type StageAdapt
 import type { Channel } from '../engine/sprites.js';
 import { LImage, LList, LObject, LPoint, LPropList, LSpriteRef, LSymbol } from '../lingo/values.js';
 import type { ShapeDef } from '../engine/members.js';
-import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, bakeSurface, blendModeForInk, cornersAreNearWhite, matteSpriteHitTest, tintSpriteBackground, tintSpriteDarken, SUBTRACT_BLEND_MODE, type BakeMode } from './matte.js';
+import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, bakeSurface, blendModeForInk, cornersAreNearWhite, matteSpriteHitTest, setMatteIdentityFill, tintSpriteBackground, tintSpriteDarken, DARKEST_BLEND_MODE, LIGHTEST_BLEND_MODE, NOT_REVERSE_BLEND_MODE, REVERSE_BLEND_MODE, SUBTRACT_BLEND_MODE, type BakeMode } from './matte.js';
 import { caretBlinkOn, caretX } from './caret.js';
+import { registerInkBlendFilters } from './blendFilters.js';
+import { perf, perfEnabled, perfFrame, perfTimeBake, type PerfMilestone } from '../perf.js';
+import type { DevSnapshot } from './devOverlay.js';
 import { decodeImage } from '../engine/pix8.js';
 
 
@@ -40,6 +43,7 @@ interface ChannelNode {
   bgFillScanBuf?: Uint8Array | null;
   bgFillScanDirty?: boolean;
   bgFillTransparent?: boolean;
+  keyedBuf?: Uint8Array;
 }
 
 interface BlobEntry {
@@ -108,6 +112,9 @@ export class PixiStage implements StageAdapter {
   private stageTexture: Texture | null = null;
   private frameAcc = 0;
   private lastFrameT = 0;
+  /** Channels whose visual currently uses a blend-filter mode (REVERSE/NOT_REVERSE).
+   *  Maintained by `refreshChannel`/`setChannel`; `syncBackBuffer` just checks this. */
+  private _blendFilterChannels = new Set<number>();
 
   constructor(
     private engine: DirectorEngine,
@@ -118,7 +125,8 @@ export class PixiStage implements StageAdapter {
     const { stageWidth: w, stageHeight: h, stageBackground: bg } = this.engine;
     this.app = new Application();
     await this.app.init({ width: w, height: h, background: bg, antialias: false, resolution: 1 });
-    this.registerSubtractBlend();
+    registerInkBlendFilters();
+    this.registerInkBlendModes();
     this.parent.appendChild(this.app.canvas);
 
     this.background = new Graphics().rect(0, 0, w, h).fill(bg);
@@ -135,6 +143,9 @@ export class PixiStage implements StageAdapter {
     this.app.stage.on('pointermove', (e) => this.pointer('mouseMove', e.global.x, e.global.y));
 
     this.app.ticker.add(() => {
+      // Dev counters are read by the overlay (`debugInfo`) and are guarded so the
+      // disabled path is a single boolean test per frame.
+      if (perfEnabled()) perf.frames++;
       this.syncStageImage();
       const now = performance.now();
       const dt = this.lastFrameT ? now - this.lastFrameT : 0;
@@ -144,26 +155,160 @@ export class PixiStage implements StageAdapter {
       if (this.frameAcc > frameMs * 2) this.frameAcc = frameMs * 2;
       if (this.frameAcc >= frameMs) {
         this.frameAcc -= frameMs;
-        this.engine.tick();
+        if (perfEnabled()) {
+          const t0 = performance.now();
+          this.engine.tick();
+          perfFrame('tick', performance.now() - t0);
+        } else {
+          this.engine.tick();
+        }
       }
-      this.syncChannelImages();
+      if (perfEnabled()) {
+        const t0 = performance.now();
+        this.syncChannelImages();
+        perfFrame('sync', performance.now() - t0);
+      } else {
+        this.syncChannelImages();
+      }
+      this.syncBackBuffer();
       this.syncCaret();
     });
   }
 
-  private registerSubtractBlend(): void {
+  /**
+   * Enable the renderer's back buffer while — and only while — a sprite uses an
+   * ink whose blend mode is a pixi blend FILTER (inks 2/6, stage/blendFilters.ts).
+   *
+   * A blend filter samples the destination, which WebGL can only do from a
+   * texture, so pixi renders the frame into an offscreen texture and blits it
+   * out (`GlBackBufferSystem`, `useBackBuffer` defaults to false). Without it the
+   * filter pipe just warns "Blend filter requires backBuffer on WebGL renderer to
+   * be enabled" and the sprite falls back to a normal composite — the ink looks
+   * like it does nothing. Toggling it per frame keeps that extra full-screen
+   * pass off the frame budget for the (overwhelmingly common) case of a scene
+   * with no XOR ink in it; the flag is read at the start of every render, so a
+   * change takes effect on the next one.
+   */
+  private syncBackBuffer(): void {
+    const backBuffer = (this.app.renderer as unknown as { backBuffer?: { useBackBuffer?: boolean } }).backBuffer;
+    if (!backBuffer || typeof backBuffer.useBackBuffer !== 'boolean') return;
+    const needs = this._blendFilterChannels.size > 0;
+    if (backBuffer.useBackBuffer !== needs) backBuffer.useBackBuffer = needs;
+  }
+
+  /**
+   * Register the ink blend modes pixi has no correct built-in for: a real GL
+   * reverse-subtract (ink 35/38 — pixi's advanced 'subtract' is a back-texture
+   * filter that lets the source through verbatim) and GL MIN/MAX for Darkest
+   * (39) / Lightest (37, 40).
+   *
+   * All three preserve the destination ALPHA (srcAlpha factor 0, dstAlpha
+   * factor 1). Pixi's own `min`/`max` map to `[ONE, ONE, ONE, ONE, MIN, MIN]`,
+   * so they take the min/max of the alpha as well: a sprite's transparent
+   * pixels — most of its quad for aliased furniture art — then drove the
+   * destination alpha to 0 and cut a hole through the room. The colour maths is
+   * unchanged (MIN/MAX/reverse-subtract ignore the RGB factors).
+   */
+  private registerInkBlendModes(): void {
     const state = (this.app.renderer as unknown as { state?: { blendModesMap?: Record<string, number[]> } }).state;
     const gl = (this.app.renderer as unknown as { gl?: WebGLRenderingContext | WebGL2RenderingContext }).gl;
-    if (state?.blendModesMap && gl) {
-      state.blendModesMap[SUBTRACT_BLEND_MODE] = [
-        gl.ONE,
-        gl.ONE,
-        gl.ONE,
-        gl.ZERO,
-        gl.FUNC_REVERSE_SUBTRACT,
-        gl.FUNC_ADD,
-      ];
+    if (!state?.blendModesMap || !gl) return;
+    state.blendModesMap[SUBTRACT_BLEND_MODE] = [
+      gl.ONE,
+      gl.ONE,
+      gl.ZERO,
+      gl.ONE,
+      gl.FUNC_REVERSE_SUBTRACT,
+      gl.FUNC_ADD,
+    ];
+    // MIN/MAX need WebGL2 or EXT_blend_minmax; without them the map entry must
+    // stay absent so pixi falls back to normal instead of using `undefined`.
+    const gl2 = gl as WebGL2RenderingContext & { MIN?: number; MAX?: number };
+    const minExt = gl.getExtension?.('EXT_blend_minmax') as { MIN_EXT?: number; MAX_EXT?: number } | null;
+    const minOp = gl2.MIN ?? minExt?.MIN_EXT;
+    const maxOp = gl2.MAX ?? minExt?.MAX_EXT;
+    if (minOp !== undefined) state.blendModesMap[DARKEST_BLEND_MODE] = [gl.ONE, gl.ONE, gl.ZERO, gl.ONE, minOp, gl.FUNC_ADD];
+    if (maxOp !== undefined) state.blendModesMap[LIGHTEST_BLEND_MODE] = [gl.ONE, gl.ONE, gl.ZERO, gl.ONE, maxOp, gl.FUNC_ADD];
+    // Ink 39's keyed rectangle is only drawn as the opaque white MIN identity
+    // while a MIN blend is really bound here (see matte.setMatteIdentityFill):
+    // without it the sprite composites normally, where that opaque rectangle
+    // would be a white box instead of a see-through one. The canvas fallback
+    // never reaches this method, so it keeps the transparent matte.
+    setMatteIdentityFill(minOp !== undefined);
+  }
+
+  /**
+   * Snapshot for the dev overlay (`stage/devOverlay.ts`): what the renderer
+   * actually is, what the runtime is spending its frame on, and the heap. Read
+   * once a second at most, and deliberately read-only — nothing here changes what
+   * a frame draws, so a reported regression cannot be caused by the reporting.
+   */
+  debugInfo(): DevSnapshot {
+    const r = this.app.renderer as unknown as {
+      type?: number;
+      gl?: WebGLRenderingContext | WebGL2RenderingContext;
+      state?: { blendModesMap?: Record<string, number[]> };
+      backBuffer?: { useBackBuffer?: boolean };
+      texture?: { managedTextures?: unknown[] };
+    };
+    const gl = r.gl;
+    let gpu: string | null = null;
+    const glVersion = gl ? ((gl as WebGL2RenderingContext).texStorage2D ? 2 : 1) : null;
+    if (gl) {
+      try {
+        const ext = gl.getExtension('WEBGL_debug_renderer_info') as { UNMASKED_RENDERER_WEBGL?: number } | null;
+        gpu = ext?.UNMASKED_RENDERER_WEBGL
+          ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL))
+          : String(gl.getParameter(gl.VERSION));
+      } catch {
+        gpu = null;
+      }
     }
+    const type = r.type;
+    const renderer =
+      type === 1 ? 'webgl' : type === 2 ? 'webgpu' : type === 3 ? 'webgl+webgpu' : type === 4 ? 'canvas' : `type ${String(type)}`;
+    const box = (this.app.canvas as HTMLCanvasElement | undefined)?.getBoundingClientRect();
+    const map = r.state?.blendModesMap;
+    const mem = (performance as unknown as {
+      memory?: { usedJSHeapSize: number; totalJSHeapSize: number; jsHeapSizeLimit: number };
+    }).memory;
+    return {
+      renderer,
+      glVersion,
+      gpu,
+      backBuffer: r.backBuffer && typeof r.backBuffer.useBackBuffer === 'boolean' ? r.backBuffer.useBackBuffer : null,
+      inkBlendModes: map ? Object.keys(map).filter((k) => k.endsWith('-gl')).sort() : [],
+      screenW: this.app.screen.width,
+      screenH: this.app.screen.height,
+      canvasCssW: box?.width ?? 0,
+      canvasCssH: box?.height ?? 0,
+      dpr: window.devicePixelRatio || 1,
+      nodes: this.nodes.size,
+      textures: r.texture?.managedTextures?.length ?? 0,
+      frames: perf.frames,
+      ticks: perf.ticks,
+      tickMs: perf.tickMs,
+      tickMaxMs: perf.tickMaxMs,
+      tickMaxAt: perf.tickMaxAt,
+      tickTotalMs: perf.tickTotalMs,
+      syncMs: perf.syncMs,
+      syncMaxMs: perf.syncMaxMs,
+      syncMaxAt: perf.syncMaxAt,
+      syncTotalMs: perf.syncTotalMs,
+      bakes: perf.bakes,
+      bakeTotalMs: perf.bakeTotalMs,
+      slowCalls: perf.slowCalls.slice(0, 6),
+      castLibs: this.engine.casts.length,
+      channels: this.engine.channels.length,
+      frameTempo: this.engine.frameTempo,
+      heapUsed: mem ? mem.usedJSHeapSize : null,
+      heapTotal: mem ? mem.totalJSHeapSize : null,
+      heapLimit: mem ? mem.jsHeapSizeLimit : null,
+    };
+  }
+
+  perfMilestones(): PerfMilestone[] {
+    return perf.milestones;
   }
 
   private syncCaret(): void {
@@ -195,7 +340,10 @@ export class PixiStage implements StageAdapter {
     node.caret.visible = caretBlinkOn(performance.now());
   }
 
+  private static readonly BAKE_BATCH = 8;
+
   private syncChannelImages(): void {
+    let processed = 0;
     for (const [channel, node] of this.nodes) {
       if (!node.imgLImage) continue;
       const img = node.imgLImage;
@@ -206,7 +354,10 @@ export class PixiStage implements StageAdapter {
       const ch = this.engine.getChannel(channel);
       const bake = this.bakeForChannel(ch, img, w, h);
       const tint = this.tintForChannel(ch);
-      const baked = bake || tint ? this.bakeImagePixels(node, img, w, h, bake, tint, this.ink7KeyForChannel(ch), ch.ink ?? 0, ch.colorSet ? ch.color : 0, ch.member?.palette) : null;
+      const baked =
+        bake || tint
+          ? perfTimeBake(() => this.bakeImagePixels(node, img, w, h, bake, tint, this.ink7KeyForChannel(ch), ch.ink ?? 0, ch.colorSet ? ch.color : 0, ch.member?.palette))
+          : null;
       const pixels = baked && baked.changed ? baked.pixels : img.ensure();
       const finalBake = baked && baked.changed ? bake : null;
       if (!node.visual || !(node.visual instanceof Sprite)) {
@@ -235,6 +386,7 @@ export class PixiStage implements StageAdapter {
       }
       img.dirty = false;
       this.applyTransform(channel);
+      if (++processed >= PixiStage.BAKE_BATCH) break;
     }
   }
 
@@ -245,7 +397,7 @@ export class PixiStage implements StageAdapter {
     // surface color itself (waterloop tiles are edge-to-edge teal), so never
     // re-bake them.
     if (ch.member?.kind === 'filmloop') return null;
-    if (ch.ink === 1 || ch.ink === 7 || ch.ink === 8 || ch.ink === 36 || ch.ink === 41) return bakeModeForInk(ch.ink);
+    if (ch.ink === 1 || ch.ink === 6 || ch.ink === 7 || ch.ink === 8 || ch.ink === 36 || ch.ink === 41) return bakeModeForInk(ch.ink);
     // Ink 33/34/35/37/38/39/40 (AddPin/Add/SubPin/Sub/Lightest/Darkest/Lighten)
     // composite the art additively/subtractively, so the opaque backing field
     // must be flood-filled out first or it blends in as a solid box. The
@@ -273,7 +425,8 @@ export class PixiStage implements StageAdapter {
   ): { pixels: Uint8ClampedArray; changed: boolean } {
     const n = w * h * 4;
     if (!node.bakeBuf || node.bakeBuf.length !== n) node.bakeBuf = new Uint8ClampedArray(n);
-    const out = bakeSurface(img.ensure(), w, h, bake, tint, ink7Key, ink, fgRgb, palette);
+    const keyed = bake === 'matteIdentity' ? (node.keyedBuf && node.keyedBuf.length === w * h ? node.keyedBuf : (node.keyedBuf = new Uint8Array(w * h))) : null;
+    const out = bakeSurface(img.ensure(), w, h, bake, tint, ink7Key, ink, fgRgb, palette, keyed);
     node.bakeBuf.set(out.pixels);
     return { pixels: node.bakeBuf, changed: out.changed };
   }
@@ -471,6 +624,7 @@ export class PixiStage implements StageAdapter {
 
     if (!visual) {
       node.container.visible = false;
+      this._blendFilterChannels.delete(channel);
       return;
     }
     if (visual.kind === 'text') {
@@ -517,6 +671,7 @@ export class PixiStage implements StageAdapter {
       node.container.addChild(group);
     } else if (visual.image) {
       node.imgLImage = visual.image;
+      visual.image.dirty = false;
       if (visual.image.width >= 1 && visual.image.height >= 1) {
         const img = visual.image;
         const w = Math.round(img.width);
@@ -599,9 +754,13 @@ export class PixiStage implements StageAdapter {
             height = dec.height;
             rgba = new Uint8ClampedArray(dec.rgba);
             if (visual.remapPalette) PixiStage.remapPixels(rgba, dec.indices, ch.member?.palette, visual.remapPalette);
-            if (bake && width > 0 && height > 0) bakeEdgeBackground(rgba, width, height, bake, ch.member?.palette, dec.indices, ink7Key);
+            // Ink 39's identity rectangle stays OPAQUE white, so it is not filtered
+            // out by the tint pass' alpha test and has to be masked off explicitly
+            // (see matte.bakeEdgeBackground / tintSpriteBackground).
+            const keyed = bake === 'matteIdentity' && width > 0 && height > 0 ? new Uint8Array(width * height) : null;
+            if (bake && width > 0 && height > 0) bakeEdgeBackground(rgba, width, height, bake, ch.member?.palette, dec.indices, ink7Key, keyed);
             if (ch.ink === 41) tintSpriteDarken(rgba, width, height, tint, ch.colorSet ? ch.color : 0);
-            else tintSpriteBackground(rgba, width, height, tint);
+            else tintSpriteBackground(rgba, width, height, tint, keyed);
           } catch (e) {
             this.engine.warn(`bitmap decode failed (tint): ${e instanceof Error ? e.message : String(e)}`);
             rgba = null;
@@ -804,6 +963,9 @@ export class PixiStage implements StageAdapter {
     node.visual.visible = ch.visible === 1;
     node.visual.alpha = Math.max(0, Math.min(1, ch.blend / 100));
     node.visual.blendMode = blendModeForInk(ch.ink) as unknown as (typeof node.visual)['blendMode'];
+    const needsFilter =
+      blendModeForInk(ch.ink) === REVERSE_BLEND_MODE || blendModeForInk(ch.ink) === NOT_REVERSE_BLEND_MODE;
+    if (needsFilter) this._blendFilterChannels.add(channel); else this._blendFilterChannels.delete(channel);
     node.container.zIndex = ch.locZ;
     if (node.shape && node.visual instanceof Graphics) {
       node.visual.clear();

@@ -2690,6 +2690,124 @@ test('member.height: non-wrapping #adjust (boxType-unset) text members report CO
   }
 });
 
+test('a stale #adjust box is repaired on every raster read, so Writer masks copy 1:1 (navigator desc)', () => {
+  // Writer::fakeAlphaRender lines up
+  //   tFakeAlpha = image(pMember.width, pMember.height, 8)
+  //   tFakeAlpha.copyPixels(pMember.image, pMember.rect, tFakeAlpha.rect, [#ink: 8])
+  // so it copies the rasterised text THROUGH pMember.rect into an equally
+  // tall mask. When the box sits shorter than the raster, copyPixels does not
+  // copy — it resamples: `syRow = sy0 + trunc(fy * srcH / destH)` with a
+  // 4-row box over an 11-row mask yields the row runs x3,x3,x3,x2. A client
+  // dump of nav_roomnfo_hd decoded exactly that (an 11-row desc band holding
+  // only 4 distinct rows), which is the "navigator description is stretched /
+  // doubled" report. adjust-to-fit has to hold whenever Lingo reads the
+  // raster, not only the first time the raster is built.
+  const { document } = globalThis as { document?: unknown };
+  const draws: Array<[string, number, number]> = [];
+  const ctxMock = {
+    font: '', fillStyle: '', textAlign: '', textBaseline: '',
+    measureText: (s: string) => ({ width: s.length * 5, fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2 }),
+    fillRect: () => undefined,
+    fillText: (t: string, x: number, y: number) => { draws.push([t, x, y]); },
+    // Paint a per-char staircase so every glyph row has a distinct ink count:
+    // a resampled copy repeats rows (x3,x3,x3,x2), a 1:1 copy cannot.
+    getImageData: (_x: number, _y: number, w: number, h: number) => {
+      const data = new Uint8ClampedArray(w * h * 4);
+      for (const [t, x, y] of draws) {
+        for (let c = 0; c < t.length; c++) {
+          for (let r = 0; r <= 7 - Math.min(c, 7); r++) {
+            const px = Math.round(x) + c * 5;
+            const py = Math.round(y) + r;
+            if (px >= 0 && px < w && py >= 0 && py < h) {
+              const o = (py * w + px) * 4;
+              data[o] = 0; data[o + 1] = 0; data[o + 2] = 0; data[o + 3] = 255;
+            }
+          }
+        }
+      }
+      return { data };
+    },
+  };
+  (globalThis as Record<string, unknown>).document = {
+    createElement: () => ({ width: 0, height: 0, getContext: () => ctxMock }),
+  };
+  const inkRows = (img: LImage): number => {
+    const d = img.ensure();
+    let n = 0;
+    for (let y = 0; y < img.height; y++) {
+      for (let x = 0; x < img.width; x++) {
+        if (d[(y * img.width + x) * 4 + 3] > 60) { n++; break; }
+      }
+    }
+    return n;
+  };
+  try {
+    const e = new DirectorEngine();
+    e.getCastLib('Internal');
+    e.textRasterizer = rasterizeTextMember;
+    const gNum = e.createNamedMember('nav_info_desc_writer', 'text', 1);
+    const ref = new LMemberRef(gNum & 0xffff, 'nav_info_desc_writer', 'text', gNum >> 16, e);
+    e.setMemberProp(ref, 'rect', new LRect(0, 0, 190, 0)); // pWriterPlainNormWrap define hint
+    e.setMemberProp(ref, 'font', 'Volter');
+    e.setMemberProp(ref, 'fontsize', 9);
+    e.setMemberProp(ref, 'fixedlinespace', 9);
+    e.setMemberProp(ref, 'topspacing', 1);
+    e.setMemberProp(ref, 'wordwrap', 1);
+    e.setMemberProp(ref, 'text', 'Come and enjoy the party!');
+
+    const member = e.memberFor(ref)!;
+    const raster = e.getMemberProp(ref, 'image') as LImage;
+    assert.equal(raster.height, 11, 'one 9px line at lineH 10 = 11 rows');
+    assert.equal(member.rect!.height, 11, 'the zero-height hint grows to the content');
+    assert.equal(inkRows(raster), 8, 'the mock paints 8 glyph rows');
+
+    // A later box hint (or any writer sharing this member) leaves the box short
+    // while the raster stays cached.
+    member.rect = new LRect(0, 0, 190, 4);
+    assert.equal(member.image!.height, 11, 'raster is still the cached one');
+
+    // fakeAlphaRender reads pMember.height first; that read must repair the box
+    // before Lingo hands pMember.rect to copyPixels as the mask source rect.
+    const maskH = asNum(e.getMemberProp(ref, 'height'));
+    assert.equal(maskH, 11, 'content height is unchanged by the stale box');
+    assert.equal(member.rect!.height, 11, 'stale box repaired before the rect is read');
+
+    const srcRect = e.getMemberProp(ref, 'rect') as LRect;
+    const probe = new LImage(Math.round(srcRect.width), maskH); // 32-bit so the mapping is visible
+    probe.copyPixels(
+      raster,
+      new LRect(0, 0, Math.round(srcRect.width), Math.round(srcRect.height)),
+      new LRect(0, 0, probe.width, probe.height),
+      8,
+    );
+    assert.equal(inkRows(probe), 8, 'the mask copy is 1:1 — a resampled one would smear 8 rows over 11');
+
+    // ...and the box must also SHRINK. The navigator's pWriterPlainNormWrap is
+    // reused for every room: after a 3-line description the box is 31 tall and
+    // the next, one-line room reuses that box (its define() is skipped because
+    // the WIDTH is unchanged). fakeAlphaRender then copies an 11-row raster
+    // through a 31-row rect — `trunc(fy * 11 / 31)` = 0,0,0,1,1,1,2,2,2,3,3,
+    // which is the x3,x3,x3,x2 fingerprint decoded out of the client's
+    // nav_roomnfo_hd dump. The rect has to follow the raster back down.
+    member.rect = new LRect(0, 0, 190, 31); // stale tall box, 11-row raster
+    assert.equal(asNum(e.getMemberProp(ref, 'height')), 11, 'height is the content height');
+    assert.equal(member.rect!.height, 11, 'a stale TALL box shrinks back to the content');
+
+    // boxtype-set members are fixed boxes and must NOT be adjust-fitted.
+    const gBox = e.createNamedMember('fixed_box_writer', 'text', 1);
+    const refBox = new LMemberRef(gBox & 0xffff, 'fixed_box_writer', 'text', gBox >> 16, e);
+    e.setMemberProp(refBox, 'rect', new LRect(0, 0, 190, 40));
+    e.setMemberProp(refBox, 'boxtype', new LSymbol('fixed'));
+    e.setMemberProp(refBox, 'text', 'Fixed box');
+    const boxMember = e.memberFor(refBox)!;
+    e.getMemberProp(refBox, 'image');
+    assert.equal(boxMember.rect!.height, 40, 'a fixed box keeps its rect');
+  } finally {
+    if (document) (globalThis as Record<string, unknown>).document = document;
+    else delete (globalThis as Record<string, unknown>).document;
+  }
+});
+
 test('rasterizeTextMember: fixed-line members bottom-sit glyphs in the line box (U143 dropdown text)', () => {
   // The DropDown class sets tTextMember.fixedLineSpace = pLineHeight (the
   // window-def row height, e.g. 18) with NO topSpacing. Em-box centering
@@ -5278,6 +5396,61 @@ test('copyPixels #color/#bgColor tints grayscale art (purse title brown-on-gold)
   assert.equal(out4[g4 + 2], 238);
 });
 
+test('copyPixels with a blend keeps the panel underneath OPAQUE (no punched hole)', () => {
+  // Window elements are composited into a shared element buffer with
+  // `copyPixels(pimage, rect, rect, pParams)` where pParams carries the layout's
+  // #blend. A blend below 100 must overlay; it must NOT make the panel beneath
+  // it translucent.
+  //
+  // The old alpha formula (`(sa * sa + da * inv) / 255` + max(., sa)) divided
+  // the source term by its own alpha, so an opaque destination came out at
+  // alpha 191 (blend 50) / 201 (blend 70) / 214 (blend 20) — each blended
+  // overlay punched a hole and the room behind showed through. Measured live in
+  // habbo_catalogue.window (its credits row is `catalog_credits_down`, ink 0
+  // blend 20, and the beams are blend 30) and in the kiosk roommatic input
+  // veils (`whitepixel`, ink 36, blends 70 and 20), whose element buffers
+  // carried exactly those 201/214 alphas over the input boxes.
+  const panel = new LImage(4, 4);
+  panel.fillRect(0, 0, 4, 4, new LColor(0, 120, 0));
+  const veil = new LImage(4, 4);
+  veil.fillRect(0, 0, 4, 4, new LColor(221, 221, 221));
+  // (Ink 8 is excluded on purpose: it runs the matte flood-fill first, which on
+  // a uniform surface keys the whole piece — that is the matte picker's job and
+  // is covered by the matte tests, not by the alpha composite.)
+  for (const [ink, blend] of [[36, 128], [36, 179], [36, 51], [0, 128], [32, 128]] as const) {
+    const dst = new LImage(4, 4);
+    dst.copyPixels(panel, new LRect(0, 0, 4, 4), new LRect(0, 0, 4, 4), ink, 255, 0xffffff);
+    dst.copyPixels(veil, new LRect(0, 0, 4, 4), new LRect(0, 0, 4, 4), ink, blend, 0xffffff);
+    const d = dst.ensure();
+    assert.equal(d[3], 255, `ink ${ink} blend ${blend}: the panel under the overlay stays opaque`);
+  }
+  // The blend still blends the colour 50/50 with what is underneath.
+  const dst = new LImage(4, 4);
+  dst.copyPixels(panel, new LRect(0, 0, 4, 4), new LRect(0, 0, 4, 4), 36, 255, 0xffffff);
+  dst.copyPixels(veil, new LRect(0, 0, 4, 4), new LRect(0, 0, 4, 4), 36, 128, 0xffffff);
+  const out = dst.ensure();
+  assert.equal(out[0], 111); // round((221*128 + 0*127) / 255)
+  assert.equal(out[1], 171); // round((221*128 + 120*127) / 255)
+  assert.equal(out[3], 255);
+});
+
+test('copyPixels blend onto a TRANSPARENT buffer keeps the art colour', () => {
+  // Straight-alpha "over": with da = 0 the destination must contribute nothing,
+  // so a half-blend onto a fresh element buffer keeps the source colour and
+  // only its alpha is scaled. The old formula weighted the (empty) destination
+  // by 255-sa and darkened every piece drawn into a new buffer — a shadow/veil
+  // element came out near-black instead of its authored grey.
+  const art = new LImage(2, 1);
+  art.fillRect(0, 0, 2, 1, new LColor(80, 80, 80));
+  const dst = new LImage(2, 1);
+  dst.copyPixels(art, new LRect(0, 0, 2, 1), new LRect(0, 0, 2, 1), 32, 76, 0xffffff);
+  const d = dst.ensure();
+  assert.equal(d[0], 80);
+  assert.equal(d[1], 80);
+  assert.equal(d[2], 80);
+  assert.equal(d[3], 76);
+});
+
 test('copyPixels ink 8 + bgColor does NOT tint grayscale (catalogue product preview)', () => {
   // Product Preview Class getPicture: `copyPixels(part, rect, rect, [#maskImage:
   // tMatte, #ink: 8, #bgColor: paletteIndex(integer(pPartColors[j])), #blend: 100])`.
@@ -7033,11 +7206,11 @@ test('setMemberProp image copies the palette + depth (Image Button arrow keeps i
   assert.equal(member.image?.width, 3);
 });
 
-test('cornersAreNearWhite flags ink-0 button buffers (white mask corners)', () => {
-  // Common Button's composed buffer: the pieces' mask flattened to white, so
-  // the 4 corners are opaque near-white -> the copy-ink sprite needs the
-  // background-transparent bake. Opaque panels / transparent corners don't.
-  const make = (cornerRgb: number | null): Uint8Array => {
+test('cornersAreNearWhite flags ink-0 button buffers (white mask corners around art)', () => {
+  // Common Button's composed buffer: the pieces' mask flattened to white and the
+  // button art opaque inside it, so the 4 corners are opaque near-white -> the
+  // copy-ink sprite needs the background-transparent bake.
+  const make = (cornerRgb: number | null, bodyRgb: number | null = 0x3366cc): Uint8Array => {
     const d = new Uint8Array(4 * 4 * 4);
     if (cornerRgb !== null) {
       for (const i of [0, 3, 12, 15]) {
@@ -7047,12 +7220,40 @@ test('cornersAreNearWhite flags ink-0 button buffers (white mask corners)', () =
         d[i * 4 + 3] = 255;
       }
     }
+    if (bodyRgb !== null) {
+      for (const i of [5, 6, 9, 10]) {
+        d[i * 4] = (bodyRgb >> 16) & 0xff;
+        d[i * 4 + 1] = (bodyRgb >> 8) & 0xff;
+        d[i * 4 + 2] = bodyRgb & 0xff;
+        d[i * 4 + 3] = 255;
+      }
+    }
     return d;
   };
   assert.equal(cornersAreNearWhite(make(0xffffff), 4, 4), true, 'white corners bake');
   assert.equal(cornersAreNearWhite(make(0xefefef), 4, 4), true, 'near-white corners bake');
   assert.equal(cornersAreNearWhite(make(0x808080), 4, 4), false, 'grey corners untouched');
   assert.equal(cornersAreNearWhite(make(null), 4, 4), false, 'transparent corners untouched');
+
+  // A flat fill is not a mask: every opaque pixel near-white means there is no
+  // art for the white to be bordering, and keying it deletes the panel. This is
+  // catalog_bg_pixel (1x1 #f0f0f0) stretched over the catalogue/purse window at
+  // ink 0 — the whole window went transparent and showed the room through.
+  const flat = (rgb: number, w: number, h: number): Uint8Array => {
+    const d = new Uint8Array(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      d[i * 4] = (rgb >> 16) & 0xff;
+      d[i * 4 + 1] = (rgb >> 8) & 0xff;
+      d[i * 4 + 2] = rgb & 0xff;
+      d[i * 4 + 3] = 255;
+    }
+    return d;
+  };
+  assert.equal(cornersAreNearWhite(flat(0xf0f0f0, 1, 1), 1, 1), false, '1x1 near-white fill stays opaque');
+  assert.equal(cornersAreNearWhite(flat(0xffffff, 8, 8), 8, 8), false, 'uniform white fill stays opaque');
+  // White corners around near-white-but-distinct art still keys: the art is what
+  // makes it a mask rather than a fill.
+  assert.equal(cornersAreNearWhite(make(0xffffff, 0xdddddd), 4, 4), true, 'near-white art under white corners still keys');
 });
 
 // ---- U57: window reopen — duplicate() must deep-copy nested lists (the

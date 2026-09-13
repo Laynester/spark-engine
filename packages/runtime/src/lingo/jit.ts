@@ -593,7 +593,13 @@ class Gen {
   }
 
   private assignTarget(t: Expr, v: string, rhs: Expr): boolean {
-    const fBit = staticIsFloat(rhs) ? 1 : 0;
+    // Director tracks float-ness on the VALUE, so `tH = 120 * tDiff / tDiff + 120`
+    // is a float even though no literal is one and the next statement's
+    // `tH / 360` must divide as reals. A static-only bit lost that (the
+    // epoch-scoped value mark is gone by the next statement), so the bit is
+    // `static || isFloatValue(rhs)` — evaluated while the current statement's
+    // marks are still live. Mirrors the interpreter's noteFloatAssign.
+    const fBit = staticIsFloat(rhs) ? '1' : `(I.isFloatValue(${v}) ? 1 : 0)`;
     if (t.kind === 'ident') {
       const lower = t.name.toLowerCase();
       if (lower === 'me') {
@@ -603,7 +609,7 @@ class Gen {
       const slot = this.slots.get(lower);
       if (slot !== undefined) {
         this.emit(`if (env.globals.has(${j(lower)})) { I.host.globalSet(${j(t.name)}, ${v} === undefined ? VOID : ${v}); I.noteFloatAssign3(${j(lower)}, ${fBit}); } else {`);
-        this.emit(`${v} = ${v} === undefined ? VOID : ${v}; V[${slot}] = ${v}; S[${slot}] = ${1 | (fBit << 1)}; }`);
+        this.emit(`${v} = ${v} === undefined ? VOID : ${v}; V[${slot}] = ${v}; S[${slot}] = 1 | (${fBit} << 1); }`);
         return true;
       }
       this.emit(`I.execAssignNode(${this.node(t)}, ${v} === undefined ? VOID : ${v}, env); I.noteFloatAssign3(${j(lower)}, ${fBit});`);

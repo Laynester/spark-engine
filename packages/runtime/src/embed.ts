@@ -3,6 +3,8 @@ import { fontBaseCandidates } from './bundle/fontPaths.js';
 import { DirectorEngine } from './engine/engine.js';
 import { WebAudioPlayer } from './engine/audio.js';
 import { PixiStage } from './stage/pixi.js';
+import { DevOverlay } from './stage/devOverlay.js';
+import { enablePerf, perfMilestone } from './perf.js';
 import { rasterizeTextMember } from './stage/text.js';
 import { reclaimIfLegacyPage } from './legacy/reclaim.js';
 import { PersistWorker } from './worker/persist.js';
@@ -18,6 +20,9 @@ export class SparkElement extends SparkBase {
   private _fontSeen = new Set<string>();
   private _persistWorker: PersistWorker | null = null;
   private _persistCleanup: (() => void) | null = null;
+  private _scaleCleanup: (() => void) | null = null;
+  private _devCleanup: (() => void) | null = null;
+  private _dev: DevOverlay | null = null;
 
   get directorEngine(): DirectorEngine | null {
     return this.engine;
@@ -27,9 +32,19 @@ export class SparkElement extends SparkBase {
     return this.stage;
   }
 
+  /** The dev panel, when it has been created (`?dev=1`, a `dev` attribute, or `window.__sparkDev`). */
+  get devOverlay(): DevOverlay | null {
+    return this._dev;
+  }
+
   disconnectedCallback(): void {
+    this._devCleanup?.();
+    this._devCleanup = null;
+    this._dev = null;
     this._keyCleanup?.();
     this._keyCleanup = null;
+    this._scaleCleanup?.();
+    this._scaleCleanup = null;
     this._persistCleanup?.();
     this._persistCleanup = null;
     this._persistWorker?.terminate();
@@ -49,10 +64,19 @@ export class SparkElement extends SparkBase {
       this.showError('missing "movie" attribute — e.g. <spark movie="./habbo.spark">');
       return;
     }
+    // Decide the dev panel here rather than after the boot, so the counters are
+    // already running while the movie loads and the boot phases below land in the
+    // milestone list (they are the baseline a "loading got slow" report needs).
+    const devRequested =
+      this.hasAttribute('dev') || (typeof location !== 'undefined' && /(^|[?&])dev(=|&|$)/.test(location.search));
+    if (devRequested) enablePerf();
+    const bootStart = typeof performance !== 'undefined' ? performance.now() : 0;
+    const phase = (label: string): void => perfMilestone(label, performance.now() - bootStart);
     try {
       const baseUrl = new URL(movie, window.location.href);
 
       const movieBytes = await fetchBytes(baseUrl);
+      phase('movie bundle fetched');
       const loader = new BundleLoader(makeSource(baseUrl));
       this.loader = loader;
       const cast = loader.register(movieBytes);
@@ -63,9 +87,11 @@ export class SparkElement extends SparkBase {
 
       const engine = new DirectorEngine(null);
       this.engine = engine;
+      phase('engine object built');
       // Retry the realm repair here too: an IIFE bundle loaded from <head> runs it
       // before <body> exists, and the reference frame needs a host element.
       const reclaimed = reclaimIfLegacyPage();
+      phase('realm reclaim checked');
       if (reclaimed && reclaimed.changed) {
         const sample = [...reclaimed.restored, ...reclaimed.unshadowed, ...reclaimed.dropped].slice(0, 5).join(', ');
         engine.log(
@@ -104,12 +130,14 @@ export class SparkElement extends SparkBase {
       const stage = new PixiStage(engine, this);
       this.stage = stage;
       await stage.init();
+      phase('stage + renderer up');
       engine.adapter = stage;
 
       engine.onCastLoaded = () => {
         this.loadFonts(engine);
       };
       await engine.loadCast(loader, cast.name);
+      phase(`${engine.casts.length} cast libraries loaded`);
       const wAttr = Number(this.getAttribute('width'));
       const hAttr = Number(this.getAttribute('height'));
       if (this.hasAttribute('width') && Number.isFinite(wAttr) && wAttr > 0) engine.stageWidth = wAttr;
@@ -118,6 +146,7 @@ export class SparkElement extends SparkBase {
         stage.resize(engine.stageWidth, engine.stageHeight);
       }
       engine.boot();
+      phase('movie booted');
       await this.loadFonts(engine);
 
       const onKeyDown = (e: KeyboardEvent): void => {
@@ -148,12 +177,93 @@ export class SparkElement extends SparkBase {
         document.removeEventListener('keyup', onKeyUp);
       };
 
+      this.watchCanvasScale(engine);
+      this.setupDevOverlay(stage, engine);
       this.dispatchEvent(new CustomEvent('spark-ready', { detail: { engine } }));
       const logSel = this.getAttribute('log');
       if (logSel) this.streamLog(logSel);
     } catch (err) {
       this.showError(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  /**
+   * Developer panel (`stage/devOverlay.ts`): renderer + WebGL context, fps and
+   * worst frame gap, the per-frame engine/sync split (last and peak, with the
+   * timestamp of the peak), bakes with their ms, scene/heap sizes, boot
+   * milestones and the browser's own long-task entries (what a "rooms hang for a second now" report looks like from inside
+   * the page).
+   *
+   * Opt-in only, and enabled from three places so it works on a real hotel page
+   * without editing it: `?dev=1` (or `?dev`) in the URL, a `dev` attribute on
+   * `<spark-player>`, or `window.__sparkDev.show()` from the console. F9 toggles.
+   * The perf counters it reads are behind `enablePerf()` so an ordinary boot
+   * never pays for `performance.now()` pairs it will not display.
+   */
+  private setupDevOverlay(stage: PixiStage, engine: DirectorEngine): void {
+    const requested = this.hasAttribute('dev') || (typeof location !== 'undefined' && /(^|[?&])dev(=|&|$)/.test(location.search));
+    const overlay = new DevOverlay(
+      () => stage.debugInfo(),
+      () => stage.perfMilestones(),
+    );
+    this._dev = overlay;
+    const cleanup = overlay.install();
+    this._devCleanup = cleanup;
+    if (requested) overlay.show();
+    const api = {
+      show: () => { enablePerf(); overlay.show(); },
+      hide: () => overlay.hide(),
+      toggle: () => { enablePerf(); overlay.toggle(); },
+      visible: () => overlay.visible,
+      snapshot: () => stage.debugInfo(),
+      milestones: () => stage.perfMilestones(),
+      mark: (label: string, ms: number) => perfMilestone(label, ms),
+    };
+    (window as unknown as { __sparkDev?: typeof api }).__sparkDev = api;
+    if (requested) engine.log('dev panel on — F9 toggles, window.__sparkDev.snapshot() dumps the numbers');
+  }
+
+  /**
+   * The canvas is created at exactly the movie's stage size, and nothing in the
+   * runtime ever touches its CSS box: if the embedding page's stylesheet makes
+   * that box a different size (width:100%, a flex row, a hi-dpi "scale up" rule)
+   * the browser post-scales the rendered frame instead. That reads as "the font
+   * size is doubled and stretched" long before anyone notices the room art is
+   * upscaled too, because 9px Volter is the smallest, sharpest thing on screen.
+   * Report the mismatch (and the factor) so it is diagnosable from the log.
+   */
+  private watchCanvasScale(engine: DirectorEngine): void {
+    if (typeof ResizeObserver === 'undefined') return;
+    let warned = '';
+    const check = (): void => {
+      const canvas = this.querySelector('canvas');
+      const sw = engine.stageWidth;
+      const sh = engine.stageHeight;
+      if (!canvas || sw < 1 || sh < 1) return;
+      const box = canvas.getBoundingClientRect();
+      if (box.width < 1 || box.height < 1) return;
+      const sx = box.width / sw;
+      const sy = box.height / sh;
+      if (Math.abs(sx - 1) < 0.005 && Math.abs(sy - 1) < 0.005) return;
+      const key = `${sx.toFixed(3)}x${sy.toFixed(3)}`;
+      if (key === warned) return;
+      warned = key;
+      engine.warn(
+        `stage ${sw}x${sh} is displayed at ${Math.round(box.width)}x${Math.round(box.height)} CSS px ` +
+        `(scale ${sx.toFixed(2)}x${sy.toFixed(2)}, dpr ${window.devicePixelRatio || 1}) — page CSS is ` +
+        'stretching the canvas, so the movie (and its 9px Volter text) is upscaled by the compositor. ' +
+        `Size <spark-player> to ${sw}x${sh}, or scale it by whole numbers, to keep text crisp.`,
+      );
+    };
+    const ro = new ResizeObserver(check);
+    ro.observe(this);
+    const onResize = (): void => check();
+    window.addEventListener('resize', onResize);
+    this._scaleCleanup = () => {
+      ro.disconnect();
+      window.removeEventListener('resize', onResize);
+    };
+    check();
   }
 
   private async loadFonts(engine: DirectorEngine): Promise<void> {

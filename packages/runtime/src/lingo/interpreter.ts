@@ -2,7 +2,7 @@ import type { Expr, Handler, Script, Stmt, TheSegment } from './ast.js';
 import { parseExpr } from './parser.js';
 import {
   asNum, colorFrom, duplicateValue, ilkOf, isTruthy, keyOf, rawKeyOf, LEMPTY, lingoAdd, lingoConcat,
-  lingoEquals, lingoListCompare, lingoMod, lingoMultiply, lingoNegate, lingoSubtract, toLingoString, VOID,
+  lingoDivide, lingoEquals, lingoListCompare, lingoMod, lingoMultiply, lingoNegate, lingoSubtract, toLingoString, VOID,
   type LImage, type LList, type LMemberRef, type LObject, type LPoint, type LPropList,
   type LRect, type LSpriteRef, type LStageRef, type LVal, type LWindowRef,
   LSymbol, LCastLibRef, LList as LListClass, LPropList as LPropListClass,
@@ -16,6 +16,7 @@ import {
   type MemberHost,
 } from './values.js';
 import { matteRegionMask } from '../stage/matte.js';
+import { perf, perfSlowCall } from '../perf.js';
 import { compileHandlerBody } from './jit.js';
 
 export class ReturnSignal {
@@ -265,6 +266,9 @@ export class Interpreter {
     instance: LObject | null,
     scriptGlobals: ReadonlySet<string>,
   ): LVal {
+    // Dev instrumentation (see perf.ts): time the OUTERMOST calls only, so a
+    // "room load hangs for a second" report names the handler that owns the time.
+    const perfCallStart = perf.enabled && this.callDepth === 0 ? performance.now() : 0;
     if (++this.callDepth > 120) {
       this.callDepth--;
       const trail = this.callTrail.slice(-12).join(' <- ');
@@ -280,6 +284,7 @@ export class Interpreter {
     try {
       return this.callHandlerInner(script, handler, args, instance, scriptGlobals);
     } finally {
+      if (perfCallStart > 0) perfSlowCall(`#${handler.name}@${script.name}`, performance.now() - perfCallStart);
       this.callDepth--;
       this.callTrail.pop();
     }
@@ -333,8 +338,16 @@ export class Interpreter {
     const env = new Env(null, scriptGlobals && scriptGlobals.size > 0 ? new Set([...baseGlobals, ...scriptGlobals]) : baseGlobals);
     env.me = instance;
     const compiled = this.jitCompiledOf(script, handler);
-    let offset = 0;
-    if (instance && handler.params.length > 0 && handler.params[0].toLowerCase() === 'me') offset = 1;
+    // `args` never contains `me` — Lingo passes it implicitly — so the skip must
+    // not depend on how the handler was dispatched. Compiled bodies already
+    // skip it unconditionally (jit.ts Gen.run), but the interpreted path only
+    // did so when an instance was present, so a handler reached as a global
+    // function (`SomeHandler(x)`, instance === null) bound args[0] to `me` and
+    // shifted every real parameter by one, leaving the last one VOID. That
+    // silently emptied the parameters of any handler the JIT declines — i.e.
+    // every handler containing a `the X` read/write (Furniture_Roomdimmer's
+    // setState parses its furni state with `the itemDelimiter`).
+    let offset = handler.params.length > 0 && handler.params[0].toLowerCase() === 'me' ? 1 : 0;
     // Compiled bodies read their locals from V slots; only interpreter bodies
     // (and compiled ones whose params collide with script props, which never
     // get V slots) need params mirrored into env.vars.
@@ -519,7 +532,7 @@ export class Interpreter {
     switch (stmt.kind) {
       case 'assign': {
         const v = this.evalExpr(stmt.value, env);
-        this.noteFloatAssign(stmt.target, stmt.value);
+        this.noteFloatAssign(stmt.target, stmt.value, v);
         this.lastAssignExpr = stmt.target;
         this.execAssign(stmt.target, v, env);
         return;
@@ -728,9 +741,15 @@ export class Interpreter {
     return typeof v === 'number' && (!Number.isInteger(v) || this.floatMarks.get(v) === this.floatEpoch);
   }
 
-  private noteFloatAssign(target: Expr, rhs: Expr): void {
+  private noteFloatAssign(target: Expr, rhs: Expr, value?: LVal): void {
     const name = target.kind === 'ident' || target.kind === 'prop' ? this.identLowerOf(target) : null;
-    if (name) this.floatNames.set(name, this.isFloatExpr(rhs));
+    // Director tracks float-ness on the VALUE, not the expression: `tH = 120 *
+    // tDiff / tDiff + 120` is a float even though no literal is one, and the
+    // next statement's `tH / 360` must therefore divide as reals. A static read
+    // of the RHS alone missed that (and the epoch-scoped value mark is gone by
+    // the next statement), which turned the room dimmer's
+    // `tH = integer(tH / 360 * 255)` into `integer(0)` — every hue came out 0.
+    if (name) this.floatNames.set(name, this.isFloatExpr(rhs) || (value !== undefined && this.isFloatValue(value)));
   }
 
   private floatExprCache = new WeakMap<Expr, boolean>();
@@ -1119,6 +1138,10 @@ export class Interpreter {
       }
       case '/': {
         if (l === VOID || r === VOID) return 0;
+        // List operands divide element-wise (Director); scalar/scalar keeps the
+        // float-aware path below.
+        const listQuotient = lingoDivide(l, r);
+        if (listQuotient !== null) return listQuotient;
         const a = asNum(l);
         const b = asNum(r);
         const divisor = b === 0 ? 1 : b;
@@ -1347,6 +1370,13 @@ export class Interpreter {
         return duplicateValue(list);
       case 'count':
         return list.items.length;
+      case 'max':
+      case 'min': {
+        if (!list.items.length) return 0;
+        const nums = list.items.map((v) => asNum(v));
+        const out = lower === 'max' ? Math.max(...nums) : Math.min(...nums);
+        return list.items.some((v) => this.isFloatValue(v)) ? this.markFloatValue(out) : out;
+      }
       case 'sort':
         list.items.sort(lingoListCompare);
         return list;

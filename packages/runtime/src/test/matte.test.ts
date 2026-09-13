@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, bakeSurface, blendModeForInk, matteRegionMask, matteSpriteHitTest, SUBTRACT_BLEND_MODE, tintSpriteBackground, tintSpriteDarken } from '../stage/matte.js';
+import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, bakeSurface, blendModeForInk, setMatteIdentityFill, DARKEST_BLEND_MODE, LIGHTEST_BLEND_MODE, matteRegionMask, matteSpriteHitTest, NOT_REVERSE_BLEND_MODE, REVERSE_BLEND_MODE, SUBTRACT_BLEND_MODE, tintSpriteBackground, tintSpriteDarken } from '../stage/matte.js';
 
 /** Build an RGBA buffer; fill(x, y, r, g, b, a) default opaque white. */
 function makeImage(width: number, height: number): { data: Uint8ClampedArray; fill: (x: number, y: number, r: number, g: number, b: number, a?: number) => void } {
@@ -276,7 +276,10 @@ test('ink -> bake mode mapping (Director id::InkMode)', () => {
   assert.equal(blendModeForInk(41), 'normal');
   assert.equal(bakeModeForInk(38), 'matte'); // subtract
   assert.equal(bakeModeForInk(37), 'matte'); // lightest
-  assert.equal(bakeModeForInk(39), 'matte'); // darkest
+  // DARKEST (39) keys the same rectangle as matte but keeps it WHITE: its blend
+  // is GL MIN with RGB factors (ONE, ONE), so a black keyed rectangle would be
+  // MIN'd into the room as a black box. White is the identity for MIN.
+  assert.equal(bakeModeForInk(39), 'matteIdentity'); // darkest
   assert.equal(bakeModeForInk(40), 'matte'); // lighten
   assert.equal(bakeModeForInk(41), 'matte'); // darken
 });
@@ -494,12 +497,125 @@ test('ink -> blend mode mapping (add pin 33 is additive, per user report)', () =
   // verbatim), which made the v31 room dimmer paint a solid black room.
   assert.equal(blendModeForInk(35), SUBTRACT_BLEND_MODE); // subtract pin
   assert.equal(blendModeForInk(38), SUBTRACT_BLEND_MODE); // subtract
-  assert.equal(blendModeForInk(37), 'max'); // lightest -> core GL MAX (pixi advanced lighten is broken)
-  assert.equal(blendModeForInk(40), 'max'); // lightest
-  assert.equal(blendModeForInk(39), 'min'); // darkest -> core GL MIN
+  // 37/39/40 -> GL MAX/MIN but registered with the destination ALPHA preserved.
+  // Pixi's own min/max are [ONE, ONE, ONE, ONE, MIN, MIN], so they took the
+  // min/max of alpha too and a sprite's transparent pixels drove the room's
+  // alpha to 0 over the whole sprite quad.
+  assert.equal(blendModeForInk(37), LIGHTEST_BLEND_MODE); // lightest
+  assert.equal(blendModeForInk(40), LIGHTEST_BLEND_MODE); // lightest
+  assert.equal(blendModeForInk(39), DARKEST_BLEND_MODE); // darkest
   assert.equal(blendModeForInk(0), 'normal');
   assert.equal(blendModeForInk(8), 'normal'); // matte: baked alpha, normal composite
   assert.equal(blendModeForInk(36), 'normal');
+});
+
+test('hc_rntgn ink set maps to alpha-preserving blend modes', () => {
+  // Furni props carry per-part inks as SPRITE inks
+  // (hh_furni_xx_hc_rntgn/hc_rntgn.props: b/e ink 39, c/f ink 38, g/h ink 6,
+  // everything else matte 8; Passive Object Class solveInk -> tSpr.ink). The
+  // 39/38 parts must not be pixi's alpha-min/max, and 6 (Not Reverse) is a
+  // destination XOR with no fixed-function equivalent — it is served by the
+  // shader blend modes in stage/blendFilters.ts.
+  assert.equal(blendModeForInk(39), DARKEST_BLEND_MODE);
+  assert.equal(blendModeForInk(38), SUBTRACT_BLEND_MODE);
+  assert.equal(blendModeForInk(8), 'normal');
+  // Ink 6's XOR shader exists and is verified (scripts/ink-xor-blend-snippet.js)
+  // but is left OFF: over the black destination the 39/38 copies of the same
+  // art leave behind it reads as pink/black. See INK6_XOR in stage/matte.ts.
+  assert.equal(blendModeForInk(6), 'normal');
+  assert.equal(blendModeForInk(2), REVERSE_BLEND_MODE);
+  // Ink 6 still bakes its matte. White is the identity for `dst XOR ~src`, so
+  // the bake is a no-op on the shader path, but it keeps the layer's white
+  // rectangle out of the frame when the shader cannot run at all (pixi's canvas
+  // fallback drops every custom blend mode). Ink 2 keys BLACK as its identity,
+  // so baking it would not be faithful — it stays unbaked.
+  assert.equal(bakeModeForInk(6), 'matte');
+  assert.equal(bakeModeForInk(2), null);
+});
+
+/** 4x1 lantern stem: white | white | green | green — the picker keys white, the
+ *  flood removes the two left pixels. Returns the freshly filled source. */
+function lanternStemRow(): Uint8ClampedArray {
+  const data = new Uint8ClampedArray(4 * 4);
+  const put = (x: number, r: number, g: number, b: number): void => {
+    data[x * 4] = r;
+    data[x * 4 + 1] = g;
+    data[x * 4 + 2] = b;
+    data[x * 4 + 3] = 255;
+  };
+  put(0, 255, 255, 255);
+  put(1, 255, 255, 255);
+  put(2, 0, 85, 0);
+  put(3, 0, 85, 0);
+  return data;
+}
+
+test('Darkest (39) matte keys the rectangle to OPAQUE white (MIN identity)', () => {
+  // Ink 39 blends with GL MIN (RGB factors ONE, ONE), so the keyed pixels must
+  // reach the GPU as WHITE: min(255, dst) == dst leaves the room untouched,
+  // where min(0, dst) == 0 painted a black box over the whole rectangle.
+  //
+  // They have to stay OPAQUE to do it. pixi uploads surfaces with
+  // UNPACK_PREMULTIPLY_ALPHA_WEBGL on, so an alpha-0 white is premultiplied to
+  // (0,0,0,0) on the way in and MIN then blends pure black — the hc_rntgn
+  // lantern's Darkest layer (props: b/e ink 39) drew a black bounding rectangle
+  // instead of letting the room through.
+  setMatteIdentityFill(true);
+  try {
+    const baked = bakeSurface(lanternStemRow(), 4, 1, 'matteIdentity', null, null, 39);
+    assert.equal(baked.changed, true);
+    const px = baked.pixels;
+    assert.deepEqual([px[0], px[1], px[2]], [255, 255, 255], 'keyed pixel stays white (MIN identity)');
+    assert.deepEqual([px[4], px[5], px[6]], [255, 255, 255], 'keyed pixel stays white (MIN identity)');
+    assert.equal(px[3], 255, 'keyed pixel stays OPAQUE, or the premultiplied upload is black');
+    assert.equal(px[7], 255, 'keyed pixel stays OPAQUE, or the premultiplied upload is black');
+    assert.deepEqual([px[8], px[9], px[10]], [0, 85, 0], 'art pixel untouched');
+    assert.equal(px[11], 255, 'art pixel stays opaque');
+  } finally {
+    setMatteIdentityFill(false);
+  }
+});
+
+test('Darkest (39) without a MIN blend keys transparent (canvas fallback)', () => {
+  // `setMatteIdentityFill(false)` is the state on every renderer that cannot
+  // bind GL MIN (pixi's canvas fallback, WebGL1 without EXT_blend_minmax). There
+  // the sprite composites normally, so the key has to stay transparent — an
+  // opaque white rectangle would be pasted over the room instead of a matte.
+  setMatteIdentityFill(false);
+  const baked = bakeSurface(lanternStemRow(), 4, 1, 'matteIdentity', null, null, 39);
+  assert.equal(baked.changed, true);
+  const px = baked.pixels;
+  assert.equal(px[3], 0, 'keyed pixel transparent without a MIN blend');
+  assert.equal(px[7], 0, 'keyed pixel transparent without a MIN blend');
+  assert.deepEqual([px[0], px[1], px[2]], [0, 0, 0], 'transparent black, like every other matte bake');
+  assert.deepEqual([px[8], px[9], px[10]], [0, 85, 0], 'art pixel untouched');
+});
+
+test('Darkest (39) identity rectangle is never taken by the bgColor tint', () => {
+  // A sprite bgColor reaches the bake as `tint`, whose pass recolours near-grey
+  // art toward it (the colourizable-furni filter). The identity rectangle is
+  // near-grey WHITE and OPAQUE, so without the keyed mask it would be recoloured
+  // and then MIN'd over the room in that colour.
+  setMatteIdentityFill(true);
+  try {
+    const data = new Uint8ClampedArray(4 * 4);
+    const put = (x: number, r: number, g: number, b: number): void => {
+      data[x * 4] = r;
+      data[x * 4 + 1] = g;
+      data[x * 4 + 2] = b;
+      data[x * 4 + 3] = 255;
+    };
+    put(0, 255, 255, 255);
+    put(1, 255, 255, 255);
+    put(2, 128, 128, 128);
+    put(3, 128, 128, 128);
+    const px = bakeSurface(data, 4, 1, 'matteIdentity', 0xff0000, null, 39).pixels;
+    assert.deepEqual([px[0], px[1], px[2]], [255, 255, 255], 'keyed pixel keeps the MIN identity, not the tint');
+    assert.deepEqual([px[4], px[5], px[6]], [255, 255, 255], 'keyed pixel keeps the MIN identity, not the tint');
+    assert.deepEqual([px[8], px[9], px[10]], [128, 0, 0], 'grey art pixel is still tinted');
+  } finally {
+    setMatteIdentityFill(false);
+  }
 });
 
 test('matteSpriteHitTest: ink 8 falls through transparent pixels, others are bounding-box (DirPlayer parity)', () => {
@@ -595,6 +711,52 @@ test('opaque white-backdrop art still gets the ink-8 matte (cloud regression)', 
   assert.ok(mask, 'opaque white backdrop still resolves a matte');
   assert.equal(mask[0], 1, 'border pixel marked background');
   assert.equal(mask[5 * W + 5], 0, 'enclosed puff pixel is content');
+});
+
+test('matteRegionMask prefers white when the (0,0) pixel is content (composed room buffers)', () => {
+  // Live dump (scripts/avatar-key-diag-snippet.js on a hotel client): composed
+  // `obj.disp.*` / element buffers have white borders but a CONTENT top-left
+  // pixel — `RoomInfoWindow_room_info_room_name` is pixel00 #eeeeee with 329 of
+  // 350 edge pixels pure white. matteRegionMask had no white rule at all, so it
+  // keyed the (0,0) colour and the white rectangle was pasted in instead of
+  // keyed. Matte paints white, so with the matte-ink flag the documented white
+  // key wins when the border is overwhelmingly white — and ink 7 (notGhost,
+  // which keys a colour) keeps the old (0,0) pick.
+  const W = 20, H = 6;
+  const { data, fill } = makeImage(W, H); // opaque white border
+  for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) fill(x, y, 0xee, 0xee, 0xee);
+  fill(0, 0, 0x44, 0x44, 0x44); // content in the top-left corner
+
+  const matte = matteRegionMask(data, W, H, 0, 0, W, H, undefined, null, true);
+  assert.ok(matte, 'matte ink still resolves a mask');
+  assert.equal(matte[1], 1, 'pure-white border pixel is keyed with matte ink');
+  assert.equal(matte[0], 0, 'the #444444 content pixel at (0,0) survives');
+
+  const notGhost = matteRegionMask(data, W, H, 0, 0, W, H, undefined, null, false);
+  assert.ok(notGhost, 'notGhost resolves its own matte');
+  assert.equal(notGhost[0], 1, 'notGhost keeps keying the (0,0) colour (unchanged)');
+});
+
+test('ink-8 matte keys an all-near-white member instead of bailing out (room name buffer)', () => {
+  // Same live dump: `RoomInfoWindow_room_info_room_name` is 166x11, pixel00
+  // #eeeeee, 329/350 edge px pure white and ZERO opaque non-near-white content,
+  // because the room name had not been painted into the buffer yet. Rule 6
+  // requires dark content, and whiteEdgeDominates requires every opaque CORNER to
+  // be white, so both missed and resolveChannelMatte returned null — nothing was
+  // keyed and the element rendered as a solid light rectangle over the room.
+  // A >75%-white border is the bounding rectangle matte is documented to remove.
+  const W = 20, H = 11;
+  const { data, fill } = makeImage(W, H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) fill(x, y, 0xee, 0xee, 0xee);
+  for (let x = 0; x < W; x++) { fill(x, 0, 255, 255, 255); fill(x, H - 1, 255, 255, 255); }
+  for (let y = 1; y < H - 1; y++) { fill(0, y, 255, 255, 255); fill(W - 1, y, 255, 255, 255); }
+  fill(0, 0, 0xee, 0xee, 0xee); // the single non-white corner that defeated rule 4
+
+  const baked = new Uint8ClampedArray(data);
+  const changed = bakeEdgeBackground(baked, W, H, 'matte');
+  assert.ok(changed, 'the white border is keyed even with no dark content');
+  assert.equal(alphaAt(baked, W, 1, 0), 0, 'white border pixel keyed to transparent');
+  assert.equal(alphaAt(baked, W, 10, 5), 255, 'the #eeeeee interior survives');
 });
 
 test('copyPixels ink-8 matte keys the (0,0) pixel color on a 32-bit source (purse shadow)', () => {

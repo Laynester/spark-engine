@@ -278,6 +278,30 @@ test('jit: the-expressions do not compile (host curEnv routing keeps them interp
   }
 });
 
+test('an interpreted handler keeps its parameters when called as a global function', () => {
+  // `args` never carries `me` (Lingo passes it implicitly), so the interpreter
+  // must skip a leading `me` param the same unconditional way Gen.run() does.
+  // It only skipped it when an instance was present, so a handler the JIT
+  // declines — here `the itemDelimiter` — reached as a plain function call
+  // (`parseState("...")`) bound args[0] to `me` and shifted everything: the
+  // state string went into the me slot and the last parameter came out VOID.
+  // hh_roomdimmer's Furniture_Roomdimmer::setState parses its furniture state
+  // exactly this way.
+  const e = new DirectorEngine();
+  e.addScriptMember('Tglob', 'movie', [
+    'on parseState me, tState',
+    '  the itemDelimiter = ","',
+    '  return [string(tState), tState.item.count, tState.item[2], tState.item[5]]',
+    'end',
+  ].join('\n'));
+  const { handler } = handlerOf(e, 'Tglob', 'parsestate');
+  assert.equal(compileHandlerBody(handler, new Set()), null, 'the-itemDelimiter handler stays interpreted');
+
+  const out = e.interp.evalExpressionString('parseState("2,1,1,#74f5f5,120")');
+  assert.ok(out instanceof LList, 'returns the list');
+  assert.deepEqual((out as LList).items, ['2,1,1,#74f5f5,120', 5, '1', '120'], 'parameters are not shifted');
+});
+
 test('jit: put/delete handlers do not compile (interpreter keeps them)', () => {
   const e = new DirectorEngine();
   e.addScriptMember('T4', 'movie', [

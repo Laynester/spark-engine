@@ -3114,9 +3114,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         if (img) {
           member.image = img;
           this.imageOwners.set(img, member);
-          if (member.rect && member.text && !member.textProps?.has('boxtype') && img.height > member.rect.height) {
-            member.rect.bottom = member.rect.top + img.height;
-          }
+          this.adjustTextRect(member, img);
           return img;
         }
       }
@@ -3141,27 +3139,57 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       }
       member.image = new LImage(member.width, member.height);
       this.imageOwners.set(member.image, member);
+    } else {
+      // Cached raster: re-assert adjust-to-fit here too, not just when the
+      // raster is first built. Writer::fakeAlphaRender reads pMember.height
+      // (this raster) and then feeds `pMember.rect` to copyPixels as the
+      // SOURCE rect of an identically-sized mask. If the rect is shorter than
+      // the raster, copyPixels RESAMPLES the glyphs — its
+      // `syRow = sy0 + trunc(fy * srcH / destH)` turns 4 source rows into
+      // `x3,x3,x3,x2` destination row runs — and the text renders vertically
+      // stretched. That is the navigator room-description report (the desc
+      // writer's rect is a `rect(0,0,W,0)` hint, so it must never stay behind
+      // the raster): the header writer is unaffected only because its render
+      // path rebuilds the rect from pMember.height every call.
+      this.adjustTextRect(member, member.image);
     }
     return member.image;
+  }
+
+  // Director adjust-to-fit (the `#adjust` boxType): an auto-size text member's
+  // box IS its rendered content, so the rect has to track the raster in BOTH
+  // directions. Growing alone is not enough. A Writer scratch member is reused
+  // for every string it renders: the navigator defines
+  // `[#rect: rect(0, 0, tWidth, 0)]` once and then calls `render()` per room,
+  // and `Writer::define`/`render` only re-assign the rect when the WIDTH
+  // changes — so after a tall description the box stays tall for the next,
+  // shorter one. fakeAlphaRender then copies through mismatched rects
+  //   tFakeAlpha = image(pMember.width, pMember.height, 8)      (11 rows)
+  //   copyPixels(pMember.image, pMember.rect, tFakeAlpha.rect)  (dest 31)
+  // and copyPixels RESAMPLES instead of copying: its
+  // `syRow = sy0 + trunc(fy * srcH / destH)` smears the 11-row source over the
+  // 31-row destination as x3,x3,x3,x2 row runs — the "navigator description /
+  // IM message glyphs are doubled and stretched" report. Director never lets
+  // the box and the raster disagree, so neither may we.
+  private adjustTextRect(member: Member, img: LImage): void {
+    if (member.kind !== 'text' || !member.rect || !member.text) return;
+    if (member.textProps?.has('boxtype')) return;
+    if (member.rect.height !== img.height) member.rect.bottom = member.rect.top + img.height;
   }
 
   private memberTextHeight(member: Member): number {
     const base = member.height;
     if (member.kind !== 'text' || member.textProps?.has('boxtype')) return base;
     if (!member.text) return base;
-    // Route through memberImage so rasterizing also applies the Director
-    // #adjust rect-grow. fakeAlphaRender (Writer mode 2) reads pMember.height
-    // BEFORE pMember.rect; if height rasterized without growing the rect, the
-    // rect stays height-0 (e.g. `define([#rect: rect(0,0,w,0)])` in the
-    // navigator) and the copyPixels(pMember.image, pMember.rect, ...) source
-    // rect collapses to nothing -> blank text.
     let img = member.image;
     if (!img && this.textRasterizer) {
-      try {
-        img = this.memberImage(member);
-      } catch {
-        img = undefined;
-      }
+      try { img = this.memberImage(member); } catch { img = undefined; }
+    } else if (img) {
+      // Cached raster: re-assert adjust-to-fit here too, not just when the
+      // raster is first built. Writer::fakeAlphaRender reads pMember.height
+      // BEFORE pMember.rect; if the rect is shorter than the cached raster,
+      // copyPixels RESAMPLES the glyphs instead of copying them 1:1.
+      this.adjustTextRect(member, img);
     }
     return img ? img.height : base;
   }
