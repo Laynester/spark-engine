@@ -21,6 +21,14 @@ export class Channel {
   foreColor = 255;
   colorSet = false;
   bgColorIsRgb = false;
+  /** `sprite.foreColor` assigned an RGB colour (LColor/string) rather than a
+   *  palette index. The avatar colour effects (`human_sprite_props`'s
+   *  `forecolor: "#00FF00"`) ride on this: ink 8/9 only remap through the
+   *  foreColor when it is a real colour — the corpus default (`foreColor = 255`,
+   *  palette index 255 = black) stays the no-op.
+   *  See Engine.duotoneForChannel. */
+  foreColorIsRgb = false;
+  foreColorIndex: number | null = null;
   // Numeric backColor is a Director palette index (Entry Car random(150)+20).
   // DirPlayer keeps it unresolved (sprite.rs ColorRef::PaletteIndex) and
   // resolves it against the sprite member's OWN bitmap palette at render

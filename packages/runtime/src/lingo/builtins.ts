@@ -1,7 +1,7 @@
 import type { Handler, Script } from './ast.js';
 import type { Interpreter } from './interpreter.js';
 import {
-  asNum, duplicateValue, ilkOf, keyOf, rawKeyOf, lingoListCompare, toLingoString, VOID,
+  asNum, duplicateValue, ilkOf, keyOf, rawKeyOf, lingoListCompare, resolvePropKey, toLingoString, VOID,
   type LVal, type LMemberRef, type LObject, type LSpriteRef, type LStageRef,
   type LWindowRef, type LCastLibRef, LSymbol, LList, LPoint, LPropList, LRect, LImage, LSpriteRef as LSpriteRefClass,
   LColor, colorFrom, hexColor, intColor,
@@ -789,7 +789,10 @@ export function createBuiltinTable(): Map<string, BuiltinFn> {
   set(['getAProp'], (b, a) => {
     const c = a[0];
     const key = keyOf(a[1]);
-    if (c instanceof LPropList && key !== undefined) return c.props.get(key) ?? VOID;
+    if (c instanceof LPropList && key !== undefined) {
+      const stored = resolvePropKey(c.props, key);
+      return (stored === undefined ? undefined : c.props.get(stored)) ?? VOID;
+    }
     if (c instanceof LList && typeof a[1] === 'number') {
       const i = Math.round(a[1]);
       return i >= 1 && i <= c.items.length ? c.items[i - 1] : VOID;
@@ -799,7 +802,7 @@ export function createBuiltinTable(): Map<string, BuiltinFn> {
   set(['setAProp'], (b, a) => {
     const c = a[0];
     const key = keyOf(a[1]);
-    if (c instanceof LPropList && key !== undefined) c.props.set(key, a[2] ?? VOID);
+    if (c instanceof LPropList && key !== undefined) c.props.set(resolvePropKey(c.props, key) ?? key, a[2] ?? VOID);
     else if (c instanceof LList && typeof a[1] === 'number') {
       const i = Math.round(a[1]);
       if (i >= 1) {
@@ -819,7 +822,10 @@ export function createBuiltinTable(): Map<string, BuiltinFn> {
   set(['deleteAProp'], (b, a) => {
     const c = a[0];
     const key = keyOf(a[1]);
-    if (c instanceof LPropList && key !== undefined) c.props.delete(key);
+    if (c instanceof LPropList && key !== undefined) {
+      const stored = resolvePropKey(c.props, key);
+      if (stored !== undefined) c.props.delete(stored);
+    }
     return VOID;
   });
   set(['countAProp'], (b, a) => {

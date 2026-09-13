@@ -60,6 +60,19 @@ interface LongTask {
 
 const MB = 1024 * 1024;
 
+/**
+ * The rAF delta behind the fps and "worst frame gap" readouts.
+ *
+ * Zero while the tab is hidden: the browser throttles or stops rAF then, so the
+ * delta across that window is wall-clock time the page deliberately did not
+ * render. Counted as a gap it reads as a multi-second stall and sends people
+ * hunting a runtime hitch that is not there — which is exactly what
+ * "worst frame gap 4885ms" next to a 156ms longest long task means.
+ */
+export function frameGap(now: number, lastFrame: number, hidden: boolean): number {
+  return hidden ? 0 : now - lastFrame;
+}
+
 export class DevOverlay {
   private root: HTMLElement | null = null;
   private body: HTMLElement | null = null;
@@ -74,6 +87,7 @@ export class DevOverlay {
   private longTasks: LongTask[] = [];
   private observer: PerformanceObserver | null = null;
   private onKey: ((e: KeyboardEvent) => void) | null = null;
+  private onVisibility: (() => void) | null = null;
 
   constructor(
     private getSnapshot: () => DevSnapshot,
@@ -151,12 +165,20 @@ export class DevOverlay {
         this.observer = null;
       }
     }
+    // Coming back from a hidden tab, the next rAF delta covers the whole
+    // throttled window: re-baseline so it is not charged as a frame gap.
+    this.onVisibility = () => {
+      this.lastFrame = performance.now();
+      this.windowStart = this.lastFrame;
+      this.frames = 0;
+    };
+    document.addEventListener('visibilitychange', this.onVisibility);
     this.windowStart = performance.now();
     this.lastFrame = this.windowStart;
     const loop = (): void => {
       const now = performance.now();
       this.frames++;
-      const gap = now - this.lastFrame;
+      const gap = frameGap(now, this.lastFrame, document.hidden);
       this.lastFrame = now;
       if (gap > this.worstGap) this.worstGap = gap;
       if (now - this.windowStart >= 1000) {
@@ -175,6 +197,8 @@ export class DevOverlay {
     this.raf = 0;
     this.observer?.disconnect();
     this.observer = null;
+    if (this.onVisibility) document.removeEventListener('visibilitychange', this.onVisibility);
+    this.onVisibility = null;
   }
 
   private render(now: number): void {

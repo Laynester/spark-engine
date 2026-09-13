@@ -5,14 +5,15 @@ import { DirectorEngine, cssFontFor } from '../engine/engine.js';
 import { fontBaseCandidates } from '../bundle/fontPaths.js';
 import { BundleLoader, castHintDir, createBundleFromZipBytes, type BundleSource } from '../bundle/loader.js';
 import { strToU8, zipSync } from 'fflate';
-import { LColor, LImage, LList, LMemberRef, LObject, LPoint, LPropList, LRect, LSymbol, VOID, asNum, duplicateValue, fontStyleFlags, PropPairs, type LVal } from '../lingo/values.js';
+import { LColor, LImage, LList, LMemberRef, LObject, LPoint, LPropList, LRect, LSymbol, VOID, asNum, duplicateValue, fontStyleFlags, PropPairs, resolvePropKey, type LVal } from '../lingo/values.js';
 import { normalizeTextLines, parseShapeText, parsePaletteBytes, Member, CastLib } from '../engine/members.js';
 import type { PersistWorkerLike, PersistWorkerMsg } from '../worker/persist.js';
 import { decodePng } from '../engine/png.js';
 import { decodeGif } from '../engine/gif.js';
 import { bakeEdgeBackground, cornersAreNearWhite, tintSpriteBackground } from '../stage/matte.js';
-import { directorTransformFlip, inverseDirectorTransformPoint } from '../stage/pixi.js';
+import { directorTransformFlip, inverseDirectorTransformPoint, parseRendererPreference } from '../stage/pixi.js';
 import { defringeTextPixels, hardenTextAlpha, rasterizeTextMember } from '../stage/text.js';
+import { frameGap } from '../stage/devOverlay.js';
 
 /** Build a one-cast bundle zip in memory (mirrors the bundler's output). */
 function makeCastZip(name: string, linkedCasts: { name: string; file: string }[], files: Record<string, string>): Uint8Array {
@@ -597,13 +598,12 @@ test('string * int follows Director coercion (empty string -> 123456789, not 0)'
 test('layout margin keys resolve despite dropmenu casing (dropmenu #marginh vs script #marginH)', () => {
   // dropmenu1.element writes #marginh: 8 / #marginv: -2 (all lowercase)
   // while the corpus DropDown Class reads tFontDesc[#marginH] /
-  // tFontDesc[#marginV] (capital H/V). Lingo symbols are case-insensitive,
-  // so those reads must hit the layout keys — a case-sensitive miss returned
-  // VOID and the dropdown text lost its left margin (pMarginLeft = 0). The
-  // fallback is scoped to EXACTLY the margin keys (the only keys the corpus
-  // mixes casing on); every other proplist lookup — the room-loading flow's
-  // #passive/#users/#items/#heightmap/#type/#name/#casts/... — stays a
-  // byte-identical case-sensitive read.
+  // tFontDesc[#marginV] (capital H/V). Lingo symbols are case-insensitive, so
+  // those reads must hit the layout keys — a case-sensitive miss returned VOID
+  // and the dropdown text lost its left margin (pMarginLeft = 0). This used to
+  // be a fallback scoped to the three margin keys; symbol keys now fold case
+  // generally (see the symbol-case test below), so the scoped hack is gone and
+  // the reverse direction works too.
   const e = new DirectorEngine();
   assert.equal(e.interp.evalExpressionString('value("[#marginh: 8, #marginv: -2]")[#marginH]'), 8);
   assert.equal(e.interp.evalExpressionString('value("[#marginh: 8, #marginv: -2]")[#marginV]'), -2);
@@ -612,9 +612,64 @@ test('layout margin keys resolve despite dropmenu casing (dropmenu #marginh vs s
   assert.equal(e.interp.evalExpressionString('value("[#marginh: 8, #marginbottom: 2]")[#marginbottom]'), 2);
   // Dot access (getPropValue) lowercases first, so .marginH hits #marginh.
   assert.equal(e.interp.evalExpressionString('value("[#marginh: 8]").marginH'), 8);
-  // All-lowercase lookups are untouched: no fallback, stays VOID (the room
-  // loading flow's reads are all lowercase and must keep exact-key semantics).
-  assert.equal(e.interp.evalExpressionString('value("[#marginH: 11]")[#marginh]'), VOID);
+  // And the other direction is no longer a miss.
+  assert.equal(e.interp.evalExpressionString('value("[#marginH: 11]")[#marginh]'), 11);
+});
+
+test('Lingo symbols fold case: equality, proplist keys, list search, object ids', () => {
+  // Director symbols are case-insensitive. The v31 client creates the hotel
+  // connection under the id it reads from `connection.info.id` (= #info,
+  // hh_shared variable index) while 15 corpus files look it up with the
+  // literal #Info — `hh_room_utils/0071 Respect Manager Class` does
+  // `tConnection = getConnection(#Info)` + `if tConnection = 0 then return 0`,
+  // which is the peer-menu respect button's silent no-op (no packet, no error,
+  // no warning). The same fold is needed for the connection's command table
+  // (`pCommandsList[#info]` read back as `pCommandsList[#Info]`), for the
+  // manager's id list (getOne/getPos/deleteOne) and for object ids.
+  const e = new DirectorEngine();
+  e.addScriptMember(
+    'SymCase',
+    'movie',
+    [
+      'on run me',
+      '  out = []',
+      '  out.add(#Info = #info)',
+      '  t = [:]',
+      '  t[#info] = 7',
+      '  out.add(t[#Info])',
+      '  out.add(t.getaProp(#INFO))',
+      '  t.setaProp(#Msg, 5)',
+      '  out.add(t[#mSG])',
+      '  out.add(t.count)',
+      '  -- FUSE Connection Manager: pCommandsList[#info] then [:] under the other case',
+      '  cmds = [:]',
+      '  cmds[#info] = [:]',
+      '  cmds[#info].setaProp("RESPECT_USER", 371)',
+      '  out.add(cmds.getaProp(#Info).getaProp("RESPECT_USER"))',
+      '  -- Manager Template exists(): pItemList.getOne(tID) > 0',
+      '  ids = [#info, #mus]',
+      '  out.add(ids.getOne(#Info))',
+      '  out.add(ids.getPos(#Info))',
+      '  ids.deleteOne(#INFO)',
+      '  out.add(ids.count)',
+      '  out.add(#random <> #RANDOM)',
+      '  return out',
+      'end',
+    ].join('\n'),
+  );
+  const script = e.resolveScript('SymCase')!;
+  const run = script.handlers.find((h) => h.name.toLowerCase() === 'run')!;
+  const res = e.interp.callHandler(script, run, [], null, new Set()) as LList;
+  const got = res.items.map((v) => (v instanceof LSymbol ? `#${v.name}` : v));
+  assert.deepEqual(got, [1, 7, 7, 5, 2, 371, '#info', 1, 1, 0]);
+  // Object ids fold too (engine registry + getObject/objectExists builtins).
+  e.addScriptMember('ObjBase', 'movie', ['on construct me', '  return 1', 'end'].join('\n'));
+  const obj = e.interp.newInstance(e.resolveScript('ObjBase')!, []);
+  e.setObjectById('roomBar', obj);
+  assert.equal(e.interp.evalExpressionString('objectExists(#ROOMBAR)'), 1);
+  assert.notEqual(e.interp.evalExpressionString('getObject(#RoomBar)'), VOID);
+  e.removeObjectById('ROOMBAR');
+  assert.equal(e.interp.evalExpressionString('objectExists(#roomBar)'), 0);
 });
 
 test('string chunks: char ranges, items, line counts', () => {
@@ -773,6 +828,53 @@ test('RETURN/ENTER constants are Director char codes (13 / 3) and line chunks sp
   assert.equal(e.interp.evalExpressionString('("A" & RETURN & "B" & RETURN & "C").line[2]'), 'B');
   // CRLF and bare LF still chunk (cross-platform tolerance).
   assert.equal(e.interp.evalExpressionString('"a\r\nb\r\nc".line.count'), 3);
+  // The line splitter is regex-free (see splitLinesRaw): pin it to the exact
+  // semantics of `s.split(/\r\n|\r|\n/)` on the awkward shapes.
+  const lines = (s: string): string[] => {
+    const n = e.interp.chunkCount(s, 'line');
+    return Array.from({ length: n }, (_, i) => String(e.interp.getChunkValue(s, 'line', i + 1, i + 1)));
+  };
+  const cases = ['', 'a', '\r', '\n', '\r\n', '\r\r', '\n\n', '\r\n\r\n', '\r\r\n', 'a\r', 'a\n', 'a\r\nb', 'a\nb\rc', 'a\r\r\nb', '\na\r', 'a\n\r\nb'];
+  for (const s of cases) {
+    assert.deepEqual(lines(s), s.split(/\r\n|\r|\n/), `line split of ${JSON.stringify(s)}`);
+    assert.equal(e.interp.chunkCount(s, 'line'), s.split(/\r\n|\r|\n/).length, `line count of ${JSON.stringify(s)}`);
+  }
+  // and ranges / negative indices still slice the same array
+  const crlf = 'one\r\ntwo\rthree\nfour';
+  assert.equal(e.interp.evalExpressionString(`"one\r\ntwo\rthree\nfour".line[3]`), 'three');
+  assert.equal(String(e.interp.getChunkValue(crlf, 'line', 2, 3)), 'two\rthree');
+  assert.equal(String(e.interp.getChunkValue(crlf, 'line', -1, -1)), 'four');
+});
+
+test('line chunk access does not go through String.split(regexp) (the 1.1s navigator stall)', () => {
+  // U159: `Layout Parser Class::parse_window` reads `tdata.line[i]` once per
+  // line per tag. With the regexp splitter that was 752 calls x ~1.4ms = the
+  // whole ~1.1s of the first navigator tab click (probe-nav-click.mjs); indexOf
+  // scanning is ~0.02ms for the same file. A regexp here is the regression, so
+  // count them rather than assert a wall-clock number.
+  const e = new DirectorEngine();
+  const big = Array.from({ length: 400 }, (_, i) => `element ${i} locH ${i} locV ${i} member m${i}`).join('\r');
+  const count = e.interp.chunkCount(big, 'line');
+  assert.equal(count, 400);
+
+  const origSplit = String.prototype.split;
+  let regexSplits = 0;
+  try {
+    (String.prototype as unknown as { split: (sep?: unknown, limit?: number) => string[] }).split = function (
+      this: string,
+      sep?: unknown,
+      limit?: number,
+    ) {
+      if (sep instanceof RegExp) regexSplits++;
+      return origSplit.call(this, sep as never, limit);
+    };
+    let last = '';
+    for (let i = 1; i <= count; i++) last = String(e.interp.getChunkValue(big, 'line', i, i));
+    assert.equal(last, 'element 399 locH 399 locV 399 member m399');
+    assert.equal(regexSplits, 0, 'line chunks must not call String.prototype.split with a regexp');
+  } finally {
+    String.prototype.split = origSplit;
+  }
 });
 
 test('word chunks split on ASCII control chars (wallet frame "59.0\x02")', () => {
@@ -788,6 +890,83 @@ test('word chunks split on ASCII control chars (wallet frame "59.0\x02")', () =>
   assert.equal(e.interp.evalExpressionString('("59.0" & numToChar(2) & numToChar(1)).word.count'), 1);
   // ordinary words still split on whitespace
   assert.equal(e.interp.evalExpressionString('"a b\tc".word[2]'), 'b');
+});
+
+test('proplist case folding is indexed, not a scan of every key (boot preIndexMembers cost)', () => {
+  // U160: `Resource Manager Class::preIndexMembers` keys one proplist by every
+  // member name in every castLib (~10k inserts at boot). With the linear
+  // resolvePropKey that was 786ms of pure scan (measured) / ~800ms of the real
+  // boot; PropPairs now keeps a fold index and a same-fold miss must not walk the
+  // key list at all.
+  const pp = new PropPairs();
+  pp.set('Foo', 1);
+  pp.set('foo', 2); // a second spelling of one fold is allowed and keeps both
+  for (let i = 0; i < 500; i++) pp.set(`Member_${i}`, i);
+
+  let keyWalks = 0;
+  const realKeys = pp.keys.bind(pp);
+  (pp as unknown as { keys: () => IterableIterator<string> }).keys = () => {
+    keyWalks++;
+    return realKeys();
+  };
+
+  // exact match wins, else the FIRST stored spelling of that fold
+  assert.equal(resolvePropKey(pp, 'Member_7'), 'Member_7');
+  assert.equal(resolvePropKey(pp, 'member_7'), 'Member_7');
+  assert.equal(resolvePropKey(pp, 'MEMBER_7'), 'Member_7');
+  assert.equal(resolvePropKey(pp, 'FOO'), 'Foo');
+  assert.equal(resolvePropKey(pp, 'absent'), undefined);
+  assert.equal(keyWalks, 0, 'resolvePropKey must not walk the key list');
+
+  // deleting the representative hands the fold to the next spelling
+  assert.equal(pp.delete('Foo'), true);
+  assert.equal(resolvePropKey(pp, 'FOO'), 'foo');
+  assert.equal(pp.delete('Member_7'), true);
+  assert.equal(resolvePropKey(pp, 'member_7'), undefined);
+  assert.equal(pp.get('foo'), 2);
+  assert.equal(keyWalks, 0);
+
+  // and the index stays exact through the bulk writes the corpus does
+  const big = new PropPairs();
+  for (let i = 0; i < 2000; i++) big.set(`Name_${i}`, i);
+  assert.equal(big.lowerKey('name_1999'), 'Name_1999');
+  assert.equal(big.lowerKey('NAME_0'), 'Name_0');
+  assert.equal(big.lowerKey('nope'), undefined);
+  big.deleteAt(1);
+  assert.equal(big.lowerKey('name_0'), undefined);
+  assert.equal(big.lowerKey('name_1'), 'Name_1');
+  assert.equal(big.size, 1999);
+});
+
+test('walking a text by line splits the string once, not once per line', () => {
+  // The corpus walks text line-by-line everywhere (`repeat with i = 1 to
+  // t.line.count` + `t.line[i]`), so the read path memoizes the split (see
+  // Interpreter.cachedChunkParts). Counting REAL splits pins that: before the
+  // memo this test saw one split per access (200) plus the interleaved word
+  // probes, after it sees one per distinct string.
+  const e = new DirectorEngine();
+  const text = Array.from({ length: 200 }, (_, i) => `element ${i} locH ${i} locV ${i} member m${i}`).join('\r');
+  const interp = e.interp as unknown as { chunkParts: (o: unknown, c: string) => string[] | null };
+  const real = interp.chunkParts.bind(e.interp);
+  let lineSplits = 0;
+  interp.chunkParts = (o, c) => { if (c === 'line') lineSplits++; return real(o, c); };
+  try {
+    const count = e.interp.chunkCount(text, 'line');
+    assert.equal(count, 200);
+    let joined = '';
+    for (let i = 1; i <= count; i++) {
+      // the real parse pattern: index the line, then take its first word
+      joined = String(e.interp.getChunkValue(text, 'line', i, i));
+      const first = String(e.interp.getChunkValue(joined, 'word', 1, 1));
+      assert.equal(first, 'element');
+    }
+    assert.equal(joined, 'element 199 locH 199 locV 199 member m199');
+    // One split for 200 accesses of the same string. (The word probes hit 200
+    // DISTINCT short strings, which is why the cache is capped per chunk.)
+    assert.equal(lineSplits, 1, `expected one line split for 200 accesses, saw ${lineSplits}`);
+  } finally {
+    interp.chunkParts = real;
+  }
 });
 
 test('text members and netTextResult normalize to Director CR line endings', () => {
@@ -4186,6 +4365,53 @@ test('sprite.backColor palette index resolves via the member bitmap palette (Ent
   e.setSpriteProp(s, 'backcolor', new LColor(1, 2, 3));
   assert.equal(e.getChannel(3).bgColorIndex, null, 'rgb clears the index');
   assert.equal(e.bgTintForChannel(e.getChannel(3)), (1 << 16) | (2 << 8) | 3, 'rgb tints directly');
+});
+
+test('avatar colour effects: ink 8 + rgb foreColor resolves a fg->bg duotone (x-ray)', () => {
+  // `hh_human/texts/0041_text_fx.11.txt` is only
+  //   human_sprite_props/[ink: 8, bgcolor: "#007700", forecolor: "#00FF00"]
+  // (the cast ships no fx.11 bitmaps), so "Avatar Effect Class"::setHumanSpriteProps
+  // writes pSprite.ink/bgColor/foreColor and the ramp IS the effect. The
+  // sprite's default `foreColor = 255` (palette index, black) must stay the
+  // no-op and leave the plain bg tint alone — the engine's own
+  // `resetSpriteColors` writes exactly that on every avatar.
+  const e = new DirectorEngine();
+  const s = e.getSprite(3);
+  e.setSpriteProp(s, 'ink', 8);
+  assert.equal(e.duotoneForChannel(e.getChannel(3)), null, 'default ink 8 sprite has no duotone');
+  e.setSpriteProp(s, 'bgcolor', new LColor(0, 0x77, 0));
+  assert.equal(e.duotoneForChannel(e.getChannel(3)), null, 'bgColor alone keeps the plain bg tint');
+  e.setSpriteProp(s, 'forecolor', new LColor(0, 0xff, 0));
+  assert.deepEqual(e.duotoneForChannel(e.getChannel(3)), { fg: 0x00ff00, bg: 0x007700 }, 'x-ray ramp');
+  assert.equal(e.foreColorRgbForChannel(e.getChannel(3)), 0x00ff00, 'rgb foreColor is a colour');
+  // `sprite.foreColor = 255` is a palette INDEX (black), not a colour.
+  e.setSpriteProp(s, 'forecolor', 255);
+  assert.equal(e.duotoneForChannel(e.getChannel(3)), null, 'palette-index foreColor is the no-op default');
+  assert.equal(e.foreColorRgbForChannel(e.getChannel(3)), null, 'index 255 resolves to black');
+  // ink 41 keeps its own fg source (`sprite.color`), so the ink-8 foreColor is
+  // not read: the leftover rgb backColor is a plain multiply-only ramp.
+  e.setSpriteProp(s, 'ink', 41);
+  assert.deepEqual(e.duotoneForChannel(e.getChannel(3)), { fg: 0x000000, bg: 0x007700 }, 'ink 41 ignores the foreColor');
+});
+
+test('respect flash: ink 41 + sprite.color tints even with a white backColor', () => {
+  // "Respect Flash Effect Class"::defineWithSprite sets `tsprite.ink = 41` and
+  // animates `tsprite.color` from grey to gold, but leaves backColor at the
+  // sprite default `paletteIndex(0)` (white). Gating the ink-41 ramp on a
+  // non-white backColor suppressed the entire flash; with fg set the ramp must
+  // run with bg defaulting to white.
+  const e = new DirectorEngine();
+  const s = e.getSprite(3);
+  e.setSpriteProp(s, 'ink', 41);
+  e.setSpriteProp(s, 'bgcolor', new LColor(255, 255, 255));
+  assert.equal(e.duotoneForChannel(e.getChannel(3)), null, 'ink 41 defaults are the identity');
+  e.setSpriteProp(s, 'color', new LColor(0x96, 0x96, 0x96));
+  assert.deepEqual(e.duotoneForChannel(e.getChannel(3)), { fg: 0x969696, bg: 0xffffff }, 'flash ramp with a white bg');
+  // The later phases of the flash + the deconstruct restore.
+  e.setSpriteProp(s, 'color', new LColor(62, 51, 15));
+  assert.deepEqual(e.duotoneForChannel(e.getChannel(3)), { fg: 0x3e330f, bg: 0xffffff }, 'dark phase');
+  e.setSpriteProp(s, 'color', new LColor(0, 0, 0));
+  assert.equal(e.duotoneForChannel(e.getChannel(3)), null, 'black fg over white bg is the identity again');
 });
 
 test('shape members emit kind:shape visuals with parsed dims (entry sky/box)', () => {
@@ -9330,4 +9556,48 @@ test('periodic timeout re-arms after first fire (Song Player loop fix)', () => {
   assert.ok(hasEntry, 'periodic timeout re-armed after first fire');
   (e as any).timeouts = (e as any).timeouts.filter((t: any) => t.obj !== fakeObj);
   (e.interp as any).callObjectHandler = orig;
+});
+
+/**
+ * The `renderer` setting (attribute or `?renderer=`) is user-facing, and a typo
+ * in it must not stop the client booting — so the parser is pinned here rather
+ * than trusted to pixi. The three backends differ in what they can draw (only
+ * WebGL has the custom subtract/darkest/lightest blend modes; only WebGL and
+ * WebGPU have filters), which is why a single name means "prefer" but `canvas`
+ * means "only".
+ */
+test('renderer preference parsing', () => {
+  // No setting, or an explicit `auto`: pixi's own order, webgl -> webgpu -> canvas.
+  assert.equal(parseRendererPreference(null), undefined);
+  assert.equal(parseRendererPreference(undefined), undefined);
+  assert.equal(parseRendererPreference(''), undefined);
+  assert.equal(parseRendererPreference('auto'), undefined);
+  assert.equal(parseRendererPreference('nonsense'), undefined);
+  // A single name means "prefer this"; the ordinary fallbacks stay, and pixi
+  // spells the WebGL2 path simply `webgl` (it upgrades to gl2 by itself).
+  assert.equal(parseRendererPreference('webgl'), 'webgl');
+  assert.equal(parseRendererPreference('webgl2'), 'webgl');
+  assert.equal(parseRendererPreference('WebGPU'), 'webgpu');
+  // Canvas is picked deliberately (to see the unaccelerated path), so force it.
+  assert.deepEqual(parseRendererPreference('canvas'), ['canvas']);
+  // A comma list is the exact order, with canvas appended as the fallback.
+  assert.deepEqual(parseRendererPreference('webgl,webgpu'), ['webgl', 'webgpu', 'canvas']);
+  assert.deepEqual(parseRendererPreference('webgpu, canvas'), ['webgpu', 'canvas']);
+  assert.deepEqual(parseRendererPreference('canvas,webgl'), ['canvas', 'webgl']);
+  // Duplicates and unknown entries are dropped.
+  assert.deepEqual(parseRendererPreference('webgl, webgl , nope,webgpu'), ['webgl', 'webgpu', 'canvas']);
+});
+
+/**
+ * The dev panel's "worst frame gap" is the first thing anyone reads when a
+ * frame feels slow, so it must not count time the browser refused to animate:
+ * a backgrounded tab produced `worst frame gap 4885ms` next to a 156ms longest
+ * long task, which reads as a runtime stall that never happened.
+ */
+test('dev overlay does not count a hidden tab as a frame gap', () => {
+  // Visible: the real rAF delta.
+  assert.equal(frameGap(1000, 984, false), 16);
+  // Hidden: throttled rAF makes the delta wall-clock noise, so it is discarded.
+  assert.equal(frameGap(5000, 16, true), 0);
+  assert.equal(frameGap(90000, 3000, true), 0);
 });

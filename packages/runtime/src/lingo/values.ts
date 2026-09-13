@@ -47,6 +47,70 @@ export class PropPairs implements Map<string, LVal> {
   private ks: string[] = [];
   private vs: LVal[] = [];
   private index: Map<string, number> | null = null;
+  /**
+   * lowercased key -> the first stored key with that fold, plus how many stored
+   * keys share it. This is the O(1) accelerator for [`resolvePropKey`], and every
+   * mutator below keeps it in step, so it can never go stale. Built lazily, so a
+   * small proplist never pays for it.
+   *
+   * Why it matters: without it a case-insensitive proplist WRITE is a linear scan
+   * of the whole key list, and the corpus writes huge proplists — `Resource
+   * Manager Class::preIndexMembers` keys `pAllMemNumList` by every member name in
+   * every castLib (~10k inserts at boot). Measured in isolation: 10k inserts cost
+   * 786ms linear vs 4ms indexed (and 1000 misses on the 10k map 133ms vs 0ms),
+   * which is ~800ms of the client's boot.
+   */
+  private lower: Map<string, { key: string; n: number }> | null = null;
+
+  private addLower(key: string): void {
+    if (!this.lower) return;
+    const fold = key.toLowerCase();
+    const entry = this.lower.get(fold);
+    if (entry) entry.n++;
+    else this.lower.set(fold, { key, n: 1 });
+  }
+
+  /** Called AFTER the key is spliced out, so the successor lookup sees the rest. */
+  private removeLower(key: string): void {
+    const lower = this.lower;
+    if (!lower) return;
+    const fold = key.toLowerCase();
+    const entry = lower.get(fold);
+    if (!entry) return;
+    if (--entry.n <= 0) {
+      lower.delete(fold);
+      return;
+    }
+    if (entry.key === key) {
+      // The fold's representative went away (a proplist with two spellings of one
+      // key, e.g. #Foo and #foo); the next stored key with that fold takes over.
+      const next = this.ks.find((k) => k.toLowerCase() === fold);
+      if (next !== undefined) entry.key = next;
+    }
+  }
+
+  private ensureLower(): Map<string, { key: string; n: number }> {
+    if (this.lower) return this.lower;
+    const lower = new Map<string, { key: string; n: number }>();
+    for (const k of this.ks) {
+      const fold = k.toLowerCase();
+      const entry = lower.get(fold);
+      if (entry) entry.n++;
+      else lower.set(fold, { key: k, n: 1 });
+    }
+    this.lower = lower;
+    return lower;
+  }
+
+  /**
+   * The first stored key whose lowercase form matches `key` (the caller checks for
+   * an exact match first — see `resolvePropKey`). A miss is authoritative: every
+   * key added through `set`/`append` and removed through `delete`/`deleteAt` is
+   * counted, so no unaccounted key can be holding that fold.
+   */
+  lowerKey(key: string): string | undefined {
+    return this.ensureLower().get(key.toLowerCase())?.key;
+  }
 
   constructor(entries?: Iterable<[string, LVal]> | null) {
     if (entries) {
@@ -88,6 +152,7 @@ export class PropPairs implements Map<string, LVal> {
     this.ks = [];
     this.vs = [];
     this.index = null;
+    this.lower = null;
   }
 
   delete(key: string): boolean {
@@ -96,6 +161,7 @@ export class PropPairs implements Map<string, LVal> {
     this.ks.splice(i, 1);
     this.vs.splice(i, 1);
     this.index = null;
+    this.removeLower(key);
     return true;
   }
 
@@ -121,6 +187,7 @@ export class PropPairs implements Map<string, LVal> {
       this.ks.push(key);
       this.vs.push(value);
       if (this.index) this.index.set(key, this.vs.length - 1);
+      this.addLower(key);
     }
     return this;
   }
@@ -129,6 +196,7 @@ export class PropPairs implements Map<string, LVal> {
     this.ks.push(key);
     this.vs.push(value);
     if (this.index && !this.index.has(key)) this.index.set(key, this.vs.length - 1);
+    this.addLower(key);
   }
 
   getAt(n: number): LVal | undefined {
@@ -142,9 +210,11 @@ export class PropPairs implements Map<string, LVal> {
   deleteAt(n: number): void {
     const i = n - 1;
     if (i >= 0 && i < this.vs.length) {
+      const key = this.ks[i];
       this.ks.splice(i, 1);
       this.vs.splice(i, 1);
       this.index = null;
+      this.removeLower(key);
     }
   }
 
@@ -794,9 +864,12 @@ export function lingoEquals(a: LVal, b: LVal): boolean {
   if (typeof a === 'string' && typeof b === 'string') {
     return a.toLowerCase() === b.toLowerCase();
   }
-  if (a instanceof LSymbol && b instanceof LSymbol) return a.name === b.name;
-  if (a instanceof LSymbol && typeof b === 'string') return a.name === b;
-  if (typeof a === 'string' && b instanceof LSymbol) return a === b.name;
+  // Lingo symbols fold case (#Info and #info are the SAME symbol) — and `=` is
+  // the comparison proplist lookups use, so this is what makes symbol keys and
+  // FUSE id lists case-insensitive (getOne/getPos/deleteOne/case-of).
+  if (a instanceof LSymbol && b instanceof LSymbol) return a.name.toLowerCase() === b.name.toLowerCase();
+  if (a instanceof LSymbol && typeof b === 'string') return a.name.toLowerCase() === b.toLowerCase();
+  if (typeof a === 'string' && b instanceof LSymbol) return a.toLowerCase() === b.name.toLowerCase();
   if (typeof a === 'number' && typeof b === 'string') {
     const nb = Number(b);
     return !Number.isNaN(nb) && a === nb;
@@ -881,6 +954,39 @@ export function toLingoString(v: LVal): string {
   if (v instanceof LColor) return `color(${v.red}, ${v.green}, ${v.blue})`;
   if (v instanceof LStageRef) return `stage(${v.width}, ${v.height})`;
   return String(v);
+}
+
+/** The subset of PropPairs/Map used to resolve a stored key. */
+export interface PropKeyLookup {
+  keys(): IterableIterator<string>;
+  has(k: string): boolean;
+  /** Optional O(1) case-fold accelerator (PropPairs provides it — see lowerKey). */
+  lowerKey?(k: string): string | undefined;
+}
+
+/**
+ * Resolve a proplist/object key the way Lingo `=` compares values: an exact
+ * match wins, otherwise the first key that differs only in case. Keys are
+ * STORED as written (getPropAt/toLingoString keep the author's casing) and only
+ * the lookup folds, which is why this returns the stored key — writes reuse it
+ * so a mixed-case read/write pair can never grow a case twin.
+ *
+ * Corpus reason: the v31 client creates the hotel connection under the id it
+ * reads from `connection.info.id` (= `#info`) while `hh_room_utils/0071 Respect
+ * Manager Class` asks for `#Info`; the same fold is needed for that
+ * connection's command table (`pCommandsList[#info]`), the manager id lists
+ * (`pItemList.getOne`) and the dropmenu margin keys (`#marginh` vs `#marginH`).
+ */
+export function resolvePropKey(props: PropKeyLookup, key: string): string | undefined {
+  if (props.has(key)) return key;
+  // PropPairs carries a maintained fold index, so the fallback scan is only for a
+  // plain Map (object instance props) and never runs for corpus proplists.
+  if (props.lowerKey) return props.lowerKey(key);
+  const lower = key.toLowerCase();
+  for (const k of props.keys()) {
+    if (k.toLowerCase() === lower) return k;
+  }
+  return undefined;
 }
 
 export function keyOf(v: LVal): string | undefined {

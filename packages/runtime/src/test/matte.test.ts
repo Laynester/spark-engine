@@ -637,6 +637,68 @@ test('matteSpriteHitTest: ink 8 falls through transparent pixels, others are bou
   assert.equal(matteSpriteHitTest(8, data, 4, 4, 2, 2), false, 'sanity: ink 8 still falls through at end');
 });
 
+test('matte keys the opaque white block on a transparent-bordered avatar canvas (respect flash / x-ray)', () => {
+  // The respect flash (`Respect Flash Effect Class::defineWithSprite` sets
+  // tsprite.ink = 41 on the human sprite) and the X-ray effect
+  // (`human_sprite_props/[ink: 8, ...]`) both switch the avatar from ink 36 to a
+  // matte-family ink. The avatar canvas is `image(w,h,32)` — TRANSPARENT to start
+  // with — and `render` copies only `pUpdateRect` out of the WHITE-FILLED
+  // pBuffer, so the body sits in an opaque white block surrounded by transparent
+  // canvas. The 'key' path (ink 36) keys that block anywhere in the image, but
+  // `resolveChannelMatte` bailed out on the transparent border, so the moment the
+  // ink changed the white block came back — the white rectangle around every
+  // avatar during a respect flash. White must be keyed whenever there is opaque
+  // art for it to bound.
+  const W = 16, H = 24;
+  const { data, fill } = makeImage(W, H);
+  for (let i = 0; i < W * H; i++) data[i * 4 + 3] = 0; // canvas starts transparent
+  for (let y = 3; y < H - 3; y++) {
+    for (let x = 3; x < W - 3; x++) fill(x, y, 255, 255, 255); // the pUpdateRect white block
+  }
+  for (let y = 8; y < H - 8; y++) {
+    for (let x = 6; x < W - 6; x++) fill(x, y, 40, 90, 180); // the drawn avatar art
+  }
+  const changed = bakeEdgeBackground(data, W, H, 'matte');
+  assert.ok(changed, 'the white block must be baked away');
+  assert.equal(alphaAt(data, W, 3, 3), 0, 'white block corner keyed');
+  assert.equal(alphaAt(data, W, W - 4, H - 4), 0, 'white block corner keyed');
+  assert.equal(alphaAt(data, W, 7, 7), 0, 'white between block edge and art keyed');
+  assert.equal(alphaAt(data, W, 8, 10), 255, 'avatar art survives');
+  assert.equal(alphaAt(data, W, 0, 0), 0, 'transparent canvas untouched');
+});
+
+test('matte still skips a transparent-bordered canvas whose only opaque pixels are white (glyphs)', () => {
+  // Same geometry, but the white IS the artwork: nothing but white is opaque, so
+  // there is no art for a white key to bound and keying would erase the glyphs.
+  const W = 16, H = 24;
+  const { data, fill } = makeImage(W, H);
+  for (let i = 0; i < W * H; i++) data[i * 4 + 3] = 0;
+  for (let y = 8; y < 14; y++) {
+    for (let x = 4; x < 12; x++) fill(x, y, 255, 255, 255);
+  }
+  assert.equal(bakeEdgeBackground(data, W, H, 'matte'), false, 'no colour matte for white-only art');
+  assert.equal(alphaAt(data, W, 5, 10), 255, 'white art survives');
+});
+
+test('bakeSurface duotone remaps through fg->bg (x-ray green, respect flash)', () => {
+  // The avatar colour effects ship no art — `fx.11` is only
+  // `human_sprite_props/[ink: 8, bgcolor: "#007700", forecolor: "#00FF00"]` —
+  // so the fg/bg ramp IS the effect: black -> foreColor, white -> backColor.
+  // Same maths for ink 41's `sprite.color` flash.
+  const W = 3, H = 1;
+  const { data, fill } = makeImage(W, H);
+  fill(0, 0, 0, 0, 0); // outline
+  fill(1, 0, 200, 200, 200); // body highlight
+  fill(2, 0, 255, 255, 255); // keyed background (must stay transparent)
+  data[2 * 4 + 3] = 0;
+  const out = bakeSurface(data, W, H, 'matte', null, undefined, 8, 0, undefined, null, { fg: 0x00ff00, bg: 0x007700 });
+  const at = (x: number): [number, number] => [out.pixels[x * 4 + 1], out.pixels[x * 4 + 3]];
+  assert.deepEqual(at(0), [255, 255], 'black outline -> bright green fg');
+  assert.deepEqual(at(1), [148, 255], 'mid grey -> the dark green bg end of the ramp');
+  assert.equal(out.pixels[2 * 4 + 3], 0, 'keyed background untouched by the ramp');
+  assert.ok(out.changed, 'duotone reports a change');
+});
+
 test('ink-8 matte skips transparent-bordered text images (entry_bar white glyphs survive)', () => {
   // The corpus Text Wrapper pastes the field member image ink-8 over its own
   // pimage.fill() background. The member `.image` is TRANSPARENT + white

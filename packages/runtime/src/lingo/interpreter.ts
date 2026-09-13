@@ -2,7 +2,7 @@ import type { Expr, Handler, Script, Stmt, TheSegment } from './ast.js';
 import { parseExpr } from './parser.js';
 import {
   asNum, colorFrom, duplicateValue, ilkOf, isTruthy, keyOf, rawKeyOf, LEMPTY, lingoAdd, lingoConcat,
-  lingoDivide, lingoEquals, lingoListCompare, lingoMod, lingoMultiply, lingoNegate, lingoSubtract, toLingoString, VOID,
+  lingoDivide, lingoEquals, lingoListCompare, lingoMod, lingoMultiply, lingoNegate, lingoSubtract, resolvePropKey, toLingoString, VOID,
   type LImage, type LList, type LMemberRef, type LObject, type LPoint, type LPropList,
   type LRect, type LSpriteRef, type LStageRef, type LVal, type LWindowRef,
   LSymbol, LCastLibRef, LList as LListClass, LPropList as LPropListClass,
@@ -95,6 +95,43 @@ export function scriptPropsLower(script: Script): Set<string> {
 }
 
 const LINE_SEP_RE = /\r\n|\r|\n/g;
+
+/** Per-chunk-kind cache bounds for the memoized read path (`cachedChunkParts`). */
+const CHUNK_CACHE_SCOPES = 8;
+const CHUNK_CACHE_STRINGS = 8;
+
+/**
+ * Split a string on Director's line separators (CRLF | CR | LF) without a
+ * regexp, exactly like `s.split(/\r\n|\r|\n/)`.
+ *
+ * `String.prototype.split` with a RegExp costs ~45ns PER CHARACTER of the
+ * subject in Chrome — ~1.4ms for the 35 KB `nav_gr0.window` layout, clean or
+ * not (a no-match split of the same string is the same 1.4ms, while
+ * `re.exec(s)` is 0.0005ms and `s.split('\r')` is 0.005ms). `Layout Parser
+ * Class::parse_window` reads `tdata.line[i]` once per line for each of its four
+ * tags (752 accesses on that file), so the first navigator tab click spent
+ * 1.07s of its 1.18s right here. Scanning with indexOf is ~0.02ms for the same
+ * 182-line string.
+ *
+ * `chunkCount`'s `countRegexRuns` needs no counterpart: it loops on `re.exec`,
+ * which stays on V8's fast path.
+ */
+function splitLinesRaw(s: string): string[] {
+  const out: string[] = [];
+  let start = 0;
+  for (;;) {
+    const cr = s.indexOf('\r', start);
+    const lf = s.indexOf('\n', start);
+    const at = cr < 0 ? lf : lf < 0 ? cr : cr < lf ? cr : lf;
+    if (at < 0) break;
+    out.push(s.slice(start, at));
+    start = at + 1;
+    // A CRLF pair is one separator, not two.
+    if (s.charCodeAt(at) === 13 && s.charCodeAt(start) === 10) start++;
+  }
+  out.push(s.slice(start));
+  return out;
+}
 
 function countRegexRuns(s: string, re: RegExp): number {
   let n = 0;
@@ -481,15 +518,19 @@ export class Interpreter {
     }
     const lower = name.toLowerCase();
     if (lower === 'get' || lower === 'getaprop' || lower === 'getproperty') {
-      return obj.props.get(keyOf(args[0]) ?? '') ?? VOID;
+      const key = keyOf(args[0]);
+      if (key === undefined) return VOID;
+      const stored = resolvePropKey(obj.props, key);
+      return (stored === undefined ? undefined : obj.props.get(stored)) ?? VOID;
     }
     if (lower === 'set' || lower === 'setaprop' || lower === 'setproperty') {
       const key = keyOf(args[0]);
       if (key !== undefined) {
+        const stored = resolvePropKey(obj.props, key) ?? key;
         const value = args[1] ?? VOID;
-        if (key === 'ancestor' && (value === null || value === undefined)) {
-          if (!(obj.props.get('ancestor') instanceof LObjectClass)) obj.props.set(key, value);
-        } else obj.props.set(key, value);
+        if (stored === 'ancestor' && (value === null || value === undefined)) {
+          if (!(obj.props.get('ancestor') instanceof LObjectClass)) obj.props.set(stored, value);
+        } else obj.props.set(stored, value);
       }
       return VOID;
     }
@@ -1395,7 +1436,7 @@ export class Interpreter {
         return VOID;
       case 'setprop':
       case 'setaprop':
-        if (key !== undefined) pl.props.set(key, args[1] ?? VOID);
+        if (key !== undefined) this.propSet(pl, key, args[1] ?? VOID);
         return VOID;
       case 'getprop':
       case 'getaprop':
@@ -1406,7 +1447,7 @@ export class Interpreter {
         return i >= 1 && i <= keys.length ? rawKeyOf(keys[i - 1]) : VOID;
       }
       case 'deleteprop':
-        if (key !== undefined) pl.props.delete(key);
+        if (key !== undefined) this.propDelete(pl, key);
         return VOID;
       case 'getat': {
         const i = Math.round(asNum(args[0]));
@@ -1448,8 +1489,9 @@ export class Interpreter {
       case 'findpos': {
         const k = keyOf(args[0]);
         const keys = [...pl.props.keys()];
+        const stored = k === undefined ? undefined : resolvePropKey(pl.props, k);
         for (let i = 0; i < keys.length; i++) {
-          if (k !== undefined && keys[i] === k) return i + 1;
+          if (stored !== undefined && keys[i] === stored) return i + 1;
           if (lingoEquals(keys[i], args[0] ?? VOID)) return i + 1;
         }
         return VOID;
@@ -1896,8 +1938,8 @@ export class Interpreter {
       let hops = 0;
       while (cur) {
         if (cur.script && this.propsLowerOf(cur.script).has(lower)) {
-          const v =
-            cur.props.has(name) ? cur.props.get(name) : cur.props.has(lower) ? cur.props.get(lower) : undefined;
+          const key = resolvePropKey(cur.props, name) ?? resolvePropKey(cur.props, lower);
+          const v = key === undefined ? undefined : cur.props.get(key);
           if (v === undefined) return VOID;
           if (this.objectFloatProps.get(cur)?.has(lower)) return this.markFloatValue(v);
           return v;
@@ -1906,12 +1948,9 @@ export class Interpreter {
         const anc = cur.props.get('ancestor');
         cur = anc instanceof LObjectClass ? anc : null;
       }
-      if (obj.props.has(name)) {
-        const v = obj.props.get(name)!;
-        return this.objectFloatProps.get(obj)?.has(lower) ? this.markFloatValue(v) : v;
-      }
-      if (obj.props.has(lower)) {
-        const v = obj.props.get(lower)!;
+      const stored = resolvePropKey(obj.props, name);
+      if (stored !== undefined) {
+        const v = obj.props.get(stored)!;
         return this.objectFloatProps.get(obj)?.has(lower) ? this.markFloatValue(v) : v;
       }
       return VOID;
@@ -1969,21 +2008,21 @@ export class Interpreter {
       let hops = 0;
       while (cur && cur.script) {
         if (this.propsLowerOf(cur.script).has(lower)) {
-          cur.props.set(name, value);
+          cur.props.set(resolvePropKey(cur.props, name) ?? name, value);
           return;
         }
         if (++hops > 32) break;
         const anc = cur.props.get('ancestor');
         cur = anc instanceof LObjectClass ? anc : null;
       }
-      obj.props.set(name, value);
+      obj.props.set(resolvePropKey(obj.props, name) ?? name, value);
       if (obj.scriptName.startsWith('sound:') && lower === 'volume') {
         this.host.soundChannelMethod?.(obj, 'setVolume', [value]);
       }
       return;
     }
     if (obj instanceof LPropListClass) {
-      obj.props.set(name, value);
+      this.propSet(obj, name, value);
       return;
     }
     if (obj instanceof LColorClass) {
@@ -2027,25 +2066,32 @@ export class Interpreter {
     this.host.warn(`cannot set ${name} on ${toLingoString(obj)}`);
   }
 
+  /** Read one proplist key: key-author's casing first, then the case-folded
+   *  match (Lingo proplist lookups use `=` semantics — see resolvePropKey), and
+   *  only then the space/underscore spelling variants the corpus mixes. */
   private propGet(pl: LPropList, key: string | undefined): LVal | undefined {
     if (key === undefined) return undefined;
-    const direct = pl.props.get(key);
-    if (direct !== undefined) return direct;
+    const direct = resolvePropKey(pl.props, key);
+    if (direct !== undefined) return pl.props.get(direct);
     const variants: string[] = [];
     if (key.includes(' ')) variants.push(key.replaceAll(' ', '_'));
     if (key.includes('_')) variants.push(key.replaceAll('_', ' '));
     if (key.includes(' ') && key.includes('_')) variants.push(key.replaceAll(' ', '_').replaceAll('_', ' '));
     for (const variant of variants) {
-      const v = pl.props.get(variant);
-      if (v !== undefined) return v;
-    }
-    if (key === 'marginH' || key === 'marginV' || key === 'marginbottom') {
-      const lower = key.toLowerCase();
-      for (const [k, v] of pl.props) {
-        if (k.toLowerCase() === lower) return v;
-      }
+      const vk = resolvePropKey(pl.props, variant);
+      if (vk !== undefined) return pl.props.get(vk);
     }
     return undefined;
+  }
+
+  /** Store one proplist key without growing a case twin of an existing key. */
+  private propSet(pl: LPropList, key: string, value: LVal): void {
+    pl.props.set(resolvePropKey(pl.props, key) ?? key, value);
+  }
+
+  private propDelete(pl: LPropList, key: string): void {
+    const existing = resolvePropKey(pl.props, key);
+    if (existing !== undefined) pl.props.delete(existing);
   }
 
   getIndexValue(obj: LVal, index: LVal): LVal {
@@ -2118,7 +2164,7 @@ export class Interpreter {
         return;
       }
       const key = keyOf(index);
-      if (key !== undefined) obj.props.set(key, value);
+      if (key !== undefined) this.propSet(obj, key, value);
       return;
     }
     if (obj instanceof LRectClass) {
@@ -2157,6 +2203,53 @@ export class Interpreter {
   }
 
 
+  /**
+   * Memoized [`chunkParts`] for the READ path (see `getChunkValue`).
+   *
+   * Lingo's standard way to walk text is `repeat with i = 1 to t.line.count` +
+   * `t.line[i]`, so a naive splitter re-splits the WHOLE string once per line —
+   * `Layout Parser Class::parse_window` does that 749 times for the 34.8KB
+   * `nav_gr0.window`, i.e. 136k throwaway substring allocations per window build.
+   * Strings are immutable, so a split result is good for the life of the value,
+   * and every reader only ever indexes/slices it (writes go through the
+   * uncached `chunkParts` + `setChunkValue`, which BUILD a new string, so a
+   * cached array is never mutated).
+   *
+   * LRU-touched with a small per-chunk cap: a parse loop hits the SAME string on
+   * every iteration (so it is never the eviction victim) while the interleaved
+   * `tLine.word[1]` probes churn through short strings that are cheap to re-split.
+   */
+  private chunkPartCache = new Map<string, Map<string, string[]>>();
+
+  private cachedChunkParts(obj: LVal, chunk: string): string[] | null {
+    if (typeof obj !== 'string') return this.chunkParts(obj, chunk);
+    // `item` depends on the mutable itemDelimiter, so it belongs in the scope.
+    const scope = chunk === 'item' ? `item\u0000${this.host.itemDelimiter()}` : chunk;
+    let byString = this.chunkPartCache.get(scope);
+    if (!byString) {
+      byString = new Map();
+      this.chunkPartCache.set(scope, byString);
+      if (this.chunkPartCache.size > CHUNK_CACHE_SCOPES) {
+        const oldest = this.chunkPartCache.keys().next().value;
+        if (oldest !== undefined) this.chunkPartCache.delete(oldest);
+      }
+    }
+    const hit = byString.get(obj);
+    if (hit !== undefined) {
+      byString.delete(obj);
+      byString.set(obj, hit);
+      return hit;
+    }
+    const parts = this.chunkParts(obj, chunk);
+    if (parts === null) return null;
+    byString.set(obj, parts);
+    if (byString.size > CHUNK_CACHE_STRINGS) {
+      const oldest = byString.keys().next().value;
+      if (oldest !== undefined) byString.delete(oldest);
+    }
+    return parts;
+  }
+
   private chunkParts(obj: LVal, chunk: string): string[] | null {
     let str: string | null = typeof obj === 'string' ? obj : null;
     if (str === null) {
@@ -2173,18 +2266,17 @@ export class Interpreter {
       case 'word':
         return str.split(/[\s\x00-\x1f\x7f]+/).filter((w) => w.length > 0);
       case 'line':
-        return str.split(LINE_SEP_RE);
+      case 'paragraph':
+        return splitLinesRaw(str);
       case 'item':
         return str.split(this.host.itemDelimiter());
-      case 'paragraph':
-        return str.split(LINE_SEP_RE);
       default:
         return null;
     }
   }
 
   getChunkValue(obj: LVal, chunk: string, from?: number, to?: number): LVal {
-    const parts = this.chunkParts(obj, chunk);
+    const parts = this.cachedChunkParts(obj, chunk);
     if (parts === null) return VOID;
     const rawStart = from ?? 1;
     const rawEnd = to ?? rawStart;

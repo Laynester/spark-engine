@@ -20,6 +20,7 @@ import { composeFilmLoopFrame, filmLoopImage, planFilmLoopComposition, prepareFi
 import { decodeImage } from './pix8.js';
 import { decodePng } from './png.js';
 import { decodeGif } from './gif.js';
+import { inverseDirectorTransformPoint } from '../stage/pixi.js';
 
 const WEB_TO_DIRECTOR_KEYCODE: Record<number, number> = {
   8: 51,
@@ -2231,7 +2232,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       const handler = args[0] instanceof LSymbol ? args[0].name : toLingoString(args[0] ?? '');
       const objId = toLingoString(args[1] ?? '');
       const msg = args[2] instanceof LSymbol ? args[2].name : toLingoString(args[2] ?? '');
-      const obj = this.objects.get(objId);
+      const obj = this.getObjectById(objId);
       if (lower === 'registerprocedure' && obj && handler && msg) this.addEvent(msg, handler, obj);
       return VOID;
     }
@@ -2270,7 +2271,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       }
       case 'registerprocedure': {
         const handler = toLingoString(args[0]);
-        const obj = this.objects.get(toLingoString(args[1])) ?? null;
+        const obj = this.getObjectById(toLingoString(args[1])) ?? null;
         const msg = args[2] instanceof LSymbol ? args[2].name : toLingoString(args[2] ?? '');
         if (obj) {
           data.procs.push({ handler, obj });
@@ -2346,11 +2347,22 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     const hits: { ch: Channel; z: number; n: number }[] = [];
     for (let i = 1; i < this.channels.length; i++) {
       const ch = this.channels[i];
-      if (!ch.member || ch.visible !== 1) continue;
-      const w = ch.width ?? ch.member.width;
-      const h = ch.height ?? ch.member.height;
+      const member = ch.member;
+      if (!member || ch.visible !== 1) continue;
+      const w = ch.width ?? member.width;
+      const h = ch.height ?? member.height;
       if (w <= 0 || h <= 0) continue;
-      if (x < ch.left || x > ch.right || y < ch.top || y > ch.bottom) continue;
+      // Apply inverse transform for rotated/flipped sprites to get correct hit bounds
+      let tx = x;
+      let ty = y;
+      if (ch.rotation !== 0 || ch.skew !== 0 || ch.flipH === 1 || ch.flipV === 1) {
+        const inv = inverseDirectorTransformPoint(ch.rotation || 0, ch.skew || 0, ch.flipH, ch.flipV, ch.locH, ch.locV, x, y);
+        tx = inv.tx;
+        ty = inv.ty;
+      }
+      const left = ch.locH - (member.regX ?? 0);
+      const top = ch.locV - (member.regY ?? 0);
+      if (tx < left || tx > left + w || ty < top || ty > top + h) continue;
       hits.push({ ch, z: ch.locZ, n: i });
     }
     hits.sort((a, b) => (b.z - a.z) || (b.n - a.n));
@@ -2363,13 +2375,25 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   }
 
   private spritePixelAccept(ch: Channel, w: number, h: number, x: number, y: number): boolean {
+    const member = ch.member;
+    if (!member) return true;
     if (ch.ink !== 8) return true;
-    const img = this.memberImage(ch.member!);
+    const img = this.memberImage(member);
     const sw = Math.round(img.width);
     const sh = Math.round(img.height);
     if (sw < 1 || sh < 1) return true;
-    const px = Math.round((x - ch.left) * (sw / Math.max(1, w)));
-    const py = Math.round((y - ch.top) * (sh / Math.max(1, h)));
+    // Apply inverse transform for rotated/flipped sprites
+    let tx = x;
+    let ty = y;
+    if (ch.rotation !== 0 || ch.skew !== 0 || ch.flipH === 1 || ch.flipV === 1) {
+      const inv = inverseDirectorTransformPoint(ch.rotation || 0, ch.skew || 0, ch.flipH, ch.flipV, ch.locH, ch.locV, x, y);
+      tx = inv.tx;
+      ty = inv.ty;
+    }
+    const left = ch.locH - (member.regX ?? 0);
+    const top = ch.locV - (member.regY ?? 0);
+    const px = Math.round((tx - left) * (sw / Math.max(1, w)));
+    const py = Math.round((ty - top) * (sh / Math.max(1, h)));
     if (px < 0 || py < 0 || px >= sw || py >= sh) return true;
     const data = img.ensure();
     return data[(py * sw + px) * 4 + 3] !== 0;
@@ -2383,16 +2407,33 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     return this.interp.makeInstance(script, this.getUniqueId());
   }
 
+  /**
+   * Resolve an id (object / connection / listener table) the way Lingo does:
+   * ids are symbols or strings and fold case, so `#Info` and `#info` are the
+   * same id. Exact match wins; the existing spelling is returned so a write
+   * updates the stored entry instead of creating a case twin.
+   */
+  private idKey<T>(map: Map<string, T>, id: string): string | undefined {
+    if (map.has(id)) return id;
+    const lower = id.toLowerCase();
+    for (const k of map.keys()) {
+      if (k.toLowerCase() === lower) return k;
+    }
+    return undefined;
+  }
+
   getObjectById(id: string): LObject | null {
-    return this.objects.get(id) ?? null;
+    const key = this.idKey(this.objects, id);
+    return key === undefined ? null : this.objects.get(key) ?? null;
   }
 
   setObjectById(id: string, obj: LObject): void {
-    this.objects.set(id, obj);
+    this.objects.set(this.idKey(this.objects, id) ?? id, obj);
   }
 
   removeObjectById(id: string): void {
-    this.objects.delete(id);
+    const key = this.idKey(this.objects, id);
+    if (key !== undefined) this.objects.delete(key);
   }
 
   getUniqueId(): string {
@@ -3079,23 +3120,27 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   }
 
   registerListener(connId: string, objId: string, msgs: LVal): void {
-    if (!this.listeners.has(connId)) this.listeners.set(connId, []);
-    this.listeners.get(connId)!.push({ objId, msgs });
+    const key = this.idKey(this.listeners, connId) ?? connId;
+    if (!this.listeners.has(key)) this.listeners.set(key, []);
+    this.listeners.get(key)!.push({ objId, msgs });
     this.log(`listener: ${objId} on ${connId}`);
   }
 
   registerCommands(connId: string, objId: string, cmds: LVal): void {
-    if (!this.commands.has(connId)) this.commands.set(connId, []);
-    this.commands.get(connId)!.push({ objId, cmds });
+    const key = this.idKey(this.commands, connId) ?? connId;
+    if (!this.commands.has(key)) this.commands.set(key, []);
+    this.commands.get(key)!.push({ objId, cmds });
   }
 
   unregisterListener(connId: string, objId: string): void {
-    const list = this.listeners.get(connId);
-    if (list) this.listeners.set(connId, list.filter((l) => l.objId !== objId));
+    const key = this.idKey(this.listeners, connId);
+    const list = key === undefined ? undefined : this.listeners.get(key);
+    if (key !== undefined && list) this.listeners.set(key, list.filter((l) => l.objId !== objId));
   }
 
   getConnection(id: string): LVal {
-    const existing = this.connections.get(id);
+    const existingKey = this.idKey(this.connections, id);
+    const existing = existingKey === undefined ? undefined : this.connections.get(existingKey);
     if (existing) return existing;
     const script: Script = {
       name: `connection:${id}`,
@@ -3132,11 +3177,12 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   }
 
   connectionExists(id: string): boolean {
-    return this.connections.has(id);
+    return this.idKey(this.connections, id) !== undefined;
   }
 
   removeConnection(id: string): void {
-    this.connections.delete(id);
+    const key = this.idKey(this.connections, id);
+    if (key !== undefined) this.connections.delete(key);
   }
 
 
@@ -3711,29 +3757,39 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         changed = this.bgTintForChannel(ch) !== null;
         break;
       }
-      case 'forecolor':
-        ch.foreColor = this.colorToInt(value);
+      case 'forecolor': {
+        // Like backColor: a bare number is a Director palette INDEX (resolved
+        // against the source member's own palette at render time), while
+        // rgb()/string is a real colour. The avatar colour effects set
+        // `foreColor = rgb("#00FF00")`; `resetSpriteColors` sets the default
+        // `foreColor = 255` (index, black) which must stay inert.
+        const raw = typeof value === 'number' ? Math.round(value) : NaN;
+        if (!Number.isNaN(raw) && raw >= 0 && raw <= 255) {
+          ch.foreColorIndex = raw;
+          ch.foreColor = raw;
+          ch.foreColorIsRgb = false;
+        } else {
+          ch.foreColorIndex = null;
+          ch.foreColor = this.colorToInt(value);
+          ch.foreColorIsRgb = value instanceof LColor || typeof value === 'string';
+        }
         changed = false;
         break;
+      }
       case 'rotation':
         ch.rotation = asNum(value);
-        changed = false;
         break;
       case 'skew':
         ch.skew = asNum(value);
-        changed = false;
         break;
       case 'fliph':
         ch.flipH = Math.round(asNum(value));
-        changed = false;
         break;
       case 'flipv':
         ch.flipV = Math.round(asNum(value));
-        changed = false;
         break;
       case 'scale':
         ch.scale = Math.max(0.0001, asNum(value) || 1);
-        changed = false;
         break;
       case 'puppet':
         ch.puppet = Math.round(asNum(value));
@@ -3794,6 +3850,65 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       }
       if (ch.bgColorIndex === 255) return 0x000000;
       return null;
+    }
+    return null;
+  }
+
+  /**
+   * The sprite foreColor resolved to an RGB colour, or null when it carries no
+   * colour for the render path (unset, or a palette index that resolves to
+   * black — the corpus default `sprite.foreColor = 255`). Only an explicit
+   * rgb()/string assignment produces a colour, so engine code that keeps the
+   * Director default never tints anything.
+   */
+  foreColorRgbForChannel(ch: Channel): number | null {
+    if (ch.foreColorIsRgb) return ch.foreColor === 0x000000 ? null : ch.foreColor;
+    if (ch.foreColorIndex != null) {
+      const pal = ch.member?.palette;
+      if (pal && pal[ch.foreColorIndex]) {
+        const [r, g, b] = pal[ch.foreColorIndex];
+        const rgb = ((r & 0xff) << 16) | ((g & 0xff) << 8) | (b & 0xff);
+        return rgb === 0x000000 ? null : rgb;
+      }
+      return null;
+    }
+    return null;
+  }
+
+  /**
+   * The fg→bg duotone a channel's ink asks for, or null when it is the identity.
+   *
+   * Both users of this are authoured as "remap every pixel through a
+   * foreground→background ramp" (`mix(src, fg, bg)` per channel, black→fg and
+   * white→bg — the same maths `tintSpriteDarken` runs, and the same direction
+   * LibreShockwave's indexed matte remap uses):
+   *
+   *  - ink 41 (Darken) with `sprite.color` (foreColor) and backColor. Director
+   *    and both reference players use the Director defaults fg=black/bg=white,
+   *    which are the identity. The respect flash sets ONLY `sprite.color`
+   *    (`tsprite.color = color(#rgb, 247,204,59)`) and leaves backColor at
+   *    `paletteIndex(0)` (white), so gating this on a non-white backColor
+   *    suppressed the whole flash. A set fg therefore has to run the duotone
+   *    with bg defaulting to white.
+   *
+   *  - inks 8/9 with an EXPLICIT RGB foreColor: the avatar colour effects.
+   *    `hh_human/texts/0041_text_fx.11.txt` (X-Ray) is just
+   *    `human_sprite_props/[ink: 8, bgcolor: "#007700", forecolor: "#00FF00"]`
+   *    and ships no bitmaps at all, so that ramp IS the effect: black→#00FF00,
+   *    white→#007700, which reads as the green x-ray look. fx.12 (Ice) is the
+   *    same shape with `#66CCFF`/`#CCFFFF`.
+   */
+  duotoneForChannel(ch: Channel): { fg: number; bg: number } | null {
+    const bg = this.bgTintForChannel(ch) ?? 0xffffff;
+    if (ch.ink === 41) {
+      const fg = ch.colorSet ? ch.color : 0x000000;
+      if (bg === 0xffffff && fg === 0x000000) return null;
+      return { fg, bg };
+    }
+    if (ch.ink === 8 || ch.ink === 9) {
+      const fg = this.foreColorRgbForChannel(ch);
+      if (fg === null) return null;
+      return { fg, bg };
     }
     return null;
   }

@@ -103,6 +103,15 @@ un-minified `.js`), drop it on a page next to your bundles, and embed:
 - `width` / `height` — optional stage size override (defaults to the movie's
   `movie.txt`).
 - `log` — a CSS selector for a `<pre>` to stream the engine log into.
+- `renderer` — which rendering backend to use, or a comma-separated order:
+  `webgl` (the default; WebGL2 wherever the browser has it, otherwise WebGL1),
+  `webgpu`, `canvas`, e.g. `renderer="webgl,webgpu"`. A single name is tried
+  first and the remaining backends stay as fallbacks; `canvas` on its own forces
+  the unaccelerated path. `?renderer=` on the page URL does the same, so a
+  shipped page can be tested without editing it. The custom ink blend modes
+  (Darkest / Lightest / Reverse-subtract) need GL blend state and are WebGL-only,
+  so those inks composite normally on webgpu/canvas; the runtime logs that once
+  when the chosen backend cannot express them.
 
 The running engine is exposed as `element.engine` (`element.directorEngine`),
 and a `spark-ready` event fires once boot starts. For a full working example

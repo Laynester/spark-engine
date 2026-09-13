@@ -232,7 +232,22 @@ function resolveChannelMatte(
     return { rgb: p0, tolerance: 0 };
   }
   if (mode === 'backgroundTransparent') return resolveBackgroundTransparent(rgba, width, height);
-  if (borderIsTransparent(rgba, width, height)) return null;
+  if (borderIsTransparent(rgba, width, height)) {
+    // A transparent border usually means the alpha channel already IS the mask
+    // (DirPlayer text bitmaps are (0,0,0,0)-filled with white glyphs), so a
+    // colour matte must not eat the artwork. It is NOT a reason to skip the key
+    // when the surface carries a real opaque white block: the avatar canvas is
+    // exactly that — `image(w,h,32)` starts transparent, `render` copies the
+    // WHITE-FILLED pBuffer out of just pUpdateRect, so the drawn body sits in an
+    // opaque white block surrounded by transparent canvas. Ink 36 blanket-keys
+    // that block (see the 'key' path, `bakeEdgeBackground`), but the matte
+    // pickers bailed out here and the white bounding rectangle around every
+    // avatar came back the moment a sprite switched to matte-family ink — the
+    // respect flash (ink 41) and the X-ray effect (ink 8). Key white when there
+    // is opaque art for it to bound; when white IS the art, keep the bail-out.
+    if (!hasOpaqueNonNearWhiteContent(rgba, width, height, NEAR_WHITE_MIN, NEAR_WHITE_DELTA, CONTENT_MIN_PIXELS)) return null;
+    return { rgb: 0xffffff, tolerance: 0 };
+  }
   const p00 = edgeMatteColor(rgba, width, height);
   if (p00 !== null && p00 === 0xffffff) return { rgb: p00, tolerance: 0 };
   if (whiteEdgeDominates(rgba, width, height)) return { rgb: 0xffffff, tolerance: 0 };
@@ -734,6 +749,13 @@ export function bakeSurface(
   palette?: number[][],
    /** Optional pre-allocated buffer to avoid per-bake allocation (see pixi.ts `bakeImagePixels`). */
    keyed?: Uint8Array | null,
+   /**
+    * fg→bg duotone (`mix(src, fg, bg)`, the ink-41 maths reused by the avatar
+    * colour effects — see `Engine.duotoneForChannel`). When present it replaces
+    * the legacy ink-41 `tint`/`fgRgb` pair and leaves the plain bg tint for the
+    * other inks untouched.
+    */
+   duotone?: { fg: number; bg: number } | null,
 ): { pixels: Uint8ClampedArray; changed: boolean } {
    const n = w * h * 4;
    const buf = new Uint8ClampedArray(n);
@@ -744,8 +766,11 @@ export function bakeSurface(
    const changed = bake
      ? bakeEdgeBackground(buf, w, h, bake, bake === 'backgroundTransparent' ? undefined : palette, undefined, ink7Key, keyedBuf)
      : false;
-  const tinted =
-    tint !== null ? (ink === 41 ? tintSpriteDarken(buf, w, h, tint, fgRgb) : tintSpriteBackground(buf, w, h, tint, keyedBuf)) : false;
+  const tinted = duotone
+    ? tintSpriteDarken(buf, w, h, duotone.bg, duotone.fg)
+    : tint !== null
+      ? (ink === 41 ? tintSpriteDarken(buf, w, h, tint, fgRgb) : tintSpriteBackground(buf, w, h, tint, keyedBuf))
+      : false;
   return { pixels: buf, changed: changed || tinted };
 }
 

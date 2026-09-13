@@ -2,7 +2,7 @@ import { BundleLoader, castHintDir, type BundleSource } from './bundle/loader.js
 import { fontBaseCandidates } from './bundle/fontPaths.js';
 import { DirectorEngine } from './engine/engine.js';
 import { WebAudioPlayer } from './engine/audio.js';
-import { PixiStage } from './stage/pixi.js';
+import { PixiStage, parseRendererPreference } from './stage/pixi.js';
 import { DevOverlay } from './stage/devOverlay.js';
 import { enablePerf, perfMilestone } from './perf.js';
 import { rasterizeTextMember } from './stage/text.js';
@@ -70,6 +70,13 @@ export class SparkElement extends SparkBase {
     const devRequested =
       this.hasAttribute('dev') || (typeof location !== 'undefined' && /(^|[?&])dev(=|&|$)/.test(location.search));
     if (devRequested) enablePerf();
+    // Renderer backend choice, shared by the attribute and the URL so a shipped
+    // page can be exercised as `?renderer=webgpu` / `?renderer=canvas` without
+    // editing it. Unset keeps pixi's default webgl -> webgpu -> canvas order.
+    const rendererSetting =
+      this.getAttribute('renderer') ??
+      (typeof location !== 'undefined' ? new URLSearchParams(location.search).get('renderer') : null);
+    const rendererPreference = parseRendererPreference(rendererSetting);
     const bootStart = typeof performance !== 'undefined' ? performance.now() : 0;
     const phase = (label: string): void => perfMilestone(label, performance.now() - bootStart);
     try {
@@ -115,7 +122,7 @@ export class SparkElement extends SparkBase {
       const params: Record<string, string> = {};
       for (const attr of this.attributes) {
         const name = attr.name.toLowerCase();
-        if (name === 'movie' || name === 'width' || name === 'height' || name === 'log' || name === 'id' || name === 'class' || name === 'style') continue;
+        if (name === 'movie' || name === 'width' || name === 'height' || name === 'log' || name === 'id' || name === 'class' || name === 'style' || name === 'renderer') continue;
         params[name] = attr.value;
       }
       engine.setExternalParams(params);
@@ -129,7 +136,7 @@ export class SparkElement extends SparkBase {
       this.textContent = '';
       const stage = new PixiStage(engine, this);
       this.stage = stage;
-      await stage.init();
+      await stage.init(rendererPreference);
       phase('stage + renderer up');
       engine.adapter = stage;
 

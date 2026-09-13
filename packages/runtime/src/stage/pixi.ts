@@ -98,6 +98,50 @@ export function inverseDirectorTransformPoint(
   return { tx, ty };
 }
 
+/**
+ * The renderer backends pixi can select. `webgl` is WebGL2 where the browser has
+ * it and WebGL1 otherwise — there is no separate "webgl2" option.
+ */
+export type RendererPreference = 'webgl' | 'webgpu' | 'canvas';
+
+/**
+ * Normalise the `renderer` setting — a `<spark-player renderer>` attribute or
+ * `?renderer=`, same syntax for both — into pixi's `preference`.
+ *
+ *   (unset) | auto      -> undefined, pixi's own order: webgl -> webgpu -> canvas
+ *   webgl | webgl2      -> 'webgl'  (tried first, the rest stay as fallbacks)
+ *   webgpu              -> 'webgpu' (tried first, the rest stay as fallbacks)
+ *   webgl,webgpu        -> ['webgl','webgpu','canvas'] (exact order, canvas last)
+ *   canvas              -> ['canvas'] (forced alone — the unaccelerated path)
+ *
+ * A comma list is an explicit order; pixi excludes anything not listed, so
+ * `canvas` is appended as the universal fallback (a page booting is better than
+ * a page refusing to start because a GPU blocklist dropped WebGL). Unknown names
+ * are dropped, and a setting with no recognisable backend falls back to `auto`
+ * rather than throwing, so a typo cannot stop the client booting.
+ */
+export function parseRendererPreference(
+  raw: string | null | undefined,
+): RendererPreference | RendererPreference[] | undefined {
+  const names = (raw ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  const out: RendererPreference[] = [];
+  for (const name of names) {
+    const kind: RendererPreference | null =
+      name === 'webgl' || name === 'webgl2' || name === 'gl' ? 'webgl'
+        : name === 'webgpu' || name === 'gpu' ? 'webgpu'
+          : name === 'canvas' || name === '2d' ? 'canvas'
+            : null;
+    if (kind && !out.includes(kind)) out.push(kind);
+  }
+  if (!out.length) return undefined;
+  // One named backend means "prefer this", so hand pixi the string and let it
+  // keep the ordinary fallback chain. `canvas` is the exception: it is only ever
+  // chosen deliberately (to inspect the unaccelerated path), so force it alone.
+  if (out.length === 1) return out[0] === 'canvas' ? ['canvas'] : out[0];
+  if (!out.includes('canvas')) out.push('canvas');
+  return out;
+}
+
 export class PixiStage implements StageAdapter {
   app!: Application;
   private nodes = new Map<number, ChannelNode>();
@@ -121,10 +165,14 @@ export class PixiStage implements StageAdapter {
     private parent: HTMLElement,
   ) { }
 
-  async init(): Promise<void> {
+  async init(preference?: RendererPreference | RendererPreference[]): Promise<void> {
     const { stageWidth: w, stageHeight: h, stageBackground: bg } = this.engine;
     this.app = new Application();
-    await this.app.init({ width: w, height: h, background: bg, antialias: false, resolution: 1 });
+    // `preference` goes straight to pixi's auto detector: a string is tried
+    // first with the remaining backends kept as fallbacks, an array is the
+    // exact order (anything unlisted is excluded). Undefined keeps pixi's
+    // default webgl -> webgpu -> canvas, which is what a shipped page gets.
+    await this.app.init({ width: w, height: h, background: bg, antialias: false, resolution: 1, preference });
     registerInkBlendFilters();
     this.registerInkBlendModes();
     this.parent.appendChild(this.app.canvas);
@@ -212,7 +260,19 @@ export class PixiStage implements StageAdapter {
   private registerInkBlendModes(): void {
     const state = (this.app.renderer as unknown as { state?: { blendModesMap?: Record<string, number[]> } }).state;
     const gl = (this.app.renderer as unknown as { gl?: WebGLRenderingContext | WebGL2RenderingContext }).gl;
-    if (!state?.blendModesMap || !gl) return;
+    if (!state?.blendModesMap || !gl) {
+      // WebGPU and the Canvas2D fallback have no GL blend state to hang a custom
+      // mode on, and pixi's own min/max fold the ALPHA in too (they cut a hole
+      // through the room, see above) while its 'subtract' lets the source
+      // through. So the reverse-subtract and Darkest/Lightest inks cannot be
+      // expressed on those backends and their sprites composite normally. Say so
+      // once, so `?renderer=webgpu` is not a silent visual change.
+      this.engine.log(
+        `ink blend modes unavailable on the ${this.rendererName()} renderer: inks 35/38 (reverse subtract) and 37/39/40 (lightest/darkest) will composite normally`,
+      );
+      setMatteIdentityFill(false);
+      return;
+    }
     state.blendModesMap[SUBTRACT_BLEND_MODE] = [
       gl.ONE,
       gl.ONE,
@@ -264,9 +324,7 @@ export class PixiStage implements StageAdapter {
         gpu = null;
       }
     }
-    const type = r.type;
-    const renderer =
-      type === 1 ? 'webgl' : type === 2 ? 'webgpu' : type === 3 ? 'webgl+webgpu' : type === 4 ? 'canvas' : `type ${String(type)}`;
+    const renderer = this.rendererName();
     const box = (this.app.canvas as HTMLCanvasElement | undefined)?.getBoundingClientRect();
     const map = r.state?.blendModesMap;
     const mem = (performance as unknown as {
@@ -309,6 +367,12 @@ export class PixiStage implements StageAdapter {
 
   perfMilestones(): PerfMilestone[] {
     return perf.milestones;
+  }
+
+  /** Which backend pixi actually created (its `RENDERER_TYPE`: 1 gl, 2 gpu, 4 canvas). */
+  private rendererName(): string {
+    const type = (this.app.renderer as unknown as { type?: number }).type;
+    return type === 1 ? 'webgl' : type === 2 ? 'webgpu' : type === 4 ? 'canvas' : `type ${String(type)}`;
   }
 
   private syncCaret(): void {
@@ -354,9 +418,10 @@ export class PixiStage implements StageAdapter {
       const ch = this.engine.getChannel(channel);
       const bake = this.bakeForChannel(ch, img, w, h);
       const tint = this.tintForChannel(ch);
+      const duotone = this.duotoneForChannel(ch);
       const baked =
-        bake || tint
-          ? perfTimeBake(() => this.bakeImagePixels(node, img, w, h, bake, tint, this.ink7KeyForChannel(ch), ch.ink ?? 0, ch.colorSet ? ch.color : 0, ch.member?.palette))
+        bake || tint || duotone
+          ? perfTimeBake(() => this.bakeImagePixels(node, img, w, h, bake, tint, this.ink7KeyForChannel(ch), ch.ink ?? 0, ch.member?.palette, duotone))
           : null;
       const pixels = baked && baked.changed ? baked.pixels : img.ensure();
       const finalBake = baked && baked.changed ? bake : null;
@@ -420,22 +485,30 @@ export class PixiStage implements StageAdapter {
     tint: number | null,
     ink7Key?: number | null,
     ink = 0,
-    fgRgb = 0,
     palette?: number[][],
+    duotone?: { fg: number; bg: number } | null,
   ): { pixels: Uint8ClampedArray; changed: boolean } {
     const n = w * h * 4;
     if (!node.bakeBuf || node.bakeBuf.length !== n) node.bakeBuf = new Uint8ClampedArray(n);
     const keyed = bake === 'matteIdentity' ? (node.keyedBuf && node.keyedBuf.length === w * h ? node.keyedBuf : (node.keyedBuf = new Uint8Array(w * h))) : null;
-    const out = bakeSurface(img.ensure(), w, h, bake, tint, ink7Key, ink, fgRgb, palette, keyed);
+    const out = bakeSurface(img.ensure(), w, h, bake, tint, ink7Key, ink, 0, palette, keyed, duotone);
     node.bakeBuf.set(out.pixels);
     return { pixels: node.bakeBuf, changed: out.changed };
   }
 
   private tintForChannel(ch: Channel | undefined): number | null {
-    // Tint resolution (incl. indexed backColors) lives on the engine for
-    // DirPlayer parity — see bgTintForChannel.
+    // Tint resolution (incl. indexed backColors) lives on the engine —
+    // see bgTintForChannel.
     if (!ch) return null;
     return this.engine.bgTintForChannel(ch);
+  }
+
+  private duotoneForChannel(ch: Channel | undefined): { fg: number; bg: number } | null {
+    // The ink-41 / avatar-colour-effect fg→bg ramp (see
+    // Engine.duotoneForChannel). A duotone REPLACES the plain bg tint for the
+    // inks that use it.
+    if (!ch) return null;
+    return this.engine.duotoneForChannel(ch);
   }
 
   private ink7KeyForChannel(ch: { ink?: number; bgColorIsRgb?: boolean; bgColor?: number } | undefined): number | null | undefined {
@@ -679,7 +752,8 @@ export class PixiStage implements StageAdapter {
         const ch = this.engine.getChannel(channel);
         const bake = this.bakeForChannel(ch, img, w, h);
         const tint = this.tintForChannel(ch);
-        const baked = bake || tint ? this.bakeImagePixels(node, img, w, h, bake, tint, this.ink7KeyForChannel(ch), ch.ink ?? 0, ch.colorSet ? ch.color : 0, ch.member?.palette) : null;
+        const duotone = this.duotoneForChannel(ch);
+        const baked = bake || tint || duotone ? this.bakeImagePixels(node, img, w, h, bake, tint, this.ink7KeyForChannel(ch), ch.ink ?? 0, ch.member?.palette, duotone) : null;
         const pixels = baked && baked.changed ? baked.pixels : img.ensure();
         node.bakeMode = baked && baked.changed ? bake : null;
         node.imgBuffer = pixels;
@@ -744,7 +818,10 @@ export class PixiStage implements StageAdapter {
         const bake: BakeMode | null = ch.member?.kind === 'filmloop' ? null : bakeModeForInk(ch.ink);
         const ink7Key = this.ink7KeyForChannel(ch);
         const tint = this.tintForChannel(ch);
-        if (tint !== null) {
+        // fg→bg duotone (ink 41's `sprite.color`+backColor, and the avatar
+        // colour effects' ink 8 + RGB foreColor) — see Engine.duotoneForChannel.
+        const duotone = this.duotoneForChannel(ch);
+        if (tint !== null || duotone !== null) {
           let width = 0;
           let height = 0;
           let rgba: Uint8ClampedArray | null = null;
@@ -759,8 +836,11 @@ export class PixiStage implements StageAdapter {
             // (see matte.bakeEdgeBackground / tintSpriteBackground).
             const keyed = bake === 'matteIdentity' && width > 0 && height > 0 ? new Uint8Array(width * height) : null;
             if (bake && width > 0 && height > 0) bakeEdgeBackground(rgba, width, height, bake, ch.member?.palette, dec.indices, ink7Key, keyed);
-            if (ch.ink === 41) tintSpriteDarken(rgba, width, height, tint, ch.colorSet ? ch.color : 0);
-            else tintSpriteBackground(rgba, width, height, tint, keyed);
+            if (duotone) tintSpriteDarken(rgba, width, height, duotone.bg, duotone.fg);
+            else if (tint !== null) {
+              if (ch.ink === 41) tintSpriteDarken(rgba, width, height, tint, ch.colorSet ? ch.color : 0);
+              else tintSpriteBackground(rgba, width, height, tint, keyed);
+            }
           } catch (e) {
             this.engine.warn(`bitmap decode failed (tint): ${e instanceof Error ? e.message : String(e)}`);
             rgba = null;
