@@ -45,6 +45,7 @@ export class SparkElement extends SparkBase {
     this._keyCleanup = null;
     this._scaleCleanup?.();
     this._scaleCleanup = null;
+    this.stage?.dispose();
     this._persistCleanup?.();
     this._persistCleanup = null;
     this._persistWorker?.terminate();

@@ -526,6 +526,48 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     }
   }
 
+  /**
+   * Restore Director's member names from the cast's own `memberalias.index`.
+   *
+   * The export tool replaced every space in a member name with an underscore for
+   * filesystem safety, which makes the slug ambiguous: `cloud_0_left` really is
+   * underscored, while wall art really is `leftwall dimmer_buttn_a_0`. The alias
+   * field is Director data and spells the names the way Director did, so it
+   * arbitrates: every name it mentions whose underscore slug is a member of this
+   * cast is that member's real name.
+   *
+   * Why Lingo must be able to SEE it: the corpus rebuilds art names from the name
+   * it reads back. `hh_room_utils/0017 Object Mover Class::moveItem` swaps the
+   * first word of the dragged item's member name to follow the wall —
+   * `getmemnum(tProps[#direction] && tName.word[2..tName.word.count])` — so an
+   * underscored slug is ONE word, word[2..1] is empty, the lookup is
+   * `"rightwall "` (getmemnum 0) and the handler bails at
+   * `if tMemNum = 0 then return 0`. The item still renders (direct lookups
+   * normalize _ <-> space) but its preview never changes sprite or flip while
+   * hovering the other wall.
+   *
+   * Lookups are unchanged: `byName` keeps the slug key and the engine's
+   * name lookups try both spellings, so nothing that asks for the slug breaks.
+   */
+  private applyAliasMemberNames(cast: CastLib): void {
+    const text = cast.byName.get('memberalias.index')?.text;
+    if (!text) return;
+    for (const line of text.split(/\r\n|\r|\n/)) {
+      // The corpus reads these with `the itemDelimiter = "="` and ignores
+      // one-char lines; `item 2 to n` keeps any further "=" inside the name.
+      if (line.length <= 2) continue;
+      const eq = line.indexOf('=');
+      if (eq <= 0) continue;
+      for (const side of [line.slice(0, eq), line.slice(eq + 1)]) {
+        let name = side.trim();
+        if (name.endsWith('*')) name = name.slice(0, -1);
+        if (!name.includes(' ')) continue;
+        const member = cast.byName.get(name.replaceAll(' ', '_').toLowerCase());
+        if (member && member.name !== name) member.directorName = name;
+      }
+    }
+  }
+
   private registerCastListShells(entries: CastListEntry[]): void {
     if (this.castList) return;
     this.castList = entries;
@@ -681,6 +723,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     if (!this.casts.includes(cast)) this.casts.push(cast);
     this.castByName.set(castName, cast);
     this.castByName.set(cast.name, cast);
+    this.applyAliasMemberNames(cast);
     this.resolveFilmLoops(cast);
     this.log(`cast loaded: ${castName} (${manifest.members.length} members)`);
     this.onCastLoaded?.(castName);
@@ -1256,6 +1299,17 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     this._stopEventPending = false;
     if (type === 'mouseDown') {
       this.mouseButton = 'down';
+      // A press whose release the page never delivered (the button came up
+      // outside the browser window, or the window lost focus mid-press) is
+      // still holding its own state: the corpus's Event Broker forwards only
+      // `mouseUpOutSide` to Button / DropDown / Scrollbar / Container Hand, so
+      // overwriting the press target below would leak it forever and the next
+      // clicks on that sprite would be swallowed. Close it as the outside
+      // release it is. (A press released on the SAME channel is a normal
+      // mouseUp, which the release below already delivers.)
+      if (this.mouseDownChannel !== 0 && this.mouseDownChannel !== channel) {
+        this.dispatchToChannelHandlers(this.mouseDownChannel, 'mouseupoutside', []);
+      }
       this.mouseDownChannel = channel;
       const now = Date.now();
       this.doubleClick = now - this.lastMouseDownTime < 500;
@@ -1291,6 +1345,57 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     if (type === 'mouseUp') this.doubleClick = false;
     this.setRollover(channel);
     this._stopEventPending = false;
+  }
+
+  /**
+   * The pointer left the stage. Director has no rollover outside the stage, so
+   * a hover left behind keeps the previous sprite's mouseEntered state alive
+   * (the room hiliter, the rollover tooltip), and a press the stage can no
+   * longer see is closed as an OUTSIDE release — `#mouseUpOutSide`, the event
+   * Director and the corpus's own Event Broker model for "released away from
+   * the sprite". Returns whether anything was actually unwound.
+   */
+  pointerLost(): boolean {
+    let changed = false;
+    if (this.rolloverChannel !== 0) {
+      const previous = this.rolloverChannel;
+      this.rolloverChannel = 0;
+      this.dispatchToChannelHandlers(previous, 'mouseleave', []);
+      changed = true;
+    }
+    if (this.mouseButton === 'down' || this.mouseDownChannel !== 0) {
+      this.dispatchPointerEvent('mouseUp', 0, this.mouseH, this.mouseV);
+      changed = true;
+    }
+    return changed;
+  }
+
+  /**
+   * The window lost focus. The browser hands the keyup for a held modifier to
+   * the window that gained focus, so `the shiftDown` / `the optionDown` / the
+   * held-key list stayed set (and so did a held press, since no pointerup
+   * follows either). The room UI reads exactly those: a shift-click routes to
+   * the object-info overlay (Room Interface Class 1016/1058/1099/1119) and an
+   * option-click on an active object starts the object mover (1084) — so a
+   * stuck modifier silently swallows every later click.
+   */
+  focusLost(): boolean {
+    const changed = this.pointerLost();
+    const hadKeys =
+      this.shiftDown ||
+      this.optionDown ||
+      this.controlDown ||
+      this.commandDown ||
+      this.keyDownActive ||
+      this.heldKeys.length > 0;
+    this.shiftDown = false;
+    this.optionDown = false;
+    this.controlDown = false;
+    this.commandDown = false;
+    this.keyDownActive = false;
+    this.heldKeys = [];
+    this.keyPressed = '';
+    return changed || hadKeys;
   }
 
   private directorKeyChar(key: string, keyCode: number): string {
@@ -1696,10 +1801,14 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         case 'lastkey': result = this.lastKey; break;
         case 'floatprecision': result = this.floatPrecision; cacheable = true; break;
         case 'maxinteger': result = 2147483647; cacheable = true; break;
-        case 'shiftdown': result = this.shiftDown ? 1 : 0; cacheable = true; break;
-        case 'optiondown': result = this.optionDown ? 1 : 0; cacheable = true; break;
-        case 'commanddown': result = this.commandDown ? 1 : 0; cacheable = true; break;
-        case 'controldown': result = this.controlDown ? 1 : 0; cacheable = true; break;
+        // Live input state, like the pointer values above: a DOM key event can
+        // change it between two reads in the SAME frame, so it must not be
+        // pinned by the per-frame `the` cache (a room click reads the
+        // shiftDown/optionDown to pick its click action).
+        case 'shiftdown': result = this.shiftDown ? 1 : 0; break;
+        case 'optiondown': result = this.optionDown ? 1 : 0; break;
+        case 'commanddown': result = this.commandDown ? 1 : 0; break;
+        case 'controldown': result = this.controlDown ? 1 : 0; break;
         case 'colordepth': result = 32; cacheable = true; break;
         case 'longtime': result = new Date().toLocaleString('en-US'); break;
         case 'shorttime': result = new Date().toLocaleTimeString('en-US'); break;
@@ -3306,7 +3415,10 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       case 'text':
         return member.kind === 'text' || member.kind === 'script' ? member.text ?? '' : VOID;
       case 'name':
-        return member.name;
+        // `directorName` is the name Director had, recovered from the cast's
+        // memberalias.index when the bundle slug had to underscore a space (see
+        // applyAliasMemberNames); the corpus rebuilds art names from this.
+        return member.directorName ?? member.name;
       case 'linecount':
         return member.kind === 'text' ? (member.text ?? '').split('\n').length : 0;
       case 'number':
@@ -3905,12 +4017,14 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
    *    suppressed the whole flash. A set fg therefore has to run the duotone
    *    with bg defaulting to white.
    *
-   *  - inks 8/9 with an EXPLICIT RGB foreColor: the avatar colour effects.
+   *  - inks 4/8/9 with an EXPLICIT RGB foreColor: the avatar colour effects.
    *    `hh_human/texts/0041_text_fx.11.txt` (X-Ray) is just
    *    `human_sprite_props/[ink: 8, bgcolor: "#007700", forecolor: "#00FF00"]`
    *    and ships no bitmaps at all, so that ramp IS the effect: black→#00FF00,
    *    white→#007700, which reads as the green x-ray look. fx.12 (Ice) is the
-   *    same shape with `#66CCFF`/`#CCFFFF`.
+   *    same shape — `[ink: 4, bgcolor: "#CCFFFF", forecolor: "#66CCFF"]`, the
+   *    documented "Not copy" ink, which replaces the body sprite's `resetSpriteColors`
+   *    ink 36 and would otherwise leave the canvas's opaque white block on screen.
    */
   duotoneForChannel(ch: Channel): { fg: number; bg: number } | null {
     const bg = this.bgTintForChannel(ch) ?? 0xffffff;
@@ -3919,7 +4033,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       if (bg === 0xffffff && fg === 0x000000) return null;
       return { fg, bg };
     }
-    if (ch.ink === 8 || ch.ink === 9) {
+    if (ch.ink === 4 || ch.ink === 8 || ch.ink === 9) {
       const fg = this.foreColorRgbForChannel(ch);
       if (fg === null) return null;
       return { fg, bg };

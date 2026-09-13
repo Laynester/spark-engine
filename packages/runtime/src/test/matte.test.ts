@@ -699,6 +699,23 @@ test('bakeSurface duotone remaps through fg->bg (x-ray green, respect flash)', (
   assert.ok(out.changed, 'duotone reports a change');
 });
 
+test('ink 4 (Not copy) bakes the white canvas rectangle out like matte (Ice FX)', () => {
+  // `hh_human/texts/0042_text_fx.12.txt` is only
+  //   human_sprite_props/[ink: 4, bgcolor: "#CCFFFF", forecolor: "#66CCFF"]
+  // — the blue twin of the x-ray (fx.11, ink 8). Ink 4 REPLACES the avatar body
+  // sprite's default ink 36 (`Human_Class_EX::resetSpriteColors`), and 36 is what
+  // keys the opaque white block the Human composes its canvas over
+  // (`pAlphaColor = rgb(255,255,255)` + `copyPixels(pBuffer, pUpdateRect, ...)`).
+  // Unmapped, ink 4 left that block opaque, so a frozen avatar rendered as a
+  // WHITE BOX around the art.
+  assert.equal(bakeModeForInk(4), 'matte', 'ink 4 removes the white bounding rectangle');
+  // The neighbouring "not" inks stay deliberately unmapped (no corpus user).
+  assert.equal(bakeModeForInk(3), null);
+  assert.equal(bakeModeForInk(5), null);
+  assert.equal(bakeModeForInk(6), 'matte');
+  assert.equal(bakeModeForInk(7), 'notGhost');
+});
+
 test('ink-8 matte skips transparent-bordered text images (entry_bar white glyphs survive)', () => {
   // The corpus Text Wrapper pastes the field member image ink-8 over its own
   // pimage.fill() background. The member `.image` is TRANSPARENT + white

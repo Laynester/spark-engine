@@ -50,6 +50,17 @@ export class Member {
   paletteTarget?: number[][];
   script?: Script;
   fileName?: string;
+  /**
+   * The name Director itself had for this member, when the bundle slug cannot be
+   * trusted to carry it. The exporter replaces every space in a name with an
+   * underscore for filesystem safety, which leaves the slug ambiguous —
+   * `cloud_0_left` really is underscored, while the wall art really is
+   * `leftwall dimmer_buttn_a_0`. The cast's `memberalias.index` field spells the
+   * names the way Director did, so that arbitrates; only `member.name` as Lingo
+   * sees it is affected, and the engine's own lookups keep using `name`
+   * (normalizing _ <-> space, so both spellings resolve).
+   */
+  directorName?: string;
   image?: LImage;
   imagePainted = false;
   /** Film-loop members: ordered frame members, resolved from the manifest's

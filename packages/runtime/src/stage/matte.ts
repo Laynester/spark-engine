@@ -640,6 +640,14 @@ export function bakeModeForInk(ink: number): BakeMode | null {
       // renderers that cannot run the shader (pixi's canvas fallback drops
       // every custom blend mode).
       return 'matte';
+    // 4 (Not copy) is the Ice FX: `hh_human/texts/0042_text_fx.12.txt` is only
+    // `human_sprite_props/[ink: 4, bgcolor: "#CCFFFF", forecolor: "#66CCFF"]`,
+    // the blue twin of the x-ray (fx.11, ink 8). Ink 4 REPLACES the avatar body
+    // sprite's `resetSpriteColors` ink 36 ("background transparent"), which is
+    // what keys the opaque white block the Human composes its canvas over, so
+    // the sprite has to keep a matte bake or a frozen avatar shows that white
+    // rectangle as a box around the art.
+    case 4:
     case 8:
     case 32:
     case 33:
@@ -695,10 +703,12 @@ const INK6_XOR = false;
  * alphaBlendPixel). `add` is safe because its alpha factors are (ONE, ONE) and
  * the transparent pixels contribute 0.
  *
- * Inks 3 (Ghost), 4 (Not Copy), 5 (Not Transparent) and 7 (Not Ghost) are
- * PIXEL operations against the destination (average / inverted-copy) with no
- * blend-function equivalent and no user in the corpus; they are deliberately
- * not mapped here. Inks 2 (Reverse) and 6 (Not Reverse) are XOR against the
+ * Inks 3 (Ghost), 5 (Not Transparent) and 7 (Not Ghost) are PIXEL operations
+ * against the destination (average / inverted-copy) with no blend-function
+ * equivalent and no user in the corpus; they are deliberately not mapped here.
+ * Ink 4 (Not copy) is used, by the Ice FX (fx.12), which pairs it with the same
+ * fg/bg ramp the x-ray uses — bare `normal` here plus the matte bake (see
+ * `bakeModeForInk`) and the duotone (`Engine.duotoneForChannel`). Inks 2 (Reverse) and 6 (Not Reverse) are XOR against the
  * destination, which GL cannot express either — they are served by shader blend
  * modes registered in stage/blendFilters.ts (name strings below).
  */

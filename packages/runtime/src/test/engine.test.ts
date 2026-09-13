@@ -11,7 +11,7 @@ import type { PersistWorkerLike, PersistWorkerMsg } from '../worker/persist.js';
 import { decodePng } from '../engine/png.js';
 import { decodeGif } from '../engine/gif.js';
 import { bakeEdgeBackground, cornersAreNearWhite, tintSpriteBackground } from '../stage/matte.js';
-import { directorTransformFlip, inverseDirectorTransformPoint, parseRendererPreference } from '../stage/pixi.js';
+import { bindPointerEvents, directorTransformFlip, imageDirtyDebts, inverseDirectorTransformPoint, parseRendererPreference, releaseImageDirty } from '../stage/pixi.js';
 import { defringeTextPixels, hardenTextAlpha, rasterizeTextMember } from '../stage/text.js';
 import { frameGap } from '../stage/devOverlay.js';
 
@@ -811,6 +811,60 @@ end
   assert.equal(num('club_sofa_a_0_2_1_0_0'), -2752516);
   // Unaliased names still read 0 (getmemnum not-found contract).
   assert.equal(num('club_sofa_a_0_2_1_8_0'), 0);
+});
+
+test('member.name keeps the space Director had when the cast alias index spells it (wall-item flip)', async () => {
+  // The export tool replaced every space in a member name with an underscore for
+  // filesystem safety, which makes the slug ambiguous: `cloud_0_left` really is
+  // underscored, while the wall art really is `leftwall dimmer_buttn_a_0`. The
+  // cast's own memberalias.index field is Director data and spells the names the
+  // way Director did. `Object Mover Class::moveItem` (hh_room_utils/0017) turns
+  // that name back into art by replacing its FIRST WORD:
+  //   tName = pSprList[i].member.name
+  //   tMemNum = getmemnum(tProps[#direction] && tName.word[2..tName.word.count])
+  // Hand it the underscored slug and the name is a single word, so word[2..1] is
+  // empty, the lookup is "rightwall " -> getmemnum 0, and the handler bails at
+  // `if tMemNum = 0 then return 0`: a wall item's preview never changes sprite
+  // or flip while hovering the other wall.
+  const name = 'hh_furni_xx_dimmer_buttn';
+  const manifest = {
+    version: 1 as const,
+    casts: [{
+      name,
+      members: [
+        { number: 2, kind: 'text' as const, name: 'memberalias.index', file: `${name}/0002_text_memberalias.index.txt` },
+        { number: 5, kind: 'bitmap' as const, name: 'leftwall_dimmer_buttn_a_0', file: `${name}/0005_bitmap_leftwall_dimmer_buttn_a_0.png` },
+      ],
+      fonts: [] as never[],
+      fontFiles: [] as string[],
+      linkedCasts: [] as { name: string; file: string }[],
+    }],
+    files: [`${name}/0002_text_memberalias.index.txt`, `${name}/0005_bitmap_leftwall_dimmer_buttn_a_0.png`],
+  };
+  const entries: Record<string, Uint8Array> = { 'bundle-manifest.json': strToU8(JSON.stringify(manifest)) };
+  entries[`${name}/0002_text_memberalias.index.txt`] = strToU8('rightwall dimmer_buttn_a_0=leftwall dimmer_buttn_a_0*\n');
+  entries[`${name}/0005_bitmap_leftwall_dimmer_buttn_a_0.png`] = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+  const source: BundleSource = {
+    async fetchBundle(n: string) { return n === name ? zipSync(entries, { level: 6 }) : null; },
+  };
+  const e = new DirectorEngine();
+  await e.loadCast(new BundleLoader(source), name);
+  const cast = e.casts.find((c) => c.name === name)!;
+  // The slug stays a resolvable name — the engine's lookups normalize _ <-> space.
+  assert.ok(cast.byName.has('leftwall_dimmer_buttn_a_0'), 'slug lookup still resolves');
+  // ...but the name Lingo reads back is the one the alias index spells.
+  assert.equal(e.getMemberProp(e.getMemberByName('leftwall_dimmer_buttn_a_0')!, 'name'), 'leftwall dimmer_buttn_a_0');
+  // The corpus's own arithmetic then yields the layer suffix and the other wall.
+  const probe = e.addScriptMember('WallMove', 'movie', [
+    'on run',
+    '  tName = member(5).name',
+    '  tRest = tName.word[2..tName.word.count]',
+    '  return [tName.word.count, tRest, "rightwall" && tRest]',
+    'end',
+  ].join('\n'));
+  const h = probe.script!.handlers.find((x) => x.name.toLowerCase() === 'run')!;
+  const out = e.interp.callHandler(probe.script!, h, [], null, new Set()) as LList;
+  assert.deepEqual(out.items, [2, 'dimmer_buttn_a_0', 'rightwall dimmer_buttn_a_0']);
 });
 
 test('RETURN/ENTER constants are Director char codes (13 / 3) and line chunks split on CR', () => {
@@ -4440,6 +4494,60 @@ test('avatar colour effects: ink 8 + rgb foreColor resolves a fg->bg duotone (x-
   assert.deepEqual(e.duotoneForChannel(e.getChannel(3)), { fg: 0x000000, bg: 0x007700 }, 'ink 41 ignores the foreColor');
 });
 
+test('a member image shared by two channels serves BOTH nodes before it goes clean (avatar canvas)', () => {
+  // `LImage.dirty` belongs to the IMAGE but is consumed per NODE: the Human
+  // avatar canvas is the same member on `pSprite` (the visible body, ink 36) and
+  // `pMatteSpr` (the hit-test matte, ink 8) — `pSprite.castNum` and
+  // `pMatteSpr.castNum = pMember.number` in Human_Class_EX::define — and the
+  // corpus repaints it every frame (`pMember.image.copyPixels(pBuffer,
+  // pUpdateRect, pUpdateRect)`), while `engine.ts` `setSpriteProp` `case 'ink'`
+  // marks the member image dirty precisely so `syncChannelImages` re-uploads the
+  // in-place bake buffer. Clearing the flag on the FIRST node meant every later
+  // node on that image rendered a stale texture.
+  const shared = new LImage(64, 130);
+  shared.dirty = true;
+  const debts = imageDirtyDebts([{ imgLImage: shared }, { imgLImage: shared }]);
+  assert.equal(debts.get(shared), 2, 'both nodes owe a re-read');
+  releaseImageDirty(debts, shared);
+  assert.equal(shared.dirty, true, 'the second node still needs the pixels');
+  releaseImageDirty(debts, shared);
+  assert.equal(shared.dirty, false, 'cleared only after every node was served');
+  // A node the BAKE_BATCH cap did not reach keeps its debt, so the image stays
+  // dirty and the remaining nodes are served on the next frame.
+  const capped = new LImage(8, 8);
+  capped.dirty = true;
+  releaseImageDirty(imageDirtyDebts([{ imgLImage: capped }, { imgLImage: capped }, { imgLImage: capped }]), capped);
+  assert.equal(capped.dirty, true, 'unserved nodes keep the image dirty');
+  // An image nobody shares still goes clean on its single node.
+  const alone = new LImage(8, 8);
+  alone.dirty = true;
+  const soloDebts = imageDirtyDebts([{ imgLImage: alone }, { imgLImage: null }, {}]);
+  assert.equal(soloDebts.get(alone), 1);
+  releaseImageDirty(soloDebts, alone);
+  assert.equal(alone.dirty, false, 'a single node clears it');
+  // ...and a clean image is not a debt at all (the loop's `if (!img.dirty)`).
+  const clean = new LImage(8, 8);
+  assert.equal(imageDirtyDebts([{ imgLImage: clean }]).size, 0, 'clean images are not queued');
+});
+
+test('avatar colour effects: ink 4 + rgb foreColor resolves the Ice FX fg->bg duotone', () => {
+  // `hh_human/texts/0042_text_fx.12.txt` is only
+  //   human_sprite_props/[ink: 4, bgcolor: "#CCFFFF", forecolor: "#66CCFF"]
+  // — the blue twin of the x-ray (fx.11, ink 8), through the same
+  // "Avatar Effect Class"::setHumanSpriteProps path. Ink 4 is unmapped as a
+  // sprite blend (like ink 8), so the ramp has to come from the duotone; and
+  // the sprite's default `foreColor = 255` (palette index, black — what the
+  // engine's own `resetSpriteColors` writes on every avatar) must stay inert.
+  const e = new DirectorEngine();
+  const s = e.getSprite(3);
+  e.setSpriteProp(s, 'ink', 4);
+  assert.equal(e.duotoneForChannel(e.getChannel(3)), null, 'default ink 4 sprite has no duotone');
+  e.setSpriteProp(s, 'bgcolor', new LColor(0xcc, 0xff, 0xff));
+  assert.equal(e.duotoneForChannel(e.getChannel(3)), null, 'bgColor alone keeps the plain bg tint');
+  e.setSpriteProp(s, 'forecolor', new LColor(0x66, 0xcc, 0xff));
+  assert.deepEqual(e.duotoneForChannel(e.getChannel(3)), { fg: 0x66ccff, bg: 0xccffff }, 'ice ramp');
+});
+
 test('respect flash: ink 41 + sprite.color tints even with a white backColor', () => {
   // "Respect Flash Effect Class"::defineWithSprite sets `tsprite.ink = 41` and
   // animates `tsprite.color` from grey to gold, but leaves backColor at the
@@ -6336,6 +6444,175 @@ test('the mouseH/mouseV/mouseLoc + the mouseDown/mouseUp track pointer state', (
   assert.equal(loc.locV, 45);
   e.dispatchPointerEvent('mouseUp', 1, 123, 45);
   assert.equal(e.interp.evalExpressionString('the mouseDown'), 0);
+});
+
+test('a new press releases a previous press whose mouseUp was never delivered (stuck buttons after focus loss)', () => {
+  // A press whose release the page never sees — the button came up outside the
+  // browser window, or the tab was in the background — leaves the press target
+  // holding its own state: Button / DropDown / Scrollbar / Container Hand all
+  // wait for mouseUpOutSide to unwind (Event Broker 0003 `on mouseUpOutSide`,
+  // the release Director delivers when the button comes up away from the
+  // sprite). The next mouseDown overwrites mouseDownChannel, so unless the
+  // stale press is closed first that release never arrives and the sprite stays
+  // pressed/armed forever, swallowing every later click on it.
+  const e = new DirectorEngine();
+  e.addScriptMember(
+    'Btn',
+    'behavior',
+    [
+      'on new me',
+      '  return me',
+      'end',
+      'on mouseDown me',
+      '  me.pLog = "down"',
+      '  return 1',
+      'end',
+      'on mouseUpOutSide me',
+      '  me.pLog = "outside"',
+      '  return 1',
+      'end',
+      'on mouseUp me',
+      '  me.pLog = "up"',
+      '  return 1',
+      'end',
+    ].join('\n'),
+  );
+  const btn = e.interp.evalExpressionString('new(script("Btn"))') as LObject;
+  assert.ok(btn instanceof LObject);
+  e.setSpriteProp(e.getSprite(7), 'scriptInstanceList', new LList([btn]));
+
+  e.dispatchPointerEvent('mouseDown', 7, 1, 1);
+  assert.equal(btn.props.get('pLog'), 'down');
+  // The release is lost; the user's next click lands somewhere else entirely.
+  e.dispatchPointerEvent('mouseDown', 9, 2, 2);
+  assert.equal(btn.props.get('pLog'), 'outside', 'the abandoned press gets its outside release');
+  e.dispatchPointerEvent('mouseUp', 9, 2, 2);
+  assert.equal(btn.props.get('pLog'), 'outside', 'the release goes to the sprite actually under the cursor');
+
+  // A press that IS released normally must not pick up a spurious outside.
+  e.dispatchPointerEvent('mouseDown', 7, 1, 1);
+  e.dispatchPointerEvent('mouseUp', 7, 1, 1);
+  assert.equal(btn.props.get('pLog'), 'up');
+});
+
+test('window focus loss drops held modifiers and the held press (room click gates on the shiftDown)', () => {
+  // Cmd/Alt-Tab away while a modifier is held: the browser delivers the keyup
+  // to the other window, so `the shiftDown` / `the optionDown` stayed 1. The
+  // room UI reads exactly those — a shift-click is routed to the object-info
+  // overlay (Room Interface 1016/1058/1099/1119) and an option-click on an
+  // active object starts the object mover (1084) — so the next click was
+  // silently swallowed as a debug/shift click.
+  const e = new DirectorEngine();
+  e.addScriptMember('Setup', 'score', 'on exitFrame\nend');
+  e.dispatchKeyEvent('keyDown', 'Alt', 18, { alt: true });
+  e.dispatchKeyEvent('keyDown', 'Shift', 16, { alt: true, shift: true });
+  assert.equal(e.interp.evalExpressionString('the optionDown'), 1);
+  assert.equal(e.interp.evalExpressionString('the shiftDown'), 1);
+  assert.equal(e.interp.evalExpressionString('the keyPressed'), 'Shift');
+
+  e.dispatchPointerEvent('mouseDown', 1, 10, 10);
+  assert.equal(e.interp.evalExpressionString('the mouseDown'), 1);
+
+  assert.equal(e.focusLost(), true, 'there was input to release');
+  assert.equal(e.interp.evalExpressionString('the optionDown'), 0);
+  assert.equal(e.interp.evalExpressionString('the shiftDown'), 0);
+  assert.equal(e.interp.evalExpressionString('the keyPressed'), '');
+  assert.equal(e.interp.evalExpressionString('the mouseDown'), 0, 'the held press is released too');
+  assert.equal(e.interp.evalExpressionString('the mouseUp'), 1);
+  assert.equal(e.focusLost(), false, 'a second focus loss has nothing left to release');
+});
+
+test('the pointer leaving the stage clears the rollover and releases a held press as an outside release', () => {
+  // Director has no rollover outside the stage and delivers no mouseUp for a
+  // release off it. Leaving the canvas therefore has to clear the hover (the
+  // corpus keeps the room hiliter / tooltip from the hovered sprite) and close
+  // the press with `mouseUpOutSide`, which is what the corpus models for it.
+  const e = new DirectorEngine();
+  e.addScriptMember(
+    'Hover',
+    'behavior',
+    [
+      'on new me',
+      '  return me',
+      'end',
+      'on mouseDown me',
+      '  me.pLog = "down"',
+      '  return 1',
+      'end',
+      'on mouseUpOutSide me',
+      '  me.pLog = "outside"',
+      '  return 1',
+      'end',
+      'on mouseLeave me',
+      '  me.pLeft = 1',
+      '  return 1',
+      'end',
+    ].join('\n'),
+  );
+  const obj = e.interp.evalExpressionString('new(script("Hover"))') as LObject;
+  assert.ok(obj instanceof LObject);
+  e.setSpriteProp(e.getSprite(5), 'scriptInstanceList', new LList([obj]));
+
+  e.dispatchPointerEvent('mouseMove', 5, 10, 10);
+  assert.equal(e.rolloverChannel, 5);
+  e.dispatchPointerEvent('mouseDown', 5, 10, 10);
+  assert.equal(e.interp.evalExpressionString('the mouseDown'), 1);
+
+  assert.equal(e.pointerLost(), true);
+  assert.equal(e.rolloverChannel, 0, 'no rollover outside the stage');
+  assert.equal(obj.props.get('pLeft'), 1, 'the hovered sprite gets its mouseLeave');
+  assert.equal(obj.props.get('pLog'), 'outside', 'the held press is closed as an outside release');
+  assert.equal(e.interp.evalExpressionString('the mouseDown'), 0);
+  assert.equal(e.pointerLost(), false, 'nothing left to unwind');
+});
+
+test('the stage binds the pointer events a Director movie needs (outside release, hover loss, focus loss)', () => {
+  // The stage alone does not see everything a press needs. pixi reports a
+  // release that lands OUTSIDE the canvas as `pointerupoutside` (the press
+  // target chain walks up to the stage), and a release after the window lost
+  // focus, or a browser-cancelled pointer, reaches no stage event at all.
+  // Binding only pointerdown/pointerup/pointermove is what left `the mouseButton`
+  // down and the corpus's button / item-placement state stuck.
+  type StageFn = (e: { global: { x: number; y: number } }) => void;
+  const stageHandlers = new Map<string, StageFn>();
+  const stage = {
+    handlers: stageHandlers,
+    on(type: string, fn: StageFn): void { stageHandlers.set(type, fn); },
+    off(type: string): void { stageHandlers.delete(type); },
+  };
+  const target = (): { handlers: Map<string, () => void>; addEventListener(t: string, fn: () => void): void; removeEventListener(t: string): void } => {
+    const handlers = new Map<string, () => void>();
+    return {
+      handlers,
+      addEventListener(t, fn) { handlers.set(t, fn); },
+      removeEventListener(t) { handlers.delete(t); },
+    };
+  };
+  const canvas = target();
+  const view = target();
+  const calls: string[] = [];
+  const cleanup = bindPointerEvents({ stage, canvas, view }, {
+    down: (x, y) => calls.push(`down:${x},${y}`),
+    up: (x, y) => calls.push(`up:${x},${y}`),
+    move: (x, y) => calls.push(`move:${x},${y}`),
+    leave: () => calls.push('leave'),
+    blur: () => calls.push('blur'),
+  });
+
+  stage.handlers.get('pointerdown')!({ global: { x: 4.7, y: 9.2 } });
+  assert.deepEqual(calls, ['down:4,9'], 'coordinates are truncated like Director integer pointer coords');
+  stage.handlers.get('pointerup')!({ global: { x: 1, y: 2 } });
+  stage.handlers.get('pointerupoutside')!({ global: { x: 3, y: 4 } });
+  stage.handlers.get('pointermove')!({ global: { x: 5, y: 6 } });
+  canvas.handlers.get('pointerleave')!();
+  view.handlers.get('blur')!();
+  view.handlers.get('pointercancel')!();
+  assert.deepEqual(calls.slice(1), ['up:1,2', 'up:3,4', 'move:5,6', 'leave', 'blur', 'blur']);
+
+  cleanup();
+  assert.equal(stage.handlers.size, 0, 'cleanup unbinds the stage');
+  assert.equal(canvas.handlers.size, 0, 'cleanup unbinds the canvas');
+  assert.equal(view.handlers.size, 0, 'cleanup unbinds the window');
 });
 
 test('navigator row math truncates on DirPlayer integer pointer coords (click lands on the row under the cursor)', () => {

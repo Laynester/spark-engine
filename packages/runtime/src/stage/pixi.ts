@@ -142,6 +142,142 @@ export function parseRendererPreference(
   return out;
 }
 
+/**
+ * How many NODES still owe a re-read of each dirty image, in stage order.
+ *
+ * `LImage.dirty` is a property of the IMAGE, but the update it signals is
+ * consumed by a NODE: `syncChannelImages()` re-bakes and re-uploads one
+ * channel's texture at a time. Two channels can legitimately share one member's
+ * image — the Human avatar canvas is used by BOTH its body sprite and its matte
+ * sprite (`pSprite.castNum` / `pMatteSpr.castNum = pMember.number` in
+ * `Human_Class_EX::define`), and the same dynamic member can be placed on two
+ * channels — so clearing the flag on the first node starves every later node:
+ * it keeps a stale texture until some unrelated write re-dirties the member
+ * (e.g. the ink-family shortcut in engine.ts `setSpriteProp` `case 'ink'`, which
+ * relies on exactly this re-upload).
+ *
+ * The debt map makes the flag last exactly as long as there are nodes to serve.
+ * A node the BAKE_BATCH cap did not reach keeps its debt, so the image stays
+ * dirty and those nodes are served on the next frame.
+ */
+export function imageDirtyDebts(nodes: Iterable<{ imgLImage?: LImage | null }>): Map<LImage, number> {
+  const debts = new Map<LImage, number>();
+  for (const node of nodes) {
+    const img = node.imgLImage;
+    if (img && img.dirty) debts.set(img, (debts.get(img) ?? 0) + 1);
+  }
+  return debts;
+}
+
+/**
+ * Mark one node's re-read of `img` as done, clearing the image's dirty flag only
+ * once every node that shared it has been served (see `imageDirtyDebts`).
+ */
+export function releaseImageDirty(debts: Map<LImage, number>, img: LImage): void {
+  const left = (debts.get(img) ?? 1) - 1;
+  if (left > 0) {
+    debts.set(img, left);
+    return;
+  }
+  debts.delete(img);
+  img.dirty = false;
+}
+
+/**
+ * The per-click `click:` / `room:` diagnostics run several interpreted evals on
+ * every press (the room probes walk `getThread(#room).getComponent()` and the
+ * whole `#spriteList`), which is measurable on a click. They are therefore off
+ * unless `window.SPARK_POINTER_LOG = 1` asks for them — the same opt-in shape
+ * `engine.log`'s `net:` suppression uses for the net traffic.
+ */
+function pointerDebug(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    (window as unknown as { SPARK_POINTER_LOG?: unknown }).SPARK_POINTER_LOG === 1
+  );
+}
+
+/** The `global` (stage-space) point a pixi federated pointer event carries. */
+export interface PointerPoint {
+  global: { x: number; y: number };
+}
+
+/** The slice of a pixi stage the pointer binding needs. */
+export interface PointerEventStage {
+  on(type: string, fn: (e: PointerPoint) => void): unknown;
+  off(type: string, fn: (e: PointerPoint) => void): unknown;
+}
+
+/** The slice of a DOM event target the pointer binding needs. */
+export interface PointerEventTarget {
+  addEventListener(type: string, fn: () => void): unknown;
+  removeEventListener(type: string, fn: () => void): unknown;
+}
+
+/**
+ * What the movie does in response to each pointer event, so the wiring itself
+ * can be exercised without a renderer.
+ */
+export interface PointerSink {
+  /** press in the canvas */
+  down(x: number, y: number): void;
+  /** release, in or out of the canvas */
+  up(x: number, y: number): void;
+  move(x: number, y: number): void;
+  /** the cursor left the canvas — the movie's rollover is over */
+  leave(): void;
+  /** the window lost focus (or the browser cancelled the pointer) mid-input */
+  blur(): void;
+}
+
+/**
+ * Bind the pointer events a Director movie expects, and return the unbind.
+ *
+ * The stage alone is not enough, and each extra binding covers a release or a
+ * hover the movie would otherwise never hear about:
+ * - `pointerupoutside`: pixi reports a release that lands OUTSIDE the canvas as
+ *   this, not `pointerup` — the press target chain is walked up to the stage.
+ *   Without it `the mouseButton` stayed down and the corpus's press-driven state
+ *   (Button/DropDown/Scrollbar "pressed", Container Hand's held item, Object
+ *   Mover's armed placement) never unwound.
+ * - the canvas `pointerleave`: the DOM fires it when the cursor leaves the
+ *   canvas, and the movie's hover has to end with it (Director has no rollover
+ *   outside the stage).
+ * - the window `blur` and `pointercancel`: alt-tab and a browser-cancelled
+ *   pointer deliver NO event to the canvas at all, so a held modifier key and a
+ *   held press would both stay set.
+ */
+export function bindPointerEvents(
+  targets: { stage: PointerEventStage; canvas: PointerEventTarget; view: PointerEventTarget },
+  sink: PointerSink,
+): () => void {
+  const { stage, canvas, view } = targets;
+  const at = (e: PointerPoint): [number, number] => [Math.trunc(e.global.x), Math.trunc(e.global.y)];
+  const down = (e: PointerPoint): void => sink.down(...at(e));
+  const up = (e: PointerPoint): void => sink.up(...at(e));
+  const move = (e: PointerPoint): void => sink.move(...at(e));
+  const leave = (): void => sink.leave();
+  const blur = (): void => sink.blur();
+
+  stage.on('pointerdown', down);
+  stage.on('pointerup', up);
+  stage.on('pointerupoutside', up);
+  stage.on('pointermove', move);
+  canvas.addEventListener('pointerleave', leave);
+  view.addEventListener('blur', blur);
+  view.addEventListener('pointercancel', blur);
+
+  return () => {
+    stage.off('pointerdown', down);
+    stage.off('pointerup', up);
+    stage.off('pointerupoutside', up);
+    stage.off('pointermove', move);
+    canvas.removeEventListener('pointerleave', leave);
+    view.removeEventListener('blur', blur);
+    view.removeEventListener('pointercancel', blur);
+  };
+}
+
 export class PixiStage implements StageAdapter {
   app!: Application;
   private nodes = new Map<number, ChannelNode>();
@@ -159,6 +295,8 @@ export class PixiStage implements StageAdapter {
   /** Channels whose visual currently uses a blend-filter mode (REVERSE/NOT_REVERSE).
    *  Maintained by `refreshChannel`/`setChannel`; `syncBackBuffer` just checks this. */
   private _blendFilterChannels = new Set<number>();
+  /** Unbinds the pointer events wired in `init()` (see `bindPointerEvents`). */
+  private pointerCleanup: (() => void) | null = null;
 
   constructor(
     private engine: DirectorEngine,
@@ -186,9 +324,16 @@ export class PixiStage implements StageAdapter {
 
     this.app.stage.eventMode = 'static';
     this.app.stage.hitArea = this.app.screen;
-    this.app.stage.on('pointerdown', (e) => this.pointer('mouseDown', e.global.x, e.global.y));
-    this.app.stage.on('pointerup', (e) => this.pointer('mouseUp', e.global.x, e.global.y));
-    this.app.stage.on('pointermove', (e) => this.pointer('mouseMove', e.global.x, e.global.y));
+    this.pointerCleanup = bindPointerEvents(
+      { stage: this.app.stage, canvas: this.app.canvas, view: window },
+      {
+        down: (x, y) => this.pointer('mouseDown', x, y),
+        up: (x, y) => this.pointer('mouseUp', x, y),
+        move: (x, y) => this.pointer('mouseMove', x, y),
+        leave: () => void this.engine.pointerLost(),
+        blur: () => void this.engine.focusLost(),
+      },
+    );
 
     this.app.ticker.add(() => {
       // Dev counters are read by the overlay (`debugInfo`) and are guarded so the
@@ -408,10 +553,14 @@ export class PixiStage implements StageAdapter {
 
   private syncChannelImages(): void {
     let processed = 0;
+    const debts = imageDirtyDebts(this.nodes.values());
     for (const [channel, node] of this.nodes) {
       if (!node.imgLImage) continue;
       const img = node.imgLImage;
       if (!img.dirty) continue;
+      // This node is being served now whatever happens next, so its share of
+      // the image's dirty flag is settled here (see imageDirtyDebts).
+      releaseImageDirty(debts, img);
       if (img.width < 1 || img.height < 1) continue;
       const w = Math.round(img.width);
       const h = Math.round(img.height);
@@ -449,7 +598,6 @@ export class PixiStage implements StageAdapter {
       } else {
         node.imgSource.update();
       }
-      img.dirty = false;
       this.applyTransform(channel);
       if (++processed >= PixiStage.BAKE_BATCH) break;
     }
@@ -462,7 +610,7 @@ export class PixiStage implements StageAdapter {
     // surface color itself (waterloop tiles are edge-to-edge teal), so never
     // re-bake them.
     if (ch.member?.kind === 'filmloop') return null;
-    if (ch.ink === 1 || ch.ink === 6 || ch.ink === 7 || ch.ink === 8 || ch.ink === 36 || ch.ink === 41) return bakeModeForInk(ch.ink);
+    if (ch.ink === 1 || ch.ink === 4 || ch.ink === 6 || ch.ink === 7 || ch.ink === 8 || ch.ink === 36 || ch.ink === 41) return bakeModeForInk(ch.ink);
     // Ink 33/34/35/37/38/39/40 (AddPin/Add/SubPin/Sub/Lightest/Darkest/Lighten)
     // composite the art additively/subtractively, so the opaque backing field
     // must be flood-filled out first or it blends in as a solid box. The
@@ -1057,9 +1205,9 @@ export class PixiStage implements StageAdapter {
   private pointer(type: 'mouseDown' | 'mouseUp' | 'mouseMove', x: number, y: number): void {
     x = Math.trunc(x);
     y = Math.trunc(y);
-    const raw = this.hitTest(x, y);
-    const channel = type === 'mouseMove' ? raw : this.hitTest(x, y, { onlyScripted: true });
-    if (type !== 'mouseMove') {
+    const channel = type === 'mouseMove' ? this.hitTest(x, y) : this.hitTest(x, y, { onlyScripted: true });
+    if (type !== 'mouseMove' && pointerDebug()) {
+      const raw = this.hitTest(x, y);
       const desc = (c: number): string => {
         if (c <= 0) return '0';
         const ch = this.engine.getChannel(c);
@@ -1115,13 +1263,19 @@ export class PixiStage implements StageAdapter {
       }
     }
     this.engine.dispatchPointerEvent(type, channel, x, y);
-    if (type === 'mouseDown' && channel > 0) {
+    if (type === 'mouseDown' && channel > 0 && pointerDebug()) {
       try {
         const lc2 = this.engine.interp.evalExpressionString('getObject(#session).GET("client_lastclick")');
         this.engine.log(`room: afterDispatch lastClick=${String(lc2)}`);
       } catch {
       }
     }
+  }
+
+  /** Unbind the pointer listeners (the embed element's disconnect). */
+  dispose(): void {
+    this.pointerCleanup?.();
+    this.pointerCleanup = null;
   }
 
   private hitTest(x: number, y: number, opts?: { onlyScripted?: boolean }): number {
