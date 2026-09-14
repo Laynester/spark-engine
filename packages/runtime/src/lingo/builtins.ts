@@ -806,7 +806,8 @@ export function createBuiltinTable(): Map<string, BuiltinFn> {
     const c = a[0];
     const key = keyOf(a[1]);
     if (c instanceof LPropList && key !== undefined) {
-      const stored = resolvePropKey(c.props, key);
+      // Strings match exactly; only #symbol keys fold (U169 — see resolvePropKey).
+      const stored = resolvePropKey(c.props, key, a[1] instanceof LSymbol);
       return (stored === undefined ? undefined : c.props.get(stored)) ?? VOID;
     }
     if (c instanceof LList && typeof a[1] === 'number') {
@@ -818,7 +819,7 @@ export function createBuiltinTable(): Map<string, BuiltinFn> {
   set(['setAProp'], (b, a) => {
     const c = a[0];
     const key = keyOf(a[1]);
-    if (c instanceof LPropList && key !== undefined) c.props.set(resolvePropKey(c.props, key) ?? key, a[2] ?? VOID);
+    if (c instanceof LPropList && key !== undefined) c.props.set(resolvePropKey(c.props, key, a[1] instanceof LSymbol) ?? key, a[2] ?? VOID);
     else if (c instanceof LList && typeof a[1] === 'number') {
       const i = Math.round(a[1]);
       if (i >= 1) {
@@ -839,7 +840,7 @@ export function createBuiltinTable(): Map<string, BuiltinFn> {
     const c = a[0];
     const key = keyOf(a[1]);
     if (c instanceof LPropList && key !== undefined) {
-      const stored = resolvePropKey(c.props, key);
+      const stored = resolvePropKey(c.props, key, a[1] instanceof LSymbol);
       if (stored !== undefined) c.props.delete(stored);
     }
     return VOID;

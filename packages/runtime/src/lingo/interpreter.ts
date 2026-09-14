@@ -520,13 +520,13 @@ export class Interpreter {
     if (lower === 'get' || lower === 'getaprop' || lower === 'getproperty') {
       const key = keyOf(args[0]);
       if (key === undefined) return VOID;
-      const stored = resolvePropKey(obj.props, key);
+      const stored = resolvePropKey(obj.props, key, args[0] instanceof LSymbol);
       return (stored === undefined ? undefined : obj.props.get(stored)) ?? VOID;
     }
     if (lower === 'set' || lower === 'setaprop' || lower === 'setproperty') {
       const key = keyOf(args[0]);
       if (key !== undefined) {
-        const stored = resolvePropKey(obj.props, key) ?? key;
+        const stored = resolvePropKey(obj.props, key, args[0] instanceof LSymbol) ?? key;
         const value = args[1] ?? VOID;
         if (stored === 'ancestor' && (value === null || value === undefined)) {
           if (!(obj.props.get('ancestor') instanceof LObjectClass)) obj.props.set(stored, value);
@@ -1430,24 +1430,27 @@ export class Interpreter {
   private propListMethod(pl: LPropList, name: string, args: LVal[]): LVal {
     const lower = name.toLowerCase();
     const key = keyOf(args[0]);
+    // Director: "In property lists, symbols aren't case-sensitive, but strings
+    // are case-sensitive" — only #symbol lookups fold/variant-walk (U169).
+    const sym = args[0] instanceof LSymbol;
     switch (lower) {
       case 'addprop':
         if (key !== undefined) (pl.props as PropPairsClass).append(key, args[1] ?? VOID);
         return VOID;
       case 'setprop':
       case 'setaprop':
-        if (key !== undefined) this.propSet(pl, key, args[1] ?? VOID);
+        if (key !== undefined) this.propSet(pl, key, args[1] ?? VOID, sym);
         return VOID;
       case 'getprop':
       case 'getaprop':
-        return this.propGet(pl, key) ?? VOID;
+        return this.propGet(pl, key, sym) ?? VOID;
       case 'getpropat': {
         const i = Math.round(asNum(args[0]));
         const keys = [...pl.props.keys()];
         return i >= 1 && i <= keys.length ? rawKeyOf(keys[i - 1]) : VOID;
       }
       case 'deleteprop':
-        if (key !== undefined) this.propDelete(pl, key);
+        if (key !== undefined) this.propDelete(pl, key, sym);
         return VOID;
       case 'getat': {
         const i = Math.round(asNum(args[0]));
@@ -1489,7 +1492,7 @@ export class Interpreter {
       case 'findpos': {
         const k = keyOf(args[0]);
         const keys = [...pl.props.keys()];
-        const stored = k === undefined ? undefined : resolvePropKey(pl.props, k);
+        const stored = k === undefined ? undefined : resolvePropKey(pl.props, k, args[0] instanceof LSymbol);
         for (let i = 0; i < keys.length; i++) {
           if (stored !== undefined && keys[i] === stored) return i + 1;
           if (lingoEquals(keys[i], args[0] ?? VOID)) return i + 1;
@@ -2066,31 +2069,32 @@ export class Interpreter {
     this.host.warn(`cannot set ${name} on ${toLingoString(obj)}`);
   }
 
-  /** Read one proplist key: key-author's casing first, then the case-folded
-   *  match (Lingo proplist lookups use `=` semantics — see resolvePropKey), and
-   *  only then the space/underscore spelling variants the corpus mixes. */
-  private propGet(pl: LPropList, key: string | undefined): LVal | undefined {
+  /** Read one proplist key. STRING keys match the stored spelling exactly and
+   *  then the space/underscore spelling variants the corpus mixes (pre-optimi-
+   *  zations-again semantics); only #SYMBOL lookups additionally case-fold
+   *  (Director: "symbols aren't case-sensitive, but strings are" — U169). */
+  private propGet(pl: LPropList, key: string | undefined, symbol = true): LVal | undefined {
     if (key === undefined) return undefined;
-    const direct = resolvePropKey(pl.props, key);
+    const direct = resolvePropKey(pl.props, key, symbol);
     if (direct !== undefined) return pl.props.get(direct);
     const variants: string[] = [];
     if (key.includes(' ')) variants.push(key.replaceAll(' ', '_'));
     if (key.includes('_')) variants.push(key.replaceAll('_', ' '));
     if (key.includes(' ') && key.includes('_')) variants.push(key.replaceAll(' ', '_').replaceAll('_', ' '));
     for (const variant of variants) {
-      const vk = resolvePropKey(pl.props, variant);
+      const vk = resolvePropKey(pl.props, variant, symbol);
       if (vk !== undefined) return pl.props.get(vk);
     }
     return undefined;
   }
 
   /** Store one proplist key without growing a case twin of an existing key. */
-  private propSet(pl: LPropList, key: string, value: LVal): void {
-    pl.props.set(resolvePropKey(pl.props, key) ?? key, value);
+  private propSet(pl: LPropList, key: string, value: LVal, symbol = true): void {
+    pl.props.set(resolvePropKey(pl.props, key, symbol) ?? key, value);
   }
 
-  private propDelete(pl: LPropList, key: string): void {
-    const existing = resolvePropKey(pl.props, key);
+  private propDelete(pl: LPropList, key: string, symbol = true): void {
+    const existing = resolvePropKey(pl.props, key, symbol);
     if (existing !== undefined) pl.props.delete(existing);
   }
 
@@ -2105,7 +2109,7 @@ export class Interpreter {
         (index !== null && typeof index === 'object' && ilkOf(index).name === 'integer');
       if (!numeric) {
         const key = keyOf(index);
-        const hit = this.propGet(obj, key);
+        const hit = this.propGet(obj, key, index instanceof LSymbol);
         if (hit !== undefined) return hit;
         if (key !== undefined) {
           const k = key.toLowerCase();
@@ -2123,7 +2127,7 @@ export class Interpreter {
       if (value !== undefined) return value;
       const key = keyOf(index);
       if (key !== undefined) {
-        const hit = this.propGet(obj, key);
+        const hit = this.propGet(obj, key, index instanceof LSymbol);
         if (hit !== undefined) return hit;
       }
       return VOID;
@@ -2164,7 +2168,7 @@ export class Interpreter {
         return;
       }
       const key = keyOf(index);
-      if (key !== undefined) this.propSet(obj, key, value);
+      if (key !== undefined) this.propSet(obj, key, value, index instanceof LSymbol);
       return;
     }
     if (obj instanceof LRectClass) {

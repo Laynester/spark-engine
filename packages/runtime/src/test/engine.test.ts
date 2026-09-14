@@ -992,6 +992,43 @@ test('proplist case folding is indexed, not a scan of every key (boot preIndexMe
   assert.equal(big.size, 1999);
 });
 
+test('STRING proplist lookups match the stored spelling exactly (no fold/variant walk)', () => {
+  // U169 / friend_list_drag: `Resource Manager Class::createMember` guards with
+  // `if not voidp(pAllMemNumList[tMemName])` where the table is keyed by the
+  // ART names ("friend_list_drag", from preIndexMembers) and the WINDOW build
+  // asks for the buffer spelling "Friend List_drag". String keys fold neither
+  // case (only symbols fold, see D4) nor space/underscore, so the guard must
+  // MISS and allocate a fresh bitmap; the folded hit instead returned the art
+  // member and buildVisual painted the window buffer over the art (the drag
+  // strip went invisible). pre-optimizations-again semantics.
+  const e = new DirectorEngine();
+  e.addScriptMember(
+    'PropStrKey',
+    'movie',
+    [
+      'on run me',
+      '  tP = [:]',
+      '  tP["friend_list_drag"] = "ART"',
+      '  tP["marginH"] = 9',
+      '  tReturnList = [:]',
+      '  tReturnList["Friend List_drag"] = "BUFFER"',
+      '  tOut = voidP(tP.getaProp("Friend List_drag")) & "|" & voidP(tP["Friend_List_drag"]) & "|" & voidP(tP.getaProp("MARGINH"))',
+      '  tOut = tOut & "|" & voidP(tReturnList["friend_list_drag"])',
+      '  tOut = tOut & "|" & tP.getaProp("friend_list_drag") & "|" & tP.getaProp("marginH")',
+      '  return tOut',
+      'end',
+    ].join('\n'),
+  );
+  const script = e.resolveScript('PropStrKey')!;
+  const run = script.handlers.find((h) => h.name.toLowerCase() === 'run')!;
+  // folded/variant string spellings MISS (voidP = 1); the stored spelling hits.
+  assert.equal(
+    e.interp.callHandler(script, run, [], null, new Set()),
+    '1|1|1|1|ART|9',
+    'string keys must not fold case nor swap space/underscore',
+  );
+});
+
 test('walking a text by line splits the string once, not once per line', () => {
   // The corpus walks text line-by-line everywhere (`repeat with i = 1 to
   // t.line.count` + `t.line[i]`), so the read path memoizes the split (see

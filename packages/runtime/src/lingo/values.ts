@@ -987,20 +987,28 @@ export interface PropKeyLookup {
 }
 
 /**
- * Resolve a proplist/object key the way Lingo `=` compares values: an exact
- * match wins, otherwise the first key that differs only in case. Keys are
- * STORED as written (getPropAt/toLingoString keep the author's casing) and only
- * the lookup folds, which is why this returns the stored key — writes reuse it
- * so a mixed-case read/write pair can never grow a case twin.
+ * Resolve a proplist/object key the way Lingo compares it. SYMBOL lookups
+ * fold case (Director: "In property lists, symbols aren't case-sensitive, but
+ * strings are case-sensitive" — drmx2004 scripting ref); STRING lookups match
+ * the stored spelling exactly. Keys are STORED as written (getPropAt/
+ * toLingoString keep the author's casing); a folded symbol hit returns the
+ * stored key so writes reuse it — a mixed-case read/write pair can never grow
+ * a case twin. Pass `symbol` from the access form: bracket/getaProp keys keep
+ * symbolness when the source was `#name`; dot/identifier keys always fold.
  *
- * Corpus reason: the v31 client creates the hotel connection under the id it
- * reads from `connection.info.id` (= `#info`) while `hh_room_utils/0071 Respect
- * Manager Class` asks for `#Info`; the same fold is needed for that
- * connection's command table (`pCommandsList[#info]`), the manager id lists
- * (`pItemList.getOne`) and the dropmenu margin keys (`#marginh` vs `#marginH`).
+ * Corpus reason: `hh_room_utils/0071 Respect Manager Class` asks for `#Info`
+ * on a table created under `#info`, and the dropmenu margin keys mix
+ * `#marginh`/`#marginH`. The friend_list_drag regression (U169) came from
+ * ALSO folding the STRING `"Friend List_drag"` onto the art key
+ * `"friend_list_drag"`: `Resource_Manager::createMember`'s
+ * `not voidp(pAllMemNumList[tMemName])` guard then found the art member's
+ * number and returned it instead of allocating a buffer, so
+ * `Window_Instance::buildVisual` painted the 220x29 window buffer over the
+ * drag-strip art (invisible in-game, fine in the standalone probe).
  */
-export function resolvePropKey(props: PropKeyLookup, key: string): string | undefined {
+export function resolvePropKey(props: PropKeyLookup, key: string, symbol = true): string | undefined {
   if (props.has(key)) return key;
+  if (!symbol) return undefined;
   // PropPairs carries a maintained fold index, so the fallback scan is only for a
   // plain Map (object instance props) and never runs for corpus proplists.
   if (props.lowerKey) return props.lowerKey(key);
