@@ -784,15 +784,49 @@ export function bakeSurface(
   return { pixels: buf, changed: changed || tinted };
 }
 
-export function matteSpriteHitTest(
-  ink: number,
+/**
+ * Is the sprite's rendered pixel at (px, py) part of its ACTIVE AREA, i.e. can a
+ * click land on it? `false` means the click belongs to the sprite underneath.
+ *
+ * Director defines the active area of a mouse message as "the portion of the
+ * image that is displayed" (drmx2004_scripting_ref.txt:6979, 7027; the `cursor`
+ * property doc says the same at 28823: the pointer only "changes when the cursor
+ * is over the matte portion of the sprite"). The pixels a sprite renders as
+ * nothing are therefore click-through: they belong to whatever is drawn behind
+ * them.
+ *
+ * `pixels` is the RENDERED buffer (`ChannelNode.imgBuffer`) — the buffer the
+ * stage actually uploads — so this single alpha test covers every way a sprite
+ * can end up with invisible pixels at once:
+ *
+ *  - the ink's keying bake (matte 8, Background Transparent 36, Not-copy 4,
+ *    Not-ghost 7, the additive/subtractive family),
+ *  - the ink-0 near-white-backdrop heuristic (`bakeForChannel`'s
+ *    `backgroundTransparent`),
+ *  - artwork that simply HAS an alpha channel (a 32-bit member, a PNG, a
+ *    `image(w, h, 32)` the movie painted into).
+ *
+ * The alpha-channel case is what makes this load-bearing for the room. Habbo
+ * furniture sprites are ink 8 by default (`Active_Object_Class::solveInk`
+ * returns 8 when `*.props` does not name an ink — real chair props only carry
+ * `#zshift`, e.g. `hh_room_bar/0010_lounge_chair_small.props.txt`), and the
+ * `#zshift` of a chair's parts interleaves them WITH the sitter: a part that is
+ * drawn in front of the sitting avatar has a bigger locZ than `pMatteSpr
+ * .locZ = pSprite.locZ + 1`. A chair's rectangle is much larger than its art,
+ * so a bounding-box hit test on that front part eats every click aimed at the
+ * avatar sitting on it — the reported "clicking a sitting avatar selects the
+ * chair". Testing the displayed pixels lets the click fall to the avatar.
+ *
+ * Missing surface and out-of-bounds coordinates still fall back to the
+ * rectangle, so a drifted pixel mapping can never make a sprite unclickable.
+ */
+export function spritePixelHitTest(
   pixels: Uint8Array | Uint8ClampedArray | null | undefined,
   w: number,
   h: number,
   px: number,
   py: number,
 ): boolean {
-  if (ink !== 8) return true;
   if (!pixels || w < 1 || h < 1) return true;
   if (px < 0 || py < 0 || px >= w || py >= h) return true;
   return pixels[(py * w + px) * 4 + 3] !== 0;

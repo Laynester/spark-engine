@@ -115,8 +115,10 @@ divergences** ("The C++ reference requires near-white corners and ≥75%
 near-white edges, but real Habbo backdrops bleed art to a corner…", "The C++
 resolveRgbFloodFillMatte shortcut is 'any white edge pixel wins'…"). The BFS
 flood fill is generic algorithm. Closest mirrors: `edgeMatteColor` = pixel
-(0,0) (DirPlayer `edge_matte_color`) and `matteSpriteHitTest` (`matte.ts:594`
-= DirPlayer `should_matte_hit_test`, which is a one-line rule `ink == 8`).
+(0,0) (DirPlayer `edge_matte_color`) and `spritePixelHitTest` (`matte.ts` — divides
+from DirPlayer `should_matte_hit_test`, whose one-line rule is `ink == 8`; ours
+follows Director's "active area is the portion of the image that is displayed"
+and tests the rendered buffer's alpha for every ink).
 
 ### `copyPixels` (`lingo/values.ts:422-560`)
 

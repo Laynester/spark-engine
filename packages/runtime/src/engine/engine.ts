@@ -120,6 +120,17 @@ export interface StageAdapter {
   refreshChannel(channel: number): void;
   resize(width: number, height: number): void;
   captureStage?(): Uint8Array | null;
+  /**
+   * The front-most sprite under a stage point, using the SAME pixel rule the
+   * adapter uses to route mouse events (see PixiStage.hitTest). `the rollover`
+   * and `the clickOn` must be the sprite that actually receives the event — the
+   * room's `Room_Interface::validateEvent` compares the two by id (`if
+   * call(#getID, sprite(the rollover).scriptInstanceList) = tSprID`) before it
+   * runs its own ink-36 white-cover click-through, and a disagreement makes it
+   * bail out. Only the stage knows the rendered (baked) pixels, so it answers.
+   * When absent the engine falls back to its own sprite rect/alpha test.
+   */
+  pointerSpriteAt?(x: number, y: number): number;
 }
 
 interface WindowData {
@@ -1293,6 +1304,20 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     }
   }
 
+  /**
+   * Deliver a pointer event to the ONE sprite the pointer owns.
+   *
+   * Director gives a mouse event to the sprite script of the sprite involved —
+   * the front-most active sprite, which is what `the clickOn` reports — NOT to
+   * every sprite under the cursor. A click that should reach a sprite underneath
+   * is passed EXPLICITLY by the movie: Room Interface's `validateEvent` hides an
+   * ink-36 white area and re-calls the event on `sprite(the rollover)`, which is
+   * then the sprite below (hh_room/0003). The FUSE window elements rely on the
+   * same rule the other way round — `Window Instance Class::buildVisual` wires
+   * every element sprite's Event Broker with a VOID procedure
+   * (`tsprite.registerProcedure(VOID, me.getID(), VOID)`), so a click on a
+   * catalogue window does nothing to the navigator underneath it.
+   */
   dispatchPointerEvent(type: 'mouseDown' | 'mouseUp' | 'mouseMove', channel: number, x: number, y: number): void {
     this.mouseH = x;
     this.mouseV = y;
@@ -1314,7 +1339,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       const now = Date.now();
       this.doubleClick = now - this.lastMouseDownTime < 500;
       this.lastMouseDownTime = now;
-      this.clickOnChannel = this.spriteAtPoint(x, y);
+      this.clickOnChannel = this.hitSpriteAt(x, y);
       const m = channel > 0 && channel < this.channels.length ? this.channels[channel].member : undefined;
       if (m && m.kind === 'text' && m.textProps?.get('editable')) this.keyboardFocusSprite = channel;
       else this.keyboardFocusSprite = 0;
@@ -2439,7 +2464,18 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   }
 
   rollover(): number {
-    return this.spriteAtPoint(this.mouseH, this.mouseV);
+    return this.hitSpriteAt(this.mouseH, this.mouseV);
+  }
+
+  /**
+   * The one hit test behind `the rollover`, `the clickOn` and the event
+   * dispatch: the adapter's (it owns the rendered pixels), else the engine's own
+   * scan. Keeping the three on one answer is what the corpus expects — the room
+   * re-reads `sprite(the rollover)` after hiding the sprite that got the event.
+   */
+  private hitSpriteAt(x: number, y: number): number {
+    const viaStage = this.adapter?.pointerSpriteAt?.(x, y);
+    return viaStage === undefined ? this.spriteAtPoint(x, y) : viaStage;
   }
 
   rolloverSprite(n: number): boolean {
@@ -2483,10 +2519,28 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     return 0;
   }
 
+  /**
+   * Does the sprite's own pixel at (x, y) accept the pointer?
+   *
+   * Director's active area is "the portion of the image that is displayed"
+   * (drmx2004_scripting_ref.txt:6979, 7027): the pixels a sprite renders as
+   * nothing belong to the sprite underneath, whatever produced the hole — an
+   * ink's keying, or artwork that simply has an alpha channel (furniture and
+   * avatar canvases here are `image(w, h, 32)` compositions, so an alpha test is
+   * the whole rule). `visible`/stacking decides which sprites are candidates;
+   * this decides which of their pixels are real. Reading the raw member image
+   * (rather than the stage's baked buffer) keeps `the rollover` and `the clickOn`
+   * computable without a stage, and the two agree on everything the ink bakes do
+   * not key. Surface-missing and out-of-bounds coordinates fall back to the
+   * rectangle so a drifted mapping can never make a sprite unreachable.
+   *
+   * This is the rule the room's `validateEvent` relies on: it hides an ink-36
+   * white cover (`tSpr.visible = 0`), re-reads `sprite(the rollover)` and expects
+   * the sprite BELOW.
+   */
   private spritePixelAccept(ch: Channel, w: number, h: number, x: number, y: number): boolean {
     const member = ch.member;
     if (!member) return true;
-    if (ch.ink !== 8) return true;
     const img = this.memberImage(member);
     const sw = Math.round(img.width);
     const sh = Math.round(img.height);

@@ -8,7 +8,7 @@ import { alignmentName, type ChannelVisual, type DirectorEngine, type StageAdapt
 import type { Channel } from '../engine/sprites.js';
 import { LImage, LList, LObject, LPoint, LPropList, LSpriteRef, LSymbol } from '../lingo/values.js';
 import type { ShapeDef } from '../engine/members.js';
-import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, bakeSurface, blendModeForInk, cornersAreNearWhite, matteSpriteHitTest, setMatteIdentityFill, tintSpriteBackground, tintSpriteDarken, DARKEST_BLEND_MODE, LIGHTEST_BLEND_MODE, NOT_REVERSE_BLEND_MODE, REVERSE_BLEND_MODE, SUBTRACT_BLEND_MODE, type BakeMode } from './matte.js';
+import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, bakeSurface, blendModeForInk, cornersAreNearWhite, spritePixelHitTest, setMatteIdentityFill, tintSpriteBackground, tintSpriteDarken, DARKEST_BLEND_MODE, LIGHTEST_BLEND_MODE, NOT_REVERSE_BLEND_MODE, REVERSE_BLEND_MODE, SUBTRACT_BLEND_MODE, type BakeMode } from './matte.js';
 import { caretBlinkOn, caretX } from './caret.js';
 import { registerInkBlendFilters } from './blendFilters.js';
 import { perf, perfEnabled, perfFrame, perfTimeBake, type PerfMilestone } from '../perf.js';
@@ -25,7 +25,17 @@ interface ChannelNode {
   imgLImage?: LImage;
   imgTexture?: Texture;
   imgSource?: BufferImageSource;
+  /**
+   * The pixels the hit test samples — the SAME surface this node renders, so a
+   * pixel the sprite displays nothing at belongs to the sprite below
+   * (`spritePixelHitTest`). Set by every bitmap branch: the live-image path
+   * (with `imgSource`) AND the raw-cast-bytes path, which is where the room's
+   * own art comes from (walls, tiles, furniture pieces are `member.raw`).
+   */
   imgBuffer?: Uint8Array | Uint8ClampedArray | null;
+  /** The hit buffer's own size; the bytes path has no `imgSource` to ask. */
+  hitBufW?: number;
+  hitBufH?: number;
   bakeBuf?: Uint8ClampedArray;
   bakeMode?: BakeMode | null;
   baseW?: number;
@@ -54,6 +64,9 @@ interface BlobEntry {
   width: number;
   height: number;
   texture: Texture;
+  /** The decoded (and baked) pixels the texture was built from — what the hit
+   *  test samples. Kept because the texture's source is GPU-side. */
+  rgba: Uint8Array | Uint8ClampedArray | null;
 }
 
 function fullyTransparent(buf: Uint8Array): boolean {
@@ -584,6 +597,8 @@ export class PixiStage implements StageAdapter {
         node.container.addChild(sprite);
         node.bakeMode = finalBake;
         node.imgBuffer = pixels;
+        node.hitBufW = w;
+        node.hitBufH = h;
         this.refreshChannel(channel);
       } else if (!node.imgSource || node.imgSource.width !== w || node.imgSource.height !== h || node.bakeMode !== finalBake || node.imgBuffer !== pixels) {
         const oldTex = node.imgTexture;
@@ -592,6 +607,8 @@ export class PixiStage implements StageAdapter {
         node.visual.texture = node.imgTexture;
         node.bakeMode = finalBake;
         node.imgBuffer = pixels;
+        node.hitBufW = w;
+        node.hitBufH = h;
         node.baseW = w;
         node.baseH = h;
         oldTex?.destroy();
@@ -821,11 +838,19 @@ export class PixiStage implements StageAdapter {
     node.imgLImage = undefined;
     node.imgSource = undefined;
     node.imgBuffer = undefined;
+    node.hitBufW = undefined;
+    node.hitBufH = undefined;
     node.imgTexture = undefined;
     node.bakeMode = undefined;
     node.bakeBuf = undefined;
     node.baseW = undefined;
     node.baseH = undefined;
+    // A text visual sets the hit box (see the `kind === 'text'` branch below);
+    // it MUST be forgotten with the visual, or a channel recycled from a text
+    // element into a bitmap keeps the old box and the hit test samples the
+    // bitmap at the wrong pixel (sw / hit.w above).
+    node.hitW = undefined;
+    node.hitH = undefined;
     node.shape = undefined;
     node.textObj = undefined;
     node.caret = undefined;
@@ -958,6 +983,10 @@ export class PixiStage implements StageAdapter {
           node.baseH = height;
           node.visual = sprite;
           node.container.addChild(sprite);
+          // Masked pixels (alpha 0) are click-through too.
+          node.imgBuffer = rgba;
+          node.hitBufW = width;
+          node.hitBufH = height;
         }
       } else {
         // Film-loop frames are full-bleed opaque strips (water animation): no
@@ -1009,6 +1038,9 @@ export class PixiStage implements StageAdapter {
             node.baseH = height;
             node.visual = sprite;
             node.container.addChild(sprite);
+            node.imgBuffer = rgba;
+            node.hitBufW = width;
+            node.hitBufH = height;
           }
         } else {
           const entry = this.acquireBlob(visual.bytes, bake, ch.member?.palette, visual.remapPalette, ink7Key);
@@ -1018,6 +1050,11 @@ export class PixiStage implements StageAdapter {
           node.baseH = entry.height;
           node.visual = sprite;
           node.container.addChild(sprite);
+          // Raw cast bytes (walls, tiles, furniture, film-loop frames): the
+          // baked RGBA the texture came from is the sprite's displayed portion.
+          node.imgBuffer = entry.rgba;
+          node.hitBufW = entry.width;
+          node.hitBufH = entry.height;
         }
       }
     }
@@ -1105,7 +1142,7 @@ export class PixiStage implements StageAdapter {
           source: new BufferImageSource({ resource: rgba, width, height, format: 'rgba8unorm', scaleMode: 'nearest' }),
         });
       }
-      entry = { bytes, bake, key, refs: 0, width, height, texture };
+      entry = { bytes, bake, key, refs: 0, width, height, texture, rgba };
       byBake.set(key, entry);
     } else {
       this.unfreeBlob(entry);
@@ -1278,6 +1315,13 @@ export class PixiStage implements StageAdapter {
     this.pointerCleanup = null;
   }
 
+  /** `StageAdapter.pointerSpriteAt` — the engine's `the rollover` / `the clickOn`
+   *  are this exact answer, so they can never disagree with the channel the
+   *  pointer event was routed to. */
+  pointerSpriteAt(x: number, y: number): number {
+    return this.hitTest(Math.trunc(x), Math.trunc(y));
+  }
+
   private hitTest(x: number, y: number, opts?: { onlyScripted?: boolean }): number {
     const hits: { channel: number; z: number; node: ChannelNode; w: number; h: number }[] = [];
     for (const [channel, node] of this.nodes) {
@@ -1297,12 +1341,16 @@ export class PixiStage implements StageAdapter {
       const ch = this.engine.getChannel(hit.channel);
       const left = ch.locH - hit.node.regX;
       const top = ch.locV - hit.node.regY;
-      const sw = hit.node.imgSource?.width ?? hit.w;
-      const sh = hit.node.imgSource?.height ?? hit.h;
+      const sw = hit.node.imgSource?.width ?? hit.node.hitBufW ?? hit.w;
+      const sh = hit.node.imgSource?.height ?? hit.node.hitBufH ?? hit.h;
       const { tx, ty } = this.inverseTransformPoint(ch, x, y);
       const px = Math.round((tx - left) * (sw / Math.max(1, hit.w)));
       const py = Math.round((ty - top) * (sh / Math.max(1, hit.h)));
-      if (matteSpriteHitTest(ch.ink ?? 0, hit.node.imgBuffer, sw, sh, px, py)) return hit.channel;
+      // The sprite owns the click only where it renders something: the pixels
+      // it displays are its active area (see spritePixelHitTest), so the pixels
+      // an ink/alpha keyed away belong to the sprite underneath — the chair that
+      // carries a sitter no longer eats the click aimed at the avatar.
+      if (spritePixelHitTest(hit.node.imgBuffer, sw, sh, px, py)) return hit.channel;
     }
     return 0;
   }
