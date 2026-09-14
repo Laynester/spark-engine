@@ -561,6 +561,7 @@ export class LImage {
         if (matteMask && matteMask[(sy - sy0) * srcW + (sx - sx0)] === 1) continue;
         const si = (sy * sw + sx) * 4;
         if (ink === 8 && s[si + 3] === 0) continue;
+        if (ink === 1 && s[si + 3] === 0) continue;
         if (mask && maskData && sx >= 0 && sx < maskW && sy >= 0 && sy < maskH) {
           const mi = (sy * maskW + sx) * 4;
           if (mask.depth <= 8) {
@@ -699,6 +700,7 @@ function applyInkPixel(
   }
 
   if (ink === 1) {
+    if (sa === 0) return [dr, dg, db, da];
     return srcRgb === 0xffffff ? [dr, dg, db, da] : [sr, sg, sb, 255];
   }
   if (ink === 2) {
@@ -806,6 +808,15 @@ export function intColor(n: number): LColor {
 
 export function hexColor(s: string): LColor | null {
   let h = s.trim().replace(/^#/, '');
+  // Director reads the colour from the LEADING hex digits and ignores whatever
+  // follows them, so `rgb("FFFF33 Hello")` is the same yellow as `rgb("FFFF33")`.
+  // The corpus depends on that: the stickie note window takes its paper colour
+  // from `rgb(ttype)` where `ttype` is the first word of the item-data string the
+  // server sends (Havana/R39 `IDATA` writes the colour, a SPACE, then the note
+  // text into one field). A strict six-character test made every note with text
+  // black while an empty one (colour alone) rendered fine.
+  const leading = /^[0-9a-fA-F]{6}/.exec(h);
+  if (leading) return intColor(parseInt(leading[0], 16));
   if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
   if (h.length !== 6 || !/^[0-9a-fA-F]{6}$/.test(h)) return null;
   return intColor(parseInt(h, 16));
@@ -951,7 +962,18 @@ export function toLingoString(v: LVal): string {
   if (v instanceof LCastLibRef) return `castLib(${v.number})`;
   if (v instanceof LWindowRef) return `window(${v.id})`;
   if (v instanceof LImage) return `image(${v.width}, ${v.height})`;
-  if (v instanceof LColor) return `color(${v.red}, ${v.green}, ${v.blue})`;
+  // Director stringifies a colour as `rgb(r, g, b)` (or `paletteIndex(n)`), not
+  // `color(...)`. The corpus slices that text apart: the pool's swimsuit window
+  // builds what it sends to the server from `string(pSwimSuitColor)` by cutting
+  // `char[5..length]` off the first item and `char[1..length-1]` off the third
+  // (`Pellehyppy Interface Class` / `Mountain Interface Class`), i.e. it assumes
+  // the "rgb(" prefix and the trailing ")". With `color(` the red channel came
+  // out as `value("r(255")` = 0, so every swimsuit colour was sent to the room
+  // as "0,G,B".
+  if (v instanceof LColor) {
+    if (v.paletteIndex !== undefined) return `paletteIndex(${v.paletteIndex})`;
+    return `rgb(${v.red}, ${v.green}, ${v.blue})`;
+  }
   if (v instanceof LStageRef) return `stage(${v.width}, ${v.height})`;
   return String(v);
 }
