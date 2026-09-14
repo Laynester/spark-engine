@@ -1115,6 +1115,31 @@ test('sprite channel model: member + loc + regpoint', () => {
   assert.ok(e.getSpriteProp(s, 'member') !== null);
 });
 
+test('sprite.memberNum assigns a member by Director slot number (Hobba mod tool button)', () => {
+  // Hobba_Interface_Class::showModtoolButton builds the moderator button as a
+  // freshly reserved sprite and then fills it with
+  //   pModtoolButtonSpr.memberNum = getmemnum("mod_tool_icon")
+  // (hh_shared/0003:92). `memberNum` is Director's numeric alias of
+  // `sprite.member`, and getmemnum returns a Director slot number, exactly as
+  // castNum already takes it. The engine had no case for `memberNum`, so the
+  // write fell through to the "unsupported" default and the sprite stayed
+  // memberless — the button never drew. It must follow the castNum path.
+  const e = new DirectorEngine();
+  e.addScriptMember('mod_tool_icon', 'score', '-- Cast member: mod_tool_icon\n-- Type: Score\non exitFrame me\nend\n');
+  const num = e.getmemnum('mod_tool_icon');
+  assert.equal(num, 65537, 'cast 1 << 16 | member 1');
+  const s = e.getSprite(7);
+  e.setSpriteProp(s, 'memberNum', num);
+  assert.equal(e.getSpriteProp(s, 'memberNum'), num, 'memberNum round-trips the slot number');
+  assert.equal(e.getSpriteProp(s, 'castNum'), num, 'memberNum and castNum read the same member');
+  assert.equal((e.getSpriteProp(s, 'member') as LMemberRef).name, 'mod_tool_icon');
+  assert.ok(!e.logs.some((l) => l.includes('memberNum')), 'memberNum is not an unsupported write');
+  // A memberNum of 0 clears the channel, mirroring castNum.
+  e.setSpriteProp(s, 'memberNum', 0);
+  assert.equal(e.getSpriteProp(s, 'member'), VOID);
+  assert.equal(e.getSpriteProp(s, 'memberNum'), 0);
+});
+
 test('isPointerTarget: script-less sprites are click-transparent, brokered + editable stay targets (room hiliter)', () => {
   // Director sends mouse events to the topmost sprite WITH a script. FUSE
   // never brokers the room hiliter sprite (Visualizer buildVisual's broker
@@ -6860,6 +6885,253 @@ test('the clickOn is the topmost sprite at the last mouseDown (Club TV bottom-pa
   assert.equal(e.interp.evalExpressionString('the clickOn'), 30, 'kept through the release (select reads it on mouseUp)');
   e.dispatchPointerEvent('mouseDown', 31, 125, 105);
   assert.equal(e.interp.evalExpressionString('the clickOn'), 31, 're-sets on the next press');
+});
+
+/**
+ * The room's click chain, shaped exactly like the corpus: EVERY room sprite
+ * carries the Event Broker Behavior (fuse_client/0003) and registers ONE
+ * mouseDown handler on itself. The broker runs the handler and calls
+ * `stopEvent()` only when that handler returns truthy, i.e. a handler that
+ * falls through leaves the press available to the sprites underneath.
+ *
+ * `floorMoves` counts the floor's own eventProcRoom (the walk); `rugHits`
+ * counts the floor item's eventProcItemObj. `topHandles` selects whether the
+ * item on top consumes the press (an avatar's select does; a rug's
+ * eventProcItemObj returns VOID and does not).
+ */
+function roomClickChain(topHandles: boolean) {
+  const e = new DirectorEngine();
+  e.addScriptMember(
+    'EventBroker',
+    'score',
+    [
+      'property id',
+      'property pProcList',
+      'on registerProcedure me, tMethod, tClientID, tEvent',
+      '  if voidp(pProcList) then',
+      '    pProcList = me.createProcListTemplate()',
+      '  end if',
+      '  pProcList[tEvent] = [tMethod, tClientID]',
+      '  return 1',
+      'end',
+      'on setID me, tID',
+      '  id = tID',
+      '  return 1',
+      'end',
+      'on getID me',
+      '  return id',
+      'end',
+      'on mouseDown me',
+      '  tResult = me.redirectEvent(#mouseDown)',
+      '  if tResult then',
+      '    stopEvent()',
+      '  end if',
+      '  return tResult',
+      'end',
+      'on redirectEvent me, tEvent',
+      '  if voidp(pProcList) then',
+      '    pProcList = me.createProcListTemplate()',
+      '  end if',
+      '  tClient = pProcList[tEvent][2]',
+      '  if not tClient then',
+      '    return 0',
+      '  end if',
+      '  return call(pProcList[tEvent][1], getObject(tClient), tEvent, id)',
+      'end',
+      'on createProcListTemplate me',
+      '  tList = [:]',
+      '  tList[#mouseDown] = [#null, 0]',
+      '  return tList',
+      'end',
+    ].join('\n'),
+  );
+  e.addScriptMember(
+    'RoomInterface',
+    'parent',
+    [
+      'property pMoves',
+      'on construct me',
+      '  pMoves = 0',
+      '  return 1',
+      'end',
+      'on eventProcRoom me, tEvent, tSprID, tParam',
+      '  if tEvent <> #mouseDown then',
+      '    return 0',
+      '  end if',
+      '  pMoves = pMoves + 1',
+      '  return 1',
+      'end',
+    ].join('\n'),
+  );
+  e.addScriptMember(
+    'ItemObject',
+    'parent',
+    [
+      'property pHits',
+      'on construct me',
+      '  pHits = 0',
+      '  return 1',
+      'end',
+      'on eventProcItemObj me, tEvent, tSprID, tParam',
+      '  if tEvent <> #mouseDown then',
+      '    return 0',
+      '  end if',
+      '  pHits = pHits + 1',
+      '  if ' + (topHandles ? '1' : '0') + ' then',
+      '    return 1',
+      '  end if',
+      '  return VOID',
+      'end',
+    ].join('\n'),
+  );
+  const floorIface = e.interp.evalExpressionString('new(script("RoomInterface"))') as LObject;
+  const itemObj = e.interp.evalExpressionString('new(script("ItemObject"))') as LObject;
+  e.setObjectById('room_interface', floorIface);
+  e.setObjectById('item_interface', itemObj);
+
+  // Channel 20 = the room floor (bottom), 30 = a floor item drawn on top of it.
+  for (const [ch, id, handler, client] of [
+    [20, 'floor', 'eventProcRoom', 'room_interface'],
+    [30, 'rug', 'eventProcItemObj', 'item_interface'],
+  ] as [number, string, string, string][]) {
+    const broker = e.interp.evalExpressionString('new(script("EventBroker"))') as LObject;
+    e.setSpriteProp(e.getSprite(ch), 'scriptInstanceList', new LList([broker]));
+    e.setSpriteProp(e.getSprite(ch), 'locZ', ch);
+    e.spriteMethod(e.getSprite(ch), 'setID', [new LSymbol(id)]);
+    e.spriteMethod(e.getSprite(ch), 'registerProcedure', [new LSymbol(handler), client, new LSymbol('mouseDown')]);
+  }
+  return { e, floorIface, itemObj };
+}
+
+test('a click on a window element does NOT reach the sprite underneath it (no automatic fall-through)', () => {
+  // Regression guard for a real REPORTED break: dispatching the press to every
+  // sprite under the cursor turned a click on the catalogue into a click on the
+  // navigator behind it, and made hand-inventory items unplaceable (the item's
+  // sprite fell through to the room floor, which sent a MOVE). Director does not
+  // pass an event to the scripts beneath the front sprite by itself; the movie
+  // does it EXPLICITLY. The FUSE window system is the proof: Window Instance
+  // Class::buildVisual wires every element sprite's Broker with a VOID procedure
+  // (`tsprite.registerProcedure(VOID, me.getID(), VOID)`, 0055:449), and the
+  // broker's redirectEvent then returns VOID for every event — nothing stops it
+  // and nothing consumes it, yet a window click must not touch the window below.
+  const { e, floorIface, itemObj } = roomClickChain(false);
+  // The top sprite's broker already carries [eventProcItemObj, item_interface];
+  // swap its procedure for the window wiring (a VOID handler).
+  const top = e.getSprite(30);
+  const broker = (e.getSpriteProp(top, 'scriptInstanceList') as LList).items[0] as LObject;
+  broker.props.set('pProcList', null);
+  e.spriteMethod(top, 'registerProcedure', [VOID, 'item_interface', new LSymbol('mouseDown')]);
+  e.setSpriteProp(top, 'scriptInstanceList', new LList([broker]));
+  e.dispatchPointerEvent('mouseDown', 30, 10, 10);
+  assert.equal(Number(itemObj.props.get('pHits') ?? 0), 0, 'the VOID window procedure handled nothing');
+  assert.equal(Number(floorIface.props.get('pMoves') ?? 0), 0, 'and the room floor underneath never saw the click');
+});
+
+/** A bitmap member whose pixels the hit test reads (blank = fully transparent). */
+function hitTestMember(e: DirectorEngine, n: number, name: string, w: number, h: number): Member {
+  const m = new Member(1, n, name, 'bitmap');
+  m.image = new LImage(w, h);
+  m.image.ensure();
+  m.image.dirty = true;
+  const cast = e.casts[0] ?? new CastLib(1, 'internal');
+  cast.members.set(n, m);
+  cast.byName.set(name, m);
+  e.membersByGlobal.set((1 << 16) | n, m);
+  return m;
+}
+
+function paintRect(m: Member, x0: number, y0: number, x1: number, y1: number): void {
+  const img = m.image!;
+  const w = Math.round(img.width);
+  const data = img.ensure();
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const o = (y * w + x) * 4;
+      data[o] = 200;
+      data[o + 1] = 120;
+      data[o + 2] = 90;
+      data[o + 3] = 255;
+    }
+  }
+  img.dirty = true;
+}
+
+/**
+ * The reported bug: an avatar sitting on a chair clicked the CHAIR.
+ *
+ * Habbo stacks a sitter between the chair's own parts — `#zshift` in the
+ * furniture props interleaves them (a part drawn in front of the avatar has a
+ * bigger locZ than `pMatteSpr.locZ = pSprite.locZ + 1`, Human_Class_EX
+ * 0002:912), and the chair's art is far smaller than its sprite rectangle. The
+ * avatar's active area is the canvas pixels it actually displays (its body, the
+ * rest of the canvas is keyed/transparent), so a chair pixel that renders
+ * nothing must let the click through to the avatar; a chair pixel that IS drawn
+ * still wins where it is in front.
+ */
+test('a chair drawn in front of a sitter does not steal the click aimed at the avatar', () => {
+  const e = new DirectorEngine();
+  const avatar = hitTestMember(e, 1, 'sd_canvas_1_0_0', 30, 60);
+  paintRect(avatar, 10, 20, 19, 49); // the body; the rest of the canvas is transparent
+  const chair = hitTestMember(e, 2, 'lounge_chair_front', 20, 40);
+  paintRect(chair, 0, 30, 19, 39); // only the seat is drawn; the rest of its box renders nothing
+
+  e.setSpriteProp(e.getSprite(40), 'castNum', (1 << 16) | 1);
+  e.setSpriteProp(e.getSprite(40), 'locH', 0);
+  e.setSpriteProp(e.getSprite(40), 'locV', 0);
+  e.setSpriteProp(e.getSprite(40), 'ink', 8); // pMatteSpr
+  e.setSpriteProp(e.getSprite(40), 'locZ', 10); // pSprite.locZ + 1
+  e.setSpriteProp(e.getSprite(41), 'castNum', (1 << 16) | 2);
+  e.setSpriteProp(e.getSprite(41), 'locH', 5);
+  e.setSpriteProp(e.getSprite(41), 'locV', 5);
+  e.setSpriteProp(e.getSprite(41), 'ink', 0); // an ink with no keying bake: pure rectangle... for a naive rule
+  e.setSpriteProp(e.getSprite(41), 'locZ', 100); // a #zshifted part drawn in FRONT of the sitter
+
+  // (15, 30) is on the avatar's body and inside the chair's box, but the chair
+  // renders nothing there -> the avatar owns the click.
+  e.dispatchPointerEvent('mouseDown', 41, 15, 30);
+  assert.equal(e.interp.evalExpressionString('the clickOn'), 40, 'sitting avatar is the clicked sprite');
+  e.dispatchPointerEvent('mouseMove', 41, 15, 30);
+  assert.equal(e.interp.evalExpressionString('the rollover'), 40, 'and it is the rollover too');
+
+  // (15, 40) is the chair's seat, which it really paints -> the front part wins.
+  e.dispatchPointerEvent('mouseDown', 41, 15, 40);
+  assert.equal(e.interp.evalExpressionString('the clickOn'), 41, 'the chair still owns its own art');
+
+  // The matte ink (real furniture default — `solveInk` returns 8) behaves identically.
+  e.setSpriteProp(e.getSprite(41), 'ink', 8);
+  e.dispatchPointerEvent('mouseDown', 41, 15, 30);
+  assert.equal(e.interp.evalExpressionString('the clickOn'), 40, 'ink 8 front part also yields to the avatar');
+  e.dispatchPointerEvent('mouseMove', 41, 15, 40);
+  assert.equal(e.interp.evalExpressionString('the rollover'), 41, 'ink 8 front part keeps its own seat');
+});
+
+/**
+ * `the rollover` / `the clickOn` must be the sprite the pointer event was
+ * actually routed to: Room_Interface::validateEvent compares the two by id
+ * before running its ink-36 white-cover click-through (hh_room/0003:798-808),
+ * so the engine asks the stage — which owns the rendered pixels — when it can.
+ */
+test('the rollover and the clickOn take the stage hit test when the adapter offers one', () => {
+  let asked = 0;
+  const adapter = {
+    setBackground() {},
+    setChannel() {},
+    refreshChannel() {},
+    resize() {},
+    pointerSpriteAt() {
+      asked++;
+      return 40; // the sitting avatar, as the stage's baked-pixel test resolves it
+    },
+  };
+  const e = new DirectorEngine(adapter);
+  const tile = hitTestMember(e, 3, 'floor_tile', 64, 32);
+  paintRect(tile, 0, 0, 63, 31); // an opaque tile that WOULD win the engine's own scan
+  e.setSpriteProp(e.getSprite(41), 'castNum', (1 << 16) | 3);
+  e.setSpriteProp(e.getSprite(41), 'locZ', 100);
+  assert.equal(e.interp.evalExpressionString('the rollover'), 40, 'rollover comes from the stage');
+  e.dispatchPointerEvent('mouseDown', 40, 10, 10);
+  assert.equal(e.interp.evalExpressionString('the clickOn'), 40, 'clickOn comes from the stage');
+  assert.ok(asked >= 2, `the stage was asked (${asked})`);
 });
 
 test('list.count() method (SoundMachine getSoundListPageCount paging)', () => {

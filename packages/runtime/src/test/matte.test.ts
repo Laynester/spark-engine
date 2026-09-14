@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, bakeSurface, blendModeForInk, setMatteIdentityFill, DARKEST_BLEND_MODE, LIGHTEST_BLEND_MODE, matteRegionMask, matteSpriteHitTest, NOT_REVERSE_BLEND_MODE, REVERSE_BLEND_MODE, SUBTRACT_BLEND_MODE, tintSpriteBackground, tintSpriteDarken } from '../stage/matte.js';
+import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, bakeSurface, blendModeForInk, setMatteIdentityFill, DARKEST_BLEND_MODE, LIGHTEST_BLEND_MODE, matteRegionMask, NOT_REVERSE_BLEND_MODE, REVERSE_BLEND_MODE, spritePixelHitTest, SUBTRACT_BLEND_MODE, tintSpriteBackground, tintSpriteDarken } from '../stage/matte.js';
 
 /** Build an RGBA buffer; fill(x, y, r, g, b, a) default opaque white. */
 function makeImage(width: number, height: number): { data: Uint8ClampedArray; fill: (x: number, y: number, r: number, g: number, b: number, a?: number) => void } {
@@ -618,23 +618,34 @@ test('Darkest (39) identity rectangle is never taken by the bgColor tint', () =>
   }
 });
 
-test('matteSpriteHitTest: ink 8 falls through transparent pixels, others are bounding-box (DirPlayer parity)', () => {
+test('spritePixelHitTest: the pixels a sprite displays are its active area, the rest is click-through', () => {
+  // Director: "the active area is the portion of the image that is displayed"
+  // (drmx2004_scripting_ref.txt:6979, 7027; the `cursor` doc agrees at 28823) —
+  // so ANY pixel the sprite renders as nothing belongs to the sprite underneath,
+  // whether the hole came from an ink's keying bake or from the artwork's own
+  // alpha channel. The room leans on the alpha case: furniture sprites are ink 8
+  // by default (`solveInk` returns 8 when `*.props` names no ink — real chair
+  // props carry only `#zshift`), and their `#zshift`ed parts interleave WITH a
+  // sitter, so the part drawn in front of the avatar has a bigger locZ than
+  // `pMatteSpr.locZ = pSprite.locZ + 1`. Its rectangle is far bigger than the
+  // chair art, so a bounding-box test eats the click aimed at the sitter — the
+  // reported "clicking a sitting avatar selects the chair".
   const { data, fill } = makeImage(4, 4);
   fill(0, 0, 0, 0, 0, 0); // zero-filled (unpainted) pixel at (0,0) — note 6 args: x,y,r,g,b,a
   fill(1, 1, 255, 0, 0, 255); // single opaque pixel at (1,1)
   fill(2, 2, 0, 0, 0, 0); // explicit transparent pixel at (2,2)
-  // ink 8: transparent pixel -> fall through (false), opaque -> hit (true)
-  assert.equal(matteSpriteHitTest(8, data, 4, 4, 2, 2), false, 'ink 8 transparent pixel falls through');
-  assert.equal(matteSpriteHitTest(8, data, 4, 4, 1, 1), true, 'ink 8 opaque pixel hits');
-  assert.equal(matteSpriteHitTest(8, data, 4, 4, 0, 0), false, 'unpainted (zero-filled) pixel falls through');
-  // ink 8 with no surface yet: bounding box stands
-  assert.equal(matteSpriteHitTest(8, undefined, 4, 4, 2, 2), true, 'no surface -> rect hit');
-  // out-of-surface coords (rect said inside, pixel math drifted): treat as hit
-  assert.equal(matteSpriteHitTest(8, data, 4, 4, 9, 9), true, 'out-of-bounds -> rect hit');
-  // non-matte inks never do pixel tests
-  assert.equal(matteSpriteHitTest(0, data, 4, 4, 2, 2), true, 'copy ink is bounding-box');
-  assert.equal(matteSpriteHitTest(36, data, 4, 4, 2, 2), true, 'background-transparent ink is bounding-box');
-  assert.equal(matteSpriteHitTest(8, data, 4, 4, 2, 2), false, 'sanity: ink 8 still falls through at end');
+  assert.equal(spritePixelHitTest(data, 4, 4, 1, 1), true, 'opaque pixel hits');
+  assert.equal(spritePixelHitTest(data, 4, 4, 2, 2), false, 'transparent pixel falls through');
+  assert.equal(spritePixelHitTest(data, 4, 4, 0, 0), false, 'unpainted (zero-filled) pixel falls through');
+  fill(3, 3, 0, 0, 0, 0); // a second explicit hole, away from the edges
+  assert.equal(spritePixelHitTest(data, 4, 4, 3, 3), false, 'every transparent pixel falls through, not only a corner');
+  // Missing surface / out-of-bounds must stay a HIT: the rectangle is the
+  // fallback, so a drifted mapping can never make a sprite unclickable.
+  assert.equal(spritePixelHitTest(undefined, 4, 4, 2, 2), true, 'no surface -> rect hit');
+  assert.equal(spritePixelHitTest(null, 4, 4, 2, 2), true, 'null surface -> rect hit');
+  assert.equal(spritePixelHitTest(data, 0, 0, 2, 2), true, 'empty surface -> rect hit');
+  assert.equal(spritePixelHitTest(data, 4, 4, 9, 9), true, 'out-of-bounds -> rect hit');
+  assert.equal(spritePixelHitTest(data, 4, 4, -1, 2), true, 'negative coord -> rect hit');
 });
 
 test('matte keys the opaque white block on a transparent-bordered avatar canvas (respect flash / x-ray)', () => {

@@ -3704,6 +3704,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       case 'member':
         return ch.member ? new LMemberRefClass(ch.member.number, ch.member.name, ch.member.kind, ch.member.castLibNumber, this) : VOID;
       case 'castnum':
+      case 'membernum':
         return ch.member ? this.memberGlobalNum(ch.member.castLibNumber, ch.member.number) : 0;
       case 'castlibnum':
         return ch.member?.castLibNumber ?? 0;
@@ -3805,7 +3806,8 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         this.notifyChannel(ch);
         return;
       }
-      case 'castnum': {
+      case 'castnum':
+      case 'membernum': {
         const n = Math.round(asNum(value));
         const member = this.membersByGlobal.get(n) ?? this.memberForStaleSlotNumber(n);
         // Director treats writing a sprite's own cast member back to it as a
