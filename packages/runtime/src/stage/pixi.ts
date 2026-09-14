@@ -9,7 +9,8 @@ import type { Channel } from '../engine/sprites.js';
 import { LImage, LList, LObject, LPoint, LPropList, LSpriteRef, LSymbol } from '../lingo/values.js';
 import type { ShapeDef } from '../engine/members.js';
 import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, bakeSurface, blendModeForInk, cornersAreNearWhite, spritePixelHitTest, setMatteIdentityFill, tintSpriteBackground, tintSpriteDarken, DARKEST_BLEND_MODE, LIGHTEST_BLEND_MODE, NOT_REVERSE_BLEND_MODE, REVERSE_BLEND_MODE, SUBTRACT_BLEND_MODE, type BakeMode } from './matte.js';
-import { caretBlinkOn, caretX } from './caret.js';
+import { caretBlinkOn, caretBox, caretX } from './caret.js';
+import { textMemberLineMetrics } from './text.js';
 import { registerInkBlendFilters } from './blendFilters.js';
 import { perf, perfEnabled, perfFrame, perfTimeBake, type PerfMilestone } from '../perf.js';
 import type { DevSnapshot } from './devOverlay.js';
@@ -540,15 +541,18 @@ export class PixiStage implements StageAdapter {
     const member = ch?.member;
     const editable = member?.kind === 'text' && !!member.textProps?.get('editable');
     const group = node?.visual;
-    if (!editable || !node?.textObj || !(group instanceof Container) || ch?.visible !== 1) {
+    if (!editable || !member || !node?.textObj || !(group instanceof Container) || ch?.visible !== 1) {
       if (node?.caret) node.caret.visible = false;
       return;
     }
     const w = Math.max(1, Math.round(ch.width || node.baseW || 1));
     const h = Math.max(1, Math.round(ch.height || node.baseH || 1));
-    const x = caretX(member ? alignmentName(member.alignment) : undefined, w, node.textObj.width);
-    const caretH = h;
-    const caretY = Math.max(0, node.textObj.height - caretH);
+    const x = caretX(alignmentName(member.alignment), w, node.textObj.width);
+    // The insertion point is one line of the field's FONT, not the height of
+    // the field box: taking `h` stretched the caret down a whole tall input
+    // (gift greeting, console compose) and made it ignore fontSize.
+    const metrics = textMemberLineMetrics(member);
+    const { h: caretH, y: caretY } = caretBox(h, metrics.lineH, metrics.glyphH, node.textObj.height);
     if (!node.caret) {
       node.caret = new Graphics();
       group.addChild(node.caret);

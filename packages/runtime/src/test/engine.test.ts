@@ -4794,6 +4794,148 @@ test('Multiuser Xtra host/port fallback follows the page scheme (ws vs wss)', ()
   }
 });
 
+/**
+ * Harness for the HttpCookie-over-Multiuser path: a corpus-shaped parent script
+ * whose messageHandler records every delivered message and, on the first call,
+ * sends the HTTP request the same way HttpCookie_Instance_Class does.
+ */
+function cookieHarness(engine: DirectorEngine) {
+  engine.addScriptMember(
+    'Cookie',
+    'parent',
+    [
+      'property pCalls',
+      'property pLast',
+      'property pXtra',
+      'on construct me, tXtra',
+      '  pCalls = 0',
+      '  pLast = EMPTY',
+      '  pXtra = tXtra',
+      '  return 1',
+      'end',
+      'on messageHandler me',
+      '  tMsg = pXtra.getNetMessage()',
+      '  pCalls = pCalls + 1',
+      '  pLast = tMsg.senderID & "|" & tMsg.subject & "|" & tMsg.content',
+      '  if pCalls = 1 then',
+      '    tReq = "GET /ad.gif HTTP/1.1" & numToChar(13) & numToChar(10)',
+      '    tReq = tReq & "Host: localhost" & numToChar(13) & numToChar(10)',
+      '    tReq = tReq & "Cookie: sid=1" & numToChar(13) & numToChar(10)',
+      '    tReq = tReq & numToChar(13) & numToChar(10)',
+      '    pXtra.sendNetMessage("system", EMPTY, tReq)',
+      '  end if',
+      '  return 1',
+      'end',
+    ].join('\n'),
+  );
+  const script = engine.resolveScript('Cookie')!;
+  const cookie = engine.interp.newInstance(script, []);
+  const mu = engine.xtraInstance('Multiuser');
+  const construct = script.handlers.find((h) => h.name.toLowerCase() === 'construct')!;
+  engine.interp.callHandler(script, construct, [mu], cookie, new Set());
+  engine.xtraMethod(mu, 'setnetmessagehandler', [new LSymbol('messageHandler'), cookie]);
+  return { cookie, mu };
+}
+
+test('HttpCookie connections go through fetch, never a WebSocket on port 80', async () => {
+  // HttpCookie_Instance_Class carries HTTP over the Multiuser Xtra: it asks for
+  // a raw connection to the web port ("HTTP_CLASS", mode 1) and then sends a
+  // literal "GET /… HTTP/1.1" as the message content. connectToNetServer built
+  // ws://host:80 for that, which can never open — the request was never sent,
+  // the interstitial burned its 15s download timeout and roomPrePartFinished()
+  // held back ROOM_DIRECTORY, so the room appeared stuck loading.
+  const engine = new DirectorEngine();
+  const g = globalThis as { WebSocket?: unknown; fetch?: unknown };
+  const origWS = g.WebSocket;
+  const origFetch = g.fetch;
+  const wsOpened: string[] = [];
+  const fetched: { url: string; method?: string; headers?: Record<string, string> }[] = [];
+  class FakeWS {
+    constructor(public url: string) {
+      wsOpened.push(url);
+    }
+    close(): void {}
+    send(): void {}
+  }
+  // Browsers canonicalise response header names (Location, Content-Type).
+  const headers = new Map<string, string>([
+    ['Location', 'http://cdn.example/ad.gif'],
+    ['Content-Type', 'text/html'],
+  ]);
+  const responseHeaders = {
+    get: (k: string) => {
+      for (const [hk, hv] of headers) if (hk.toLowerCase() === k.toLowerCase()) return hv;
+      return null;
+    },
+    forEach: (cb: (v: string, k: string) => void) => {
+      for (const [k, v] of headers) cb(v, k);
+    },
+  };
+  g.WebSocket = FakeWS;
+  g.fetch = async (url: string, init: { method?: string; headers?: Record<string, string> }) => {
+    fetched.push({ url, method: init.method, headers: init.headers });
+    const body = new Uint8Array([60, 104, 116, 109, 108, 62]);
+    return { status: 302, statusText: 'Found', ok: true, headers: responseHeaders, arrayBuffer: async () => body.buffer };
+  };
+  try {
+    const { cookie, mu } = cookieHarness(engine);
+    assert.equal(engine.xtraMethod(mu, 'connecttonetserver', ['*', '*', 'localhost', 80, 'HTTP_CLASS', 1]), 0);
+    // The handshake reached the corpus handler synchronously, and it can tell it
+    // apart by SenderID the way HttpCookie_Instance_Class does.
+    assert.match(String(cookie.props.get('pLast')), /^System\|ConnectToNetServer\|/);
+    await new Promise((r) => setTimeout(r, 0));
+    assert.deepEqual(wsOpened, [], 'an HTTP-class connection must not open a WebSocket');
+    assert.equal(fetched.length, 1, 'the request goes out through fetch');
+    assert.equal(fetched[0]!.url, 'http://localhost/ad.gif');
+    assert.equal(fetched[0]!.method, 'GET');
+    assert.equal(fetched[0]!.headers?.cookie, 'sid=1', 'request headers are forwarded');
+    assert.equal(fetched[0]!.headers?.host, undefined, 'browser-controlled Host is dropped');
+    // The reply is a raw HTTP response the corpus's parseResponse can read.
+    const last = String(cookie.props.get('pLast'));
+    assert.match(last, /^localhost\|\|HTTP\/1\.1 302 Found/);
+    assert.match(last, /Location: http:\/\/cdn\.example\/ad\.gif/);
+    assert.match(last, /<html>/, 'body follows the blank line');
+  } finally {
+    g.WebSocket = origWS;
+    g.fetch = origFetch;
+  }
+});
+
+test('HttpCookie direct image replies are handed to the corpus import path', async () => {
+  // A #bitmap download is only imported via handleContentResponse's redirect
+  // branch (preloadNetThing(Location) -> importFileInto). A server that answers
+  // the ad URL with the image itself (no Location) would error and leave the
+  // interstitial on its 15s timeout, so the bridge points that branch at the
+  // URL it just fetched.
+  const engine = new DirectorEngine();
+  const g = globalThis as { fetch?: unknown };
+  const origFetch = g.fetch;
+  const headers = new Map<string, string>([['content-type', 'image/gif']]);
+  g.fetch = async () => ({
+    status: 200,
+    statusText: 'OK',
+    ok: true,
+    headers: {
+      get: (k: string) => headers.get(k.toLowerCase()) ?? null,
+      forEach: (cb: (v: string, k: string) => void) => {
+        for (const [k, v] of headers) cb(v, k);
+      },
+    },
+    arrayBuffer: async () => new Uint8Array([71, 73, 70]).buffer,
+  });
+  try {
+    const { cookie, mu } = cookieHarness(engine);
+    engine.xtraMethod(mu, 'connecttonetserver', ['*', '*', 'localhost', 8080, 'HTTP_CLASS', 1]);
+    await new Promise((r) => setTimeout(r, 0));
+    const last = String(cookie.props.get('pLast'));
+    assert.match(last, /HTTP\/1\.1 200 OK/);
+    assert.match(last, /Location: http:\/\/localhost:8080\/ad\.gif/, 'direct image gains an import Location');
+    assert.doesNotMatch(last, /Transfer-Encoding/i, 'fetch already decoded the body');
+  } finally {
+    g.fetch = origFetch;
+  }
+});
+
 test('xmlparser Xtra parses FUSE partSet/action XML (figure data path)', () => {
   // The Figure System/Figure Data Class parse partsets.xml, draworder.xml,
   // animation.xml and figuredata.xml through new(xtra("xmlparser")) and walk

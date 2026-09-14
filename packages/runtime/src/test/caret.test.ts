@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { caretBlinkOn, caretX } from '../stage/caret.js';
+import { caretBlinkOn, caretBox, caretX } from '../stage/caret.js';
 
 test('caret blink toggles on a half-period square wave (0.53s on / 0.53s off)', () => {
   assert.equal(caretBlinkOn(0), true);
@@ -30,4 +30,27 @@ test('caret x follows alignment and rendered text width', () => {
   assert.equal(caretX('', 100, 40), 40);
   // text wider than the box: the caret tracks the overflow (you're still typing)
   assert.equal(caretX('left', 100, 140), 140);
+});
+
+test('caret height follows the font, not the field box', () => {
+  // A Director insertion point spans the font's glyph box. Taking the sprite
+  // height instead stretched the caret down whole tall inputs (a 24px gift
+  // greeting field, the console compose box) and made it ignore fontSize.
+  // 9px Volter: ~10px glyph box, 11px line advance.
+  const volter9 = { lineH: 11, glyphH: 10 };
+  // The room bar's chat field: a 10px-tall box, so the box still clamps.
+  assert.deepEqual(caretBox(10, volter9.lineH, volter9.glyphH, 0), { h: 10, y: 0 });
+  // The gift greeting field is 24px tall but its text is still 9px Volter.
+  assert.deepEqual(caretBox(24, volter9.lineH, volter9.glyphH, 0), { h: 10, y: 0 });
+  // A 44px multi-line field: the caret rides the LAST rendered line.
+  assert.deepEqual(caretBox(44, volter9.lineH, volter9.glyphH, 22), { h: 10, y: 11 });
+  assert.deepEqual(caretBox(44, volter9.lineH, volter9.glyphH, 33), { h: 10, y: 22 });
+  // 18px font in a 20px box: the caret scales with the font size.
+  assert.deepEqual(caretBox(20, 22, 20, 0), { h: 20, y: 0 });
+  // A glyph box taller than the field clamps to the field, never overflowing.
+  assert.deepEqual(caretBox(12, 11, 20, 0), { h: 12, y: 0 });
+  // Deep in a clipped box the caret stays inside it.
+  assert.deepEqual(caretBox(20, 11, 10, 55), { h: 10, y: 10 });
+  // A degenerate line height falls back to the glyph box instead of dividing by 0.
+  assert.deepEqual(caretBox(20, 0, 10, 0), { h: 10, y: 0 });
 });

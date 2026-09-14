@@ -149,15 +149,27 @@ interface WebSocketLike {
   send(data: string | Uint8Array): void;
 }
 
+interface MultiuserMessage {
+  subject: string;
+  content: LVal;
+  /** "System" marks an Xtra-originated message (ConnectToNetServer / errors). */
+  senderID?: string;
+  errorCode?: number;
+}
+
 interface MultiuserState {
   socket: { close(): void; send(d: string | Uint8Array): void; readyState: number } | null;
-  queue: { subject: string; content: LVal }[];
-  deliver: { subject: string; content: LVal }[];
+  queue: MultiuserMessage[];
+  deliver: MultiuserMessage[];
   buffer: string;
   mode: number;
   logon?: Uint8Array;
   handlerName?: string;
   handlerTarget?: LObjectClass;
+  /** Set when the Xtra is driven as a plain HTTP client (HttpCookie) — no socket. */
+  http?: { host: string; port: number };
+  /** Re-entrancy guard for autoDeliver (the handler can push more messages). */
+  delivering?: boolean;
 }
 
 interface WorkerShim {
@@ -927,13 +939,30 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         const host = toLingoString(args[2] ?? '');
         const port = toLingoString(args[3] ?? '');
         const mode = Math.round(asNum(args[5] ?? 0));
+        const client = toLingoString(args[4] ?? '');
+        const st = this.multiuserState.get(obj.id) ?? { socket: null, queue: [], deliver: [], buffer: '', mode };
+        st.mode = mode;
+        // HttpCookie_Instance_Class carries HTTP over this Xtra: it asks for a
+        // raw connection to the web port with the "HTTP_CLASS" client
+        // (connectToNetServer("*", "*", server, 80, "HTTP_CLASS", 1)) and then
+        // sends a literal "GET /... HTTP/1.1" as the message content. A WebSocket
+        // can never open on port 80, so building ws://host:80 left the request
+        // unsent and the reply never arrived — the interstitial burned its 15s
+        // timeout and roomPrePartFinished() held back ROOM_DIRECTORY, so rooms
+        // looked stuck loading. Serve these connections with fetch() instead and
+        // feed the raw HTTP reply back through the message queue (handleHttpRequest).
+        if (client.toLowerCase().startsWith('http')) {
+          st.http = { host, port: Number(port) || 80 };
+          st.socket = null;
+          this.multiuserState.set(obj.id, st);
+          this.pushNetMessage(st, { subject: 'ConnectToNetServer', content: '', senderID: 'System' });
+          return 0;
+        }
         const url = host && port ? `${wsScheme()}://${host}${port == "0" ? '' : ':' + port}` : this.multiuserUrl ?? '';
         if (!url) {
           this.log(`net: multiuser connect (no ws url): no WebSocket in this environment — stub`);
           return 0;
         }
-        const st = this.multiuserState.get(obj.id) ?? { socket: null, queue: [], deliver: [], buffer: '', mode };
-        st.mode = mode;
         if (mode === 0) {
           st.logon = musFrame(
             'Logon',
@@ -1003,6 +1032,11 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       }
       case 'sendnetmessage': {
         const st = this.multiuserState.get(obj.id);
+        if (st?.http) {
+          // HttpCookie's request text is the whole payload (handleHttpRequest).
+          this.handleHttpRequest(st, toLingoString(args[2] ?? ''));
+          return 0;
+        }
         if (!st?.socket) return 0;
         const isRawBytesSend = args[0] === 0 && args[1] === 0;
         const from = asNum(args[0] ?? -1);
@@ -1111,8 +1145,8 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         }
         this.log(`net: getNetMessage subj="${m.subject}" content=${typeof m.content === 'string' ? m.content.length : 0}B`);
         return new LPropListClass(new Map<string, LVal>([
-          ['errorCode', 0],
-          ['senderID', ''],
+          ['errorCode', m.errorCode ?? 0],
+          ['senderID', m.senderID ?? ''],
           ['subject', m.subject],
           ['content', m.content],
         ]));
@@ -1241,6 +1275,112 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     const subj =
       text.length >= 2 ? ((text.charCodeAt(0) & 63) * 64) + (text.charCodeAt(1) & 63) : -1;
     this.log(`net: rx ${text.length}B subj=${subj} (${st.queue.length} queued)`);
+  }
+
+  private pushNetMessage(st: MultiuserState, msg: MultiuserMessage): void {
+    st.queue.push(msg);
+    this.autoDeliver(st);
+  }
+
+  /**
+   * The game Connection pumps its messages with checkNetMessages(), but the
+   * HttpCookie class never does — the real Multiuser Xtra hands each message to
+   * the handler registered by setNetMessageHandler as it arrives. Pump HTTP
+   * connections here so the fetch() round-trip actually reaches messageHandler.
+   */
+  private autoDeliver(st: MultiuserState): void {
+    const handlerName = st.handlerName;
+    const target = st.handlerTarget;
+    if (!handlerName || !target || st.delivering) return;
+    st.delivering = true;
+    try {
+      while (st.queue.length) {
+        const msg = st.queue.shift()!;
+        st.deliver.push(msg);
+        try {
+          this.interp.callObjectHandler(target, handlerName, []);
+        } catch (err) {
+          this.warn(`net handler #${handlerName}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        st.deliver.length = 0;
+      }
+    } finally {
+      st.delivering = false;
+    }
+  }
+
+  /**
+   * Serve one HttpCookie request (the connecttonetserver HTTP branch above).
+   * `raw` is the complete request HttpCookie_Instance_Class::handleHelloResponse
+   * built: a request line, "Header: value" lines, a blank line and an optional
+   * body. Browsers have no raw TCP socket, so issue it with fetch() and render
+   * the reply in the wire shape HttpCookie_Instance_Class::parseResponse reads —
+   * an "HTTP/1.1 <code> <reason>" status line, header lines, a blank line, then
+   * the body.
+   */
+  private handleHttpRequest(st: MultiuserState, raw: string): void {
+    const http = st.http;
+    if (!http) return;
+    const sep = raw.indexOf('\r\n\r\n');
+    const head = sep >= 0 ? raw.slice(0, sep) : raw;
+    const body = sep >= 0 ? raw.slice(sep + 4) : '';
+    const lines = head.split(/\r?\n/);
+    const reqMatch = /^\s*(\S+)\s+(\S+)/.exec(lines.shift() ?? '');
+    const method = (reqMatch?.[1] ?? 'GET').toUpperCase();
+    const path = reqMatch?.[2] ?? '/';
+    const authority = http.port === 80 ? http.host : `${http.host}:${http.port}`;
+    const url = /^https?:\/\//i.test(path) ? path : `http://${authority}${path.startsWith('/') ? '' : '/'}${path}`;
+    const headers: Record<string, string> = {};
+    for (const line of lines) {
+      const i = line.indexOf(':');
+      if (i <= 0) continue;
+      const key = line.slice(0, i).trim().toLowerCase();
+      // Browser-controlled headers can't be set from script; fetch supplies
+      // Host/Connection/Content-Length itself.
+      if (key === 'host' || key === 'connection' || key === 'content-length' || key === 'accept-charset') continue;
+      headers[key] = line.slice(i + 1).trim();
+    }
+    if (typeof fetch !== 'function') {
+      this.pushNetMessage(st, { subject: '', content: '', senderID: http.host, errorCode: 1 });
+      return;
+    }
+    const init: { method: string; headers?: Record<string, string>; body?: string; redirect: 'manual' } = {
+      method,
+      redirect: 'manual',
+    };
+    if (Object.keys(headers).length) init.headers = headers;
+    if (body) init.body = body;
+    fetch(url, init)
+      .then(async (res) => {
+        const text = latin1Of(new Uint8Array(await res.arrayBuffer()));
+        const headerLines = [`HTTP/1.1 ${res.status} ${res.statusText}`];
+        let hasLocation = false;
+        res.headers.forEach((value: string, key: string) => {
+          const lower = key.toLowerCase();
+          // fetch already decoded the body; exposing Transfer-Encoding or
+          // Content-Encoding would make parseResponse decode it a second time.
+          if (lower === 'transfer-encoding' || lower === 'content-encoding' || lower === 'content-length') return;
+          if (lower === 'location') hasLocation = true;
+          headerLines.push(`${key}: ${value}`);
+        });
+        // A #bitmap download is only imported through the redirect branch
+        // (handleContentResponse calls preloadNetThing(Location), which lands in
+        // importFileInto). A server that answers the ad URL with the image
+        // directly would error there and leave the interstitial on its 15s
+        // timeout, so point that branch back at the URL we just fetched.
+        if (!hasLocation && /^image\//i.test(res.headers.get('content-type') ?? '')) {
+          headerLines.push(`Location: ${url}`);
+        }
+        this.pushNetMessage(st, {
+          subject: '',
+          content: `${headerLines.join('\r\n')}\r\n\r\n${text}`,
+          senderID: http.host,
+        });
+      })
+      .catch((err: unknown) => {
+        this.log(`net: http request failed ${url}: ${err instanceof Error ? err.message : String(err)}`);
+        this.pushNetMessage(st, { subject: '', content: '', senderID: http.host, errorCode: 1 });
+      });
   }
 
   scheduleDelay(obj: LObject, ms: number, handler: string, args: LVal[]): number {

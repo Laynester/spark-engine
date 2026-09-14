@@ -2,6 +2,45 @@ import { asNum, colorFrom, fontStyleFlags, LImage } from '../lingo/values.js';
 import type { Member } from '../engine/members.js';
 import { alignmentName, cssFontFor } from '../engine/engine.js';
 
+/** Measured glyph box (ascent + descent) per font signature; the caret asks
+ *  once per frame while a field is focused, so measure once per font. */
+const glyphHeightCache = new Map<string, number>();
+
+/**
+ * The font's own line box for a text member — the numbers BOTH the rasterizer
+ * and the live caret need: `lineH`, the advance from one text line to the next
+ * (fixedLineSpace when the member sets one, else the font's own leading), and
+ * `glyphH`, the font's ascent + descent, i.e. how tall a Director insertion
+ * point is for this font. The caret must scale with the FONT, not the field
+ * box, so it reads these rather than the sprite height.
+ */
+export function textMemberLineMetrics(member: Member): { glyphH: number; lineH: number } {
+  const size = Math.max(1, Math.round(asNum(member.fontSize ?? 0) || 12));
+  const fixed = Math.round(asNum(member.fixedLineSpace ?? 0) || 0);
+  const topSpacing = Math.max(0, Math.round(asNum(member.textProps?.get('topspacing') ?? 0) || 0));
+  const lineH = fixed > 0 ? fixed + topSpacing : Math.max(size, Math.round(size * 1.2));
+  const { family, weight } = cssFontFor(member.font);
+  const style = fontStyleFlags(member.fontStyle);
+  const effWeight = style.bold ? '700' : weight;
+  const key = `${style.italic ? 'italic ' : ''}${effWeight} ${size}px ${family}`;
+  const cached = glyphHeightCache.get(key);
+  if (cached !== undefined) return { glyphH: cached, lineH };
+  let glyphH = size + 1;
+  if (typeof document !== 'undefined') {
+    const mctx = document.createElement('canvas').getContext('2d');
+    if (mctx) {
+      mctx.font = key;
+      const bbA = (mctx.measureText('M') as { fontBoundingBoxAscent?: number }).fontBoundingBoxAscent;
+      const bbD = (mctx.measureText('M') as { fontBoundingBoxDescent?: number }).fontBoundingBoxDescent;
+      if (typeof bbA === 'number' && isFinite(bbA) && bbA > 0) {
+        glyphH = Math.round(bbA + (typeof bbD === 'number' && isFinite(bbD) ? bbD : 0));
+      }
+    }
+  }
+  glyphHeightCache.set(key, glyphH);
+  return { glyphH, lineH };
+}
+
 export function rasterizeTextMember(member: Member): LImage | null {
   if (typeof document === 'undefined') return null;
   const r = member.rect;
@@ -32,11 +71,7 @@ export function rasterizeTextMember(member: Member): LImage | null {
     if (mctx) {
       mctx.font = fontStr;
       {
-        const bbA = (mctx.measureText('M') as { fontBoundingBoxAscent?: number }).fontBoundingBoxAscent;
-        const bbD = (mctx.measureText('M') as { fontBoundingBoxDescent?: number }).fontBoundingBoxDescent;
-        if (typeof bbA === 'number' && isFinite(bbA) && bbA > 0) {
-          fontLH = Math.round(bbA + (typeof bbD === 'number' && isFinite(bbD) ? bbD : 0));
-        }
+        fontLH = textMemberLineMetrics(member).glyphH;
         if (fixed > 0) {
           const leading = Math.max(0, fixed - fontLH);
           const vOverflow = Math.max(0, fontLH - fixed);
