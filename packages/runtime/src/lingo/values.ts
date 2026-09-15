@@ -356,6 +356,24 @@ export class LImage {
   palette?: number[][];
   depth = 32;
   indices?: Uint8Array | null = null;
+  /**
+   * The movie has WRITTEN pixels into this image, so `indices` (the palette
+   * indices the member was DECODED with) no longer describe the surface.
+   *
+   * Index-based rules must stop reading them once this is set, or they operate
+   * on the wrong pixel positions entirely: `screen3d` (hh_entry_jp) is a member
+   * the Entry Image Scroller paints over every frame, and the ink-36 index key
+   * was resolving "border-connected palette-0" against the ORIGINAL screen art —
+   * 5834 positions of the freshly painted frame were punched transparent, which
+   * is what made the scroller look broken.
+   *
+   * Set by the engine's `imageMutated` (the hook the interpreter fires after
+   * every pixel-writing Lingo call). Camera/photo media keeps its OWN freshly
+   * decoded indices, which is why this is a paint flag and not "the member has
+   * an image": `set member.media` decodes an index raster and those indices are
+   * exactly what the bake wants.
+   */
+  indicesStale = false;
   paletteRef: LVal = VOID;
   useAlpha = false;
 
@@ -575,8 +593,29 @@ export class LImage {
 
     const srcPalette = src.palette;
     const hasPalette = srcPalette && srcPalette.length > 0;
-    const matteMask = (ink === 8 || ink === 7) ? matteRegionMask(s, sw, sh, sx0, sy0, srcW, srcH, srcPalette, src.indices, ink === 8) : null;
-    const srcBgRgb = ink === 36 && hasPalette && (src.depth ?? 32) <= 8 ? srcPalette[0] : null;
+    const srcIndicesFresh = src.indicesStale ? null : src.indices;
+    const matteMask = (ink === 8 || ink === 7) ? matteRegionMask(s, sw, sh, sx0, sy0, srcW, srcH, srcPalette, srcIndicesFresh, ink === 8) : null;
+    // Ink 36 (Background transparent) keys the SPRITE's background colour — WHITE
+    // unless the movie set one (`#bgColor`, handled by applyInkPixel below). For
+    // indexed art whose palette entry 0 is NOT white (so nothing would be keyed
+    // by colour) the INDEX is used instead, but only while those indices still
+    // describe the pixels (see `indicesStale`): the rule exists for the
+    // landscape's `%dir% %class%_mask` art, and it must never run against a
+    // surface the movie has painted over.
+    //
+    // The gate here used to be `palette && src.depth <= 8`, which is dead: the
+    // engine's member rasters carry `palette` + `indices` but never set `depth`
+    // (default 32 — see Engine.memberImage), so ink 36 keyed NOTHING in the CPU
+    // composite path. `Wall_Mask_Manager::renderMask` is what needs it: it fills
+    // the mask image WHITE and copies each window's `%dir% %class%_mask` member
+    // into it with `[#ink: 36]`, and the landscape is then blitted through that
+    // mask (`copyPixels(tBgImg, …, [#maskImage: tMask])` skips every white mask
+    // pixel). With nothing keyed, the mask member's white background landed in
+    // the mask too, the outside view was never copied inside the window, and the
+    // window showed the mask's white fill — "the inside of the window is white".
+    const srcIndices = ink === 36 && srcIndicesFresh && srcIndicesFresh.length >= sw * sh ? srcIndicesFresh : null;
+    const srcBgRgb = ink === 36 && !srcIndices && hasPalette && (src.depth ?? 32) <= 8 ? srcPalette[0] : null;
+    const srcKeysWhite = ink === 36 && !srcIndices && !srcBgRgb;
 
     const orientDet = orient ? orient.a * orient.e - orient.b * orient.d : 0;
     const orientInv = orientDet !== 0 ? 1 / orientDet : 0;
@@ -632,7 +671,11 @@ export class LImage {
             continue;
           }
         }
-        if (srcBgRgb && s[si + 3] >= 128 && s[si] === srcBgRgb[0] && s[si + 1] === srcBgRgb[1] && s[si + 2] === srcBgRgb[2]) {
+        if (srcIndices) {
+          if (srcIndices[sy * sw + sx] === 0) continue;
+        } else if (srcBgRgb && s[si + 3] >= 128 && s[si] === srcBgRgb[0] && s[si + 1] === srcBgRgb[1] && s[si + 2] === srcBgRgb[2]) {
+          continue;
+        } else if (srcKeysWhite && s[si + 3] >= 128 && s[si] === 255 && s[si + 1] === 255 && s[si + 2] === 255) {
           continue;
         }
         const di = (py * dw + px) * 4;

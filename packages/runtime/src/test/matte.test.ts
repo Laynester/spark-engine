@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, bakeSurface, blendFilterMode, blendModeForInk, setMatteIdentityFill, DARKEST_BLEND_MODE, LIGHTEST_BLEND_MODE, matteRegionMask, PASS_THROUGH_BLEND_MODE, REVERSE_BLEND_MODE, spritePixelHitTest, SUBTRACT_BLEND_MODE, SUBTRACT_WRAP_BLEND_MODE, tintSpriteBackground, tintSpriteDarken, NOT_REVERSE_BLEND_MODE, DUOTONE_RAMP_STEEPNESS, duotoneRampRgb, boostSaturation } from '../stage/matte.js';
+import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, bakeSurface, blendFilterMode, blendModeForInk, inkUsesPixelHitTest, setMatteIdentityFill, DARKEST_BLEND_MODE, LIGHTEST_BLEND_MODE, matteRegionMask, PASS_THROUGH_BLEND_MODE, REVERSE_BLEND_MODE, spritePixelHitTest, SUBTRACT_BLEND_MODE, SUBTRACT_WRAP_BLEND_MODE, tintSpriteBackground, tintSpriteDarken, NOT_REVERSE_BLEND_MODE, DUOTONE_RAMP_STEEPNESS, duotoneRampRgb, boostSaturation } from '../stage/matte.js';
 
 /** Build an RGBA buffer; fill(x, y, r, g, b, a) default opaque white. */
 function makeImage(width: number, height: number): { data: Uint8ClampedArray; fill: (x: number, y: number, r: number, g: number, b: number, a?: number) => void } {
@@ -460,6 +460,91 @@ test('ink-36 key with real palette removes enclosed whites (reference parity)', 
   assert.equal(alphaAt(data, 6, 1, 1), 255, 'black art survives');
 });
 
+test('ink 36 keys by COLOUR only — the index raster is never consulted', () => {
+  // Ink 36 is "Makes all the pixels in the background color of the selected
+  // sprite appear transparent": a COLOUR rule about the sprite, with WHITE as
+  // the Tools-window default. Reaching for the member's palette entry 0 instead
+  // is what broke hh_entry_jp's Entry Image Scroller: the member it paints the
+  // scrolling screen into (`screen3d`) has BLACK at palette index 0, that black
+  // IS art (the screen sits in a black field whose left edge is index 0 for the
+  // top 48 rows, so a border flood walks straight into it), and the movie has
+  // painted over the art by the time the sprite is drawn. An index rule then keys
+  // the ORIGINAL art's background positions out of the freshly painted frame.
+  const W = 6, H = 6;
+  const palette = [[0, 0, 0], [255, 255, 255]]; // 0 = black art, 1 = white backdrop
+  const { data, fill } = makeImage(W, H);
+  const indices = new Uint8Array(W * H).fill(1);
+  for (let x = 0; x < W; x++) {
+    // index-0 black art that TOUCHES the border (the scroller's left column)
+    indices[x] = 0;
+    fill(x, 0, 0, 0, 0);
+  }
+  const changed = bakeEdgeBackground(data, W, H, 'key', palette, indices);
+  assert.ok(changed, 'the white backdrop is keyed');
+  assert.equal(alphaAt(data, W, 0, 0), 255, 'border-connected index-0 art survives — ink 36 asks for white');
+  assert.equal(alphaAt(data, W, 3, 3), 255, 'the white backdrop is what gets keyed');
+});
+
+test('ink 36 leaves a non-white palette-0 background standing (sprite colour, not member background)', () => {
+  // The other half of the same rule: art whose palette entry 0 is NOT white has
+  // no white to key, so ink 36 keys nothing at all. Callers that need that
+  // background gone are asking for ink 8 (matte = the member's index-0 rule), or
+  // must set the sprite's `bgColor`, which is what `keyRgb` carries.
+  const W = 4, H = 4;
+  const palette = [[221, 221, 221], [0, 0, 0]];
+  const { data, fill } = makeImage(W, H);
+  const indices = new Uint8Array(W * H);
+  const put = (x: number, y: number, idx: number): void => {
+    indices[y * W + x] = idx;
+    fill(x, y, palette[idx][0], palette[idx][1], palette[idx][2]);
+  };
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) put(x, y, 0);
+  for (let y = 1; y <= 2; y++) for (let x = 1; x <= 2; x++) put(x, y, 1);
+  const changed = bakeEdgeBackground(data, W, H, 'key', palette, indices);
+  assert.equal(changed, false, 'no exact-white pixel exists to key');
+  assert.equal(alphaAt(data, W, 0, 0), 255, 'palette-0 #dddddd background survives ink 36');
+
+  // The sprite's own background colour, when the movie sets one, still keys.
+  const bg = data.slice();
+  const changedByBg = bakeEdgeBackground(bg, W, H, 'key', palette, indices, 0xdddddd);
+  assert.ok(changedByBg, 'an explicit sprite bgColor keys that colour');
+  assert.equal(alphaAt(bg, W, 0, 0), 0, 'bgColor-keyed background gone');
+  assert.equal(alphaAt(bg, W, 1, 1), 255, 'black art survives');
+});
+
+test('bakeSurface forwards the surface\'s own palette and indices (remapped / adopted image members)', () => {
+  // `bakeImagePixels` (the image path) used to hand the bake the CHANNEL member's
+  // palette and no indices at all, while the frame path handed it the decoded
+  // indices. For an image that came from somewhere else — the mover's preview
+  // gets an icon image assigned onto a shared member, and a `paletteTarget`
+  // remap rewrites the RGB the pixels carry — matching the palette-0 COLOUR stops
+  // matching the background. The index rule does not care what colour it is.
+  const W = 5, H = 5;
+  // Palette-0's colour (#0000ff) is NOT the colour the surface's background
+  // pixels hold (#0a0a0a), exactly as after a remap.
+  const palette = [[0, 0, 255], [200, 40, 40]];
+  const { data, fill } = makeImage(W, H);
+  const indices = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) fill(x, y, 10, 10, 10);
+  for (let y = 1; y <= 3; y++) for (let x = 1; x <= 3; x++) {
+    indices[y * W + x] = 1;
+    fill(x, y, 200, 40, 40);
+  }
+
+  const noIndices = bakeSurface(data, W, H, 'matte', null, undefined, 8, 0, palette);
+  assert.equal(noIndices.changed, false, 'without indices the palette-0 colour matches nothing');
+
+  const withIndices = bakeSurface(data, W, H, 'matte', null, undefined, 8, 0, palette, null, null, indices);
+  assert.ok(withIndices.changed, 'with indices the member background is keyed');
+  assert.equal(alphaAt(withIndices.pixels, W, 0, 0), 0, 'matte keys the border-connected index-0 background');
+  assert.equal(alphaAt(withIndices.pixels, W, 2, 2), 255, 'art survives');
+
+  const keyByIdx = bakeSurface(data, W, H, 'key', null, undefined, 36, 0, palette, null, null, indices);
+  assert.ok(keyByIdx.changed, 'ink 36 keys its background by index too');
+  assert.equal(alphaAt(keyByIdx.pixels, W, 0, 0), 0, 'ink 36 background keyed');
+  assert.equal(alphaAt(keyByIdx.pixels, W, 2, 2), 255, 'ink 36 art survives');
+});
+
 test('matte with a palette floods from palette index 0 (cloud turn slices)', () => {
   // Cloud art is fully opaque: white bg (index 0) with 238,238,238 puffs
   // (different index) and black outlines. The palette-driven matte must flood
@@ -699,12 +784,13 @@ test('Darkest (39) identity rectangle is never taken by the bgColor tint', () =>
   }
 });
 
-test('spritePixelHitTest: the pixels a sprite displays are its active area, the rest is click-through', () => {
+test('spritePixelHitTest: keyed/alpha art uses its displayed pixels, other inks keep the rectangle', () => {
   // Director: "the active area is the portion of the image that is displayed"
   // (drmx2004_scripting_ref.txt:6979, 7027; the `cursor` doc agrees at 28823) —
-  // so ANY pixel the sprite renders as nothing belongs to the sprite underneath,
-  // whether the hole came from an ink's keying bake or from the artwork's own
-  // alpha channel. The room leans on the alpha case: furniture sprites are ink 8
+  // but only for the inks whose active area really IS the displayed art. The
+  // test is ink-aware so BOTH behaviours coexist: keyed/alpha art uses the
+  // displayed pixels, every other ink keeps the full rectangle. The room leans
+  // on the keyed case: furniture sprites are ink 8
   // by default (`solveInk` returns 8 when `*.props` names no ink — real chair
   // props carry only `#zshift`), and their `#zshift`ed parts interleave WITH a
   // sitter, so the part drawn in front of the avatar has a bigger locZ than
@@ -715,18 +801,83 @@ test('spritePixelHitTest: the pixels a sprite displays are its active area, the 
   fill(0, 0, 0, 0, 0, 0); // zero-filled (unpainted) pixel at (0,0) — note 6 args: x,y,r,g,b,a
   fill(1, 1, 255, 0, 0, 255); // single opaque pixel at (1,1)
   fill(2, 2, 0, 0, 0, 0); // explicit transparent pixel at (2,2)
-  assert.equal(spritePixelHitTest(data, 4, 4, 1, 1), true, 'opaque pixel hits');
-  assert.equal(spritePixelHitTest(data, 4, 4, 2, 2), false, 'transparent pixel falls through');
-  assert.equal(spritePixelHitTest(data, 4, 4, 0, 0), false, 'unpainted (zero-filled) pixel falls through');
+  assert.equal(spritePixelHitTest(8, data, 4, 4, 1, 1), true, 'ink 8: opaque pixel hits');
+  assert.equal(spritePixelHitTest(8, data, 4, 4, 2, 2), false, 'ink 8: transparent pixel falls through');
+  assert.equal(spritePixelHitTest(8, data, 4, 4, 0, 0), false, 'ink 8: unpainted (zero-filled) pixel falls through');
   fill(3, 3, 0, 0, 0, 0); // a second explicit hole, away from the edges
-  assert.equal(spritePixelHitTest(data, 4, 4, 3, 3), false, 'every transparent pixel falls through, not only a corner');
+  assert.equal(spritePixelHitTest(8, data, 4, 4, 3, 3), false, 'ink 8: every transparent pixel falls through, not only a corner');
+  // Ink 36 (background transparent), 4 and 7 key pixels too, so they use the
+  // displayed-pixel rule as well.
+  assert.equal(spritePixelHitTest(36, data, 4, 4, 2, 2), false, 'ink 36: transparent pixel falls through');
+  assert.equal(spritePixelHitTest(4, data, 4, 4, 2, 2), false, 'ink 4: transparent pixel falls through');
+  assert.equal(spritePixelHitTest(7, data, 4, 4, 2, 2), false, 'ink 7: transparent pixel falls through');
+  // Every OTHER ink keeps Director's rectangle rule: the sprite owns the whole
+  // rectangle even where the buffer is transparent, so a composited window
+  // panel / flat fill cannot open a click hole in the chrome (the navigator's
+  // room-list panel used to swallow the back-tab click this way).
+  assert.equal(spritePixelHitTest(0, data, 4, 4, 2, 2), true, 'ink 0: rectangle rule, transparent pixel still ours');
+  assert.equal(spritePixelHitTest(1, data, 4, 4, 2, 2), true, 'ink 1: rectangle rule');
+  assert.equal(spritePixelHitTest(39, data, 4, 4, 2, 2), true, 'ink 39: rectangle rule');
+  // ...unless the artwork carries a real alpha channel of its own, which is
+  // honoured for ANY ink.
+  assert.equal(spritePixelHitTest(0, data, 4, 4, 2, 2, true), false, 'ink 0 + alpha art: transparent pixel falls through');
+  assert.equal(spritePixelHitTest(0, data, 4, 4, 1, 1, true), true, 'ink 0 + alpha art: opaque pixel hits');
+  assert.equal(inkUsesPixelHitTest(8), true, 'ink 8 uses the pixel rule');
+  assert.equal(inkUsesPixelHitTest(36), true, 'ink 36 uses the pixel rule');
+  assert.equal(inkUsesPixelHitTest(0), false, 'ink 0 uses the rectangle rule');
+  assert.equal(inkUsesPixelHitTest(0, true), true, 'alpha art uses the pixel rule whatever the ink');
   // Missing surface / out-of-bounds must stay a HIT: the rectangle is the
   // fallback, so a drifted mapping can never make a sprite unclickable.
-  assert.equal(spritePixelHitTest(undefined, 4, 4, 2, 2), true, 'no surface -> rect hit');
-  assert.equal(spritePixelHitTest(null, 4, 4, 2, 2), true, 'null surface -> rect hit');
-  assert.equal(spritePixelHitTest(data, 0, 0, 2, 2), true, 'empty surface -> rect hit');
-  assert.equal(spritePixelHitTest(data, 4, 4, 9, 9), true, 'out-of-bounds -> rect hit');
-  assert.equal(spritePixelHitTest(data, 4, 4, -1, 2), true, 'negative coord -> rect hit');
+  assert.equal(spritePixelHitTest(8, undefined, 4, 4, 2, 2), true, 'no surface -> rect hit');
+  assert.equal(spritePixelHitTest(8, null, 4, 4, 2, 2), true, 'null surface -> rect hit');
+  assert.equal(spritePixelHitTest(8, data, 0, 0, 2, 2), true, 'empty surface -> rect hit');
+  assert.equal(spritePixelHitTest(8, data, 4, 4, 9, 9), true, 'out-of-bounds -> rect hit');
+  assert.equal(spritePixelHitTest(8, data, 4, 4, -1, 2), true, 'negative coord -> rect hit');
+});
+
+test('spritePixelHitTest: a keyed-away pixel still belongs to sprite art that is solid there (navigator back links)', () => {
+  // The navigator's breadcrumb strip is `nav_roomlistBackLinks`: an ink-36
+  // element whose buffer is a runtime `image(w,h,32)` the movie fills and then
+  // feeds the rendered history text into. Ink 36 keys the feed's background
+  // colour away, so BETWEEN the glyphs the RENDERED buffer is empty — but the
+  // element is the whole strip, and it is the element that carries the
+  // `expandHistoryItem` handler (Navigator Roomlist Interface Class, the
+  // "nav_roomlistBackLinks" case). Reading the rendered pixel alone routed the
+  // click to the `nav_roomlistBackTabs` frame drawn underneath (which has no
+  // handler), so the sub-tab did nothing.
+  const { data: rendered, fill: fillRendered } = makeImage(6, 3);
+  const { data: art, fill: fillArt } = makeImage(6, 3);
+  // The sprite's own 32-bit buffer is solid across the strip (the movie filled
+  // it with the element's background before feeding the text over it)...
+  for (let y = 0; y < 3; y++) for (let x = 0; x < 6; x++) fillArt(x, y, 51, 102, 102);
+  // ...and ink 36 keys that background off, so the rendered buffer keeps only
+  // the glyph pixels (columns 1 and 4) and is empty everywhere else.
+  for (let y = 0; y < 3; y++) for (let x = 0; x < 6; x++) fillRendered(x, y, 0, 0, 0, 0);
+  for (const x of [1, 4]) for (let y = 0; y < 2; y++) fillRendered(x, y, 51, 102, 102);
+  const surface = { pixels: art, width: 6, height: 3, depth: 32 };
+  assert.equal(alphaAt(rendered, 6, 0, 0), 0, 'sanity: the keyed background renders nothing');
+  assert.equal(alphaAt(rendered, 6, 1, 0), 255, 'sanity: a glyph pixel is drawn');
+  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 0, 0, false, surface), true, 'solid art keeps the whole strip clickable');
+  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 3, 2, false, surface), true, 'a hole between glyphs is still the element');
+  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 1, 0, false, surface), true, 'a glyph pixel hits too');
+  // Where the sprite's OWN art has a hole as well, the click really does belong
+  // to the sprite underneath (the chair/sitter rule is untouched).
+  fillArt(3, 2, 0, 0, 0, 0);
+  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 3, 2, false, surface), false, 'both surfaces empty -> falls through');
+  // INDEXED art (depth < 32) carries no alpha of its own — its transparency is
+  // exactly what the bake computes — so it must keep deciding on the rendered
+  // pixel alone. Otherwise every 8-bit furniture part (`#ink: 36` is common in
+  // `*.props`) would claim its whole rectangle again and swallow the click
+  // aimed at the avatar it carries.
+  const indexed = { pixels: art, width: 6, height: 3, depth: 8 };
+  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 0, 0, false, indexed), false, 'indexed art does not rescue a keyed pixel');
+  // A surface with no pixels at all can never rescue anything either.
+  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 0, 0, false, { pixels: null, width: 6, height: 3, depth: 32 }), false, 'no art pixels -> no rescue');
+  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 0, 0, false, null), false, 'absent surface -> no rescue');
+  // The rescue is NOT a licence to skip the ink gate: an ink that keeps the
+  // rectangle rule already returned true above, and an out-of-frame sample still
+  // falls back to the rectangle.
+  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 99, 99, false, surface), true, 'out-of-frame -> rect hit');
 });
 
 test('matte keys the opaque white block on a transparent-bordered avatar canvas (respect flash / x-ray)', () => {

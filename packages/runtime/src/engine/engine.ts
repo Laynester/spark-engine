@@ -49,7 +49,7 @@ const WEB_TO_DIRECTOR_KEYCODE: Record<number, number> = {
 };
 
 const GRAYSCALE_PALETTE: number[][] = Array.from({ length: 256 }, (_, i) => [255 - i, 255 - i, 255 - i]);
-import { bakeModeForInk } from '../stage/matte.js';
+import { bakeModeForInk, inkUsesPixelHitTest } from '../stage/matte.js';
 import { mp3DurationMs } from './mp3.js';
 import type { MemberKind } from '../bundle/types.js';
 import { Channel } from './sprites.js';
@@ -2772,6 +2772,10 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     const member = ch.member;
     if (!member) return true;
     const img = this.memberImage(member);
+    // Only the inks that can key pixels away (and art with its own alpha) use
+    // the displayed-pixel rule; everything else owns its rectangle — see
+    // spritePixelHitTest. Keeps this path in step with the stage adapter.
+    if (!inkUsesPixelHitTest(ch.ink ?? 0, (img.depth ?? 0) >= 32)) return true;
     const sw = Math.round(img.width);
     const sh = Math.round(img.height);
     if (sw < 1 || sh < 1) return true;
@@ -3599,6 +3603,10 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   private imageOwners = new WeakMap<LImage, Member>();
 
   imageMutated(img: LImage): void {
+    // The palette indices the image was DECODED with stop describing its
+    // pixels the moment the movie writes into it (see LImage.indicesStale), so
+    // every index-based rule has to fall back to the colours actually present.
+    img.indicesStale = true;
     const member = this.imageOwners.get(img);
     if (!member) return;
     if (member.imagePainted) return;

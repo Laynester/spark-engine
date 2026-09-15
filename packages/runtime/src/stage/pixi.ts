@@ -684,7 +684,20 @@ export class PixiStage implements StageAdapter {
     const n = w * h * 4;
     if (!node.bakeBuf || node.bakeBuf.length !== n) node.bakeBuf = new Uint8ClampedArray(n);
     const keyed = bake === 'matteIdentity' ? (node.keyedBuf && node.keyedBuf.length === w * h ? node.keyedBuf : (node.keyedBuf = new Uint8Array(w * h))) : null;
-    const out = bakeSurface(img.ensure(), w, h, bake, tint, inkKey, ink, 0, palette, keyed, duotone);
+    // An image member can carry its OWN palette/indices — the corpus hands a
+    // member the image of another one (`Object Mover`'s preview: the shared
+    // `preview_rendered` member gets the item's icon image; the hand icons do the
+    // same through `renderPreviewImage`). Keying that surface against the
+    // CHANNEL member's palette (or with no indices at all) then keys the wrong
+    // colour, or nothing, where the source art's own palette entry 0 is the
+    // background. The image's palette wins; the member's stays the fallback.
+    const bakePalette = img.palette ?? palette;
+    // ...and the indices only while they still describe the surface: once the
+    // movie has painted into this image the decoded index raster is stale, and
+    // an index rule would key the ORIGINAL art's background positions out of the
+    // freshly painted frame (see LImage.indicesStale — the hh_entry_jp scroller).
+    const bakeIndices = img.indicesStale ? null : img.indices;
+    const out = bakeSurface(img.ensure(), w, h, bake, tint, inkKey, ink, 0, bakePalette, keyed, duotone, bakeIndices);
     node.bakeBuf.set(out.pixels);
     return { pixels: node.bakeBuf, changed: out.changed };
   }
@@ -1496,11 +1509,22 @@ export class PixiStage implements StageAdapter {
       const { tx, ty } = this.inverseTransformPoint(ch, x, y);
       const px = Math.round((tx - left) * (sw / Math.max(1, hit.w)));
       const py = Math.round((ty - top) * (sh / Math.max(1, hit.h)));
-      // The sprite owns the click only where it renders something: the pixels
-      // it displays are its active area (see spritePixelHitTest), so the pixels
-      // an ink/alpha keyed away belong to the sprite underneath — the chair that
-      // carries a sitter no longer eats the click aimed at the avatar.
-      if (spritePixelHitTest(hit.node.imgBuffer, sw, sh, px, py)) return hit.channel;
+      // The sprite owns the click by its DISPLAYED pixels only for the inks that
+      // can key pixels away, or when its own artwork carries alpha (see
+      // spritePixelHitTest): the chair that carries a sitter no longer eats the
+      // click aimed at the avatar, while a composited window panel still owns
+      // its rectangle. Everything else keeps Director's rectangle rule.
+      //
+      // The sprite's own runtime image travels with the rendered buffer so a
+      // keyed-away pixel can still be recognised as the sprite's own art (a
+      // window element's fed background is keyed off, yet the element's whole
+      // rectangle stays clickable — see spritePixelHitTest).
+      const srcImg = hit.node.imgLImage ?? ch.member?.image;
+      const alphaArt = (srcImg?.depth ?? 0) >= 32;
+      const art = srcImg && alphaArt
+        ? { pixels: srcImg.data, width: Math.round(srcImg.width), height: Math.round(srcImg.height), depth: srcImg.depth }
+        : null;
+      if (spritePixelHitTest(ch.ink ?? 0, hit.node.imgBuffer, sw, sh, px, py, alphaArt, art)) return hit.channel;
     }
     // NOTHING renders at the point (every candidate's pixel there is transparent,
     // or the pixel could not be sampled). A scripted sprite still owns it by its

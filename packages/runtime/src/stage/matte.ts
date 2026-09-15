@@ -314,6 +314,60 @@ function paletteIndex0Rgb(palette: number[][] | undefined): number | null {
   return (p0[0] << 16) | (p0[1] << 8) | p0[2];
 }
 
+/**
+ * Mark every pixel reachable from the image border through palette-index-0 (or
+already transparent) pixels.
+ *
+ * This is the INDEX form of "the member's background": for indexed art the
+ * palette entry IS the background, so it is the one rule that survives a palette
+ * REMAP (a `paletteTarget` rewrites the RGB the pixels carry — see
+ * `Engine.memberImage` -> `remapPaletteByIndices` — so a rule that matches the
+ * background COLOUR by RGB stops matching the moment the art is recoloured).
+ * Flood, not blanket, so art that happens to use index 0 for a sealed interior
+ * region keeps it.
+ *
+ * Returns the reachability mask, or null when there are no usable indices. It is
+ * computed against the surface AS IT ARRIVED: a pixel that a previous pass made
+ * transparent must not turn into a conduit into a sealed interior region, so the
+ * caller resolves it BEFORE its colour pass.
+ */
+function indexZeroFloodMask(
+  rgba: Uint8Array | Uint8ClampedArray,
+  width: number,
+  height: number,
+  indices: Uint8Array,
+): Uint8Array | null {
+  const n = width * height;
+  if (width <= 0 || height <= 0 || indices.length < n) return null;
+  const reachable = new Uint8Array(n);
+  const queue: number[] = [];
+  const seed = (x: number, y: number): void => {
+    const i = y * width + x;
+    if (reachable[i]) return;
+    if (rgba[i * 4 + 3] !== 0 && indices[i] !== 0) return;
+    reachable[i] = 1;
+    queue.push(i);
+  };
+  for (let x = 0; x < width; x++) {
+    seed(x, 0);
+    seed(x, height - 1);
+  }
+  for (let y = 1; y < height - 1; y++) {
+    seed(0, y);
+    seed(width - 1, y);
+  }
+  while (queue.length > 0) {
+    const i = queue.pop()!;
+    const x = i % width;
+    const y = (i - x) / width;
+    if (x > 0) seed(x - 1, y);
+    if (x + 1 < width) seed(x + 1, y);
+    if (y > 0) seed(x, y - 1);
+    if (y + 1 < height) seed(x, y + 1);
+  }
+  return reachable;
+}
+
 export function bakeEdgeBackground(
   rgba: Uint8Array | Uint8ClampedArray,
   width: number,
@@ -342,17 +396,49 @@ export function bakeEdgeBackground(
     // bitmap sprite when `tSpr.member.image.getPixel(...).hexString()` is NOT
     // "#FFFFFF" — white is the transparent colour for these sprites.
     //
-    // Palette-0 is therefore deliberately NOT consulted here. It agrees with
-    // white for 21416 of the v31 bundle's 21559 bitmap members, which is why it
-    // looked right, but hh_entry_jp's `screen3d` is one of the 143 exceptions: a
-    // 29-entry palette with BLACK at index 0 under a white backdrop. Keying
-    // palette-0 there deleted the 3D screen the Entry Image Scroller paints and
-    // left the white rectangle around it standing. The matte/notGhost paths
-    // below still resolve palette-0 (and its index flood) — that is ink 8's rule.
+    // Palette-0 is therefore not the KEY COLOUR — but for indexed art it is
+    // still the one form of "the background" that survives a palette REMAP
+    // (`paletteTarget` rewrites the RGB the pixels carry, so a colour test stops
+    // matching the recoloured background — see indexZeroFloodMask), so it is
+    // consulted by INDEX, and only when entry 0 IS that background colour:
+    // entry 0 has to be the same near-white the ink's default wants. That gate is
+    // what keeps hh_entry_jp's `screen3d` — a 29-entry palette with BLACK at
+    // index 0, where the black is ART, because the screen the Entry Image
+    // Scroller paints sits inside a black field whose left edge is index 0 for
+    // its top 48 rows — out of the index rule; without it a border flood walks
+    // into the screen and keys 5834 pixels of the frame the movie just painted.
+    // The matte/notGhost paths below resolve palette-0 unconditionally — that is
+    // ink 8's rule, and ink 8 asks for the member's background where ink 36 asks
+    // for the sprite's.
     const key = keyRgb ?? 0xffffff;
+    // Resolved BEFORE the colour pass: the pass makes every key-coloured pixel
+    // transparent, and a transparent pixel is a conduit, so computing this
+    // afterwards would let the keyed backdrop tunnel into a sealed interior
+    // region (see indexZeroFloodMask).
+    const p0 = paletteIndex0Rgb(palette);
+    const indexMask =
+      key === 0xffffff && p0 !== null && isNearWhiteGrayscale(p0, NEAR_WHITE_MIN, NEAR_WHITE_DELTA) && indices && indices.length >= n
+        ? indexZeroFloodMask(rgba, width, height, indices)
+        : null;
     let changed = false;
     for (let i = 0; i < n; i++) {
       if (isOpaque(rgba, i) && rgbAt(rgba, i) === key) {
+        rgba[i * 4] = 0;
+        rgba[i * 4 + 1] = 0;
+        rgba[i * 4 + 2] = 0;
+        rgba[i * 4 + 3] = 0;
+        changed = true;
+      }
+    }
+    // The COLOUR pass above misses the background of art that has been RE-INDEXED
+    // (`paletteTarget`): the palette entry is still 0, but the RGB the pixels
+    // carry is no longer the white the pass looks for, so a window's white mask
+    // survived under ink 36 while the room sprite under ink 8 (which resolves
+    // palette-0) lost it. Key the border-connected index-0 pixels too, so both
+    // inks agree on what the background of an indexed member is.
+    if (indexMask) {
+      for (let i = 0; i < n; i++) {
+        if (!indexMask[i] || indices![i] !== 0 || rgba[i * 4 + 3] === 0) continue;
         rgba[i * 4] = 0;
         rgba[i * 4 + 1] = 0;
         rgba[i * 4 + 2] = 0;
@@ -929,6 +1015,15 @@ export function bakeSurface(
     * other inks untouched.
     */
    duotone?: { fg: number; bg: number } | null,
+   /**
+    * Palette indices of `src`. Pass them whenever the surface came from indexed
+    * art: the matte and key rules are INDEX rules (the member's palette entry 0
+    * is its background), and the RGB of that entry stops identifying it as soon
+    * as the surface has been remapped through a `paletteTarget`. Without them the
+    * bake falls back to matching the palette-0 COLOUR, which the frame path only
+    * gets away with while nothing has recoloured the art.
+    */
+   indices?: Uint8Array | null,
 ): { pixels: Uint8ClampedArray; changed: boolean } {
    const n = w * h * 4;
    const buf = new Uint8ClampedArray(n);
@@ -937,7 +1032,16 @@ export function bakeSurface(
    // mark it: the tint pass below skips transparent pixels but must skip these too.
    const keyedBuf = bake === 'matteIdentity' ? (keyed ?? new Uint8Array(w * h)) : null;
    const changed = bake
-     ? bakeEdgeBackground(buf, w, h, bake, bake === 'backgroundTransparent' ? undefined : palette, undefined, keyRgb, keyedBuf)
+     ? bakeEdgeBackground(
+         buf,
+         w,
+         h,
+         bake,
+         bake === 'backgroundTransparent' ? undefined : palette,
+         bake === 'backgroundTransparent' ? undefined : indices,
+         keyRgb,
+         keyedBuf,
+       )
      : false;
   const tinted = duotone
     ? tintSpriteDarken(buf, w, h, duotone.bg, duotone.fg)
@@ -979,17 +1083,82 @@ export function bakeSurface(
  * avatar sitting on it — the reported "clicking a sitting avatar selects the
  * chair". Testing the displayed pixels lets the click fall to the avatar.
  *
+ * The test is INK-AWARE, so BOTH of Director's behaviours coexist — the pixel
+ * rule applies only where the ink (or the artwork itself) can actually key
+ * pixels away:
+ *
+ *  - Inks that key pixels (`8` matte, `36` background transparent, `4` not-copy,
+ *    `7` not-ghost) use the pixel test. This is the room case above.
+ *  - Artwork that carries a real alpha channel of its own (a 32-bit member, a
+ *    truecolor PNG, an `image(w, h, 32)` the movie painted into) uses the pixel
+ *    test too, whatever its ink.
+ *  - Every OTHER ink (Copy and the arithmetic / ghost family) keeps Director's
+ *    rectangle rule: the sprite owns its whole rectangle, so a composited
+ *    window panel or a flat fill whose bake left it with a transparent margin
+ *    cannot open a click hole in the chrome.
+ *
  * Missing surface and out-of-bounds coordinates still fall back to the
  * rectangle, so a drifted pixel mapping can never make a sprite unclickable.
  */
+const PIXEL_TEST_INKS = new Set([4, 7, 8, 36]);
+
+/** A sprite surface the hit test can sample: the rendered buffer, or the
+ *  runtime image it was baked from (see `spritePixelHitTest`'s `art`). */
+export interface HitSurface {
+  pixels: Uint8Array | Uint8ClampedArray | null | undefined;
+  width: number;
+  height: number;
+  depth: number;
+}
+
+/**
+ * Does this sprite's click area follow its DISPLAYED pixels (true) or its whole
+ * rectangle (false)? See the note above: `alphaArt` is the artwork's own alpha
+ * channel, which is honoured for any ink.
+ */
+export function inkUsesPixelHitTest(ink: number, alphaArt = false): boolean {
+  return alphaArt || PIXEL_TEST_INKS.has(ink);
+}
+
 export function spritePixelHitTest(
+  ink: number,
   pixels: Uint8Array | Uint8ClampedArray | null | undefined,
   w: number,
   h: number,
   px: number,
   py: number,
+  alphaArt = false,
+  art?: HitSurface | null,
 ): boolean {
+  if (!inkUsesPixelHitTest(ink, alphaArt)) return true;
   if (!pixels || w < 1 || h < 1) return true;
   if (px < 0 || py < 0 || px >= w || py >= h) return true;
-  return pixels[(py * w + px) * 4 + 3] !== 0;
+  if (pixels[(py * w + px) * 4 + 3] !== 0) return true;
+  // The RENDERED pixel is a hole — but that alone does not settle it. A hole can
+  // mean two very different things, and the two reference rules disagree only
+  // about the second:
+  //
+  //  - the art itself is missing there (a chair part's rectangle around its
+  //    art, a furniture canvas outside the body): the sprite covers nothing, so
+  //    the click belongs to whatever is drawn behind it, and
+  //  - the art IS there and the ink's keying removed it against the stage (a
+  //    composited element whose fed/white background the ink keys away).
+  //
+  // So the sprite's OWN surface — the `image(w, h, 32)` buffer it renders from,
+  // which a runtime `feedImage` fills opaquely — is asked as well: where that
+  // surface is solid the sprite still owns the point. This is the combination of
+  // the two hit tests this engine has had: the displayed-pixel rule (which stops
+  // a chair's oversized rectangle from eating the click aimed at the avatar it
+  // carries) and the artwork/rectangle rule (which keeps a window element's
+  // whole rectangle clickable when its background is keyed away).
+  //
+  // Only buffers that carry a real alpha channel of their own (32-bit) can say
+  // this: INDEXED art has no alpha to read — its transparency is exactly what
+  // the bake computes — so those sprites stay on the rendered pixel alone.
+  if (art && art.depth >= 32 && art.pixels && art.width >= 1 && art.height >= 1) {
+    const ax = Math.min(art.width - 1, Math.max(0, px));
+    const ay = Math.min(art.height - 1, Math.max(0, py));
+    if (art.pixels[(ay * art.width + ax) * 4 + 3] !== 0) return true;
+  }
+  return false;
 }

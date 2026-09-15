@@ -4299,6 +4299,11 @@ test('member image painted via copyPixels flips plain bitmap channel to live sur
   const vis = last[last.length - 1];
   assert.ok(vis.image instanceof LImage, 'visual must carry the member painted surface');
   assert.equal((vis.image as LImage).data![1], 255, 'green pixel survives into the surface');
+  // The decoded palette indices stop describing the surface on the first write,
+  // so index-based key rules must stop reading them (see LImage.indicesStale —
+  // hh_entry_jp's scroller paints `screen3d` every frame).
+  assert.equal((a.mem.image as LImage).indicesStale, true, 'painting marks the decoded indices stale');
+  assert.equal((b.mem.image as LImage).indicesStale, true, 'painting marks the decoded indices stale');
 });
 
 test('value() parses real v14 struct strings with "# key" spacing', () => {
