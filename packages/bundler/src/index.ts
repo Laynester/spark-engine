@@ -5,7 +5,7 @@ import type { CastUnit } from './manifest.js';
 import type { BundleManifest } from './types.js';
 import { buildZip, isTextPath, buildSpark, isSparkBytes, readSpark, SPARK_MAGIC } from './zip.js';
 import { encodePalette, parsePalTable } from './pal.js';
-import { decodeImage, encodeScript, inferScriptType, parseLingo } from '@habbo/runtime';
+import { decodeImage, encodeScript, inferScriptType, parseLingo } from '@spark/runtime';
 
 export * from './pal.js';
 

@@ -3,7 +3,7 @@
  * what the runtime spends it on, and the JS heap.
  *
  * Enabled by any of:
- *   - `?dev=1` (or bare `?dev`) on the page URL — works on a real hotel page
+ *   - `?dev=1` (or bare `?dev`) on the page URL — works on a real host page
  *     without editing it,
  *   - a `dev` attribute on `<spark-player>`,
  *   - `window.__sparkDev.show()` / `.toggle()` from the console.

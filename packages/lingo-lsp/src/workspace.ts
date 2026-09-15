@@ -6,8 +6,8 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { parseLingo } from '@habbo/runtime/dist/lingo/parser.js';
-import { tokenize, type Token } from '@habbo/runtime/dist/lingo/tokenizer.js';
+import { parseLingo } from '@spark/runtime/dist/lingo/parser.js';
+import { tokenize, type Token } from '@spark/runtime/dist/lingo/tokenizer.js';
 
 /** Skip build/vendored dirs when walking (the corpus lives elsewhere). */
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'out', 'build']);

@@ -1,7 +1,7 @@
 # Lingo (Director) — VS Code extension
 
-Lingo language support for the Habbo v14 client scripts (`*.ls`). Uses the
-**actual** tokenizer + parser from `@habbo/runtime`, so syntax errors,
+Lingo language support for Director client scripts (`*.ls`). Uses the
+**actual** tokenizer + parser from `@spark/runtime`, so syntax errors,
 keywords and completions match the engine that runs the scripts.
 
 ## What you get
@@ -85,7 +85,7 @@ scripts/smoke-lingo-lsp.mjs              # end-to-end smoke test (10 checks)
 ## Files
 
 ```
-packages/lingo-lsp/          the language server (reuses @habbo/runtime)
+packages/lingo-lsp/          the language server (reuses @spark/runtime)
   src/keywords.ts            curated keywords / the-props / builtin docs
   src/semantic.ts            tokenizer output -> semantic token types
   src/server.ts              diagnostics, completion, hover, symbols, tokensapps/lingo-vscode/           the VS Code extension

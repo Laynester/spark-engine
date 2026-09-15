@@ -48,10 +48,11 @@ export function parseMemberFileName(basename: string): {
   const dot = rest.lastIndexOf('.');
   if (dot > 0) rest = rest.slice(0, dot);
   // Member names may genuinely contain underscores (cloud art is
-  // "cloud_0_left") or spaces ("Habbo UK garden"). The export tool underscored
-  // every space for filesystem safety, so the slug is ambiguous; cast usage
-  // arbitrates: script members are referenced with spaces, everything else
-  // keeps the underscore form. Runtime lookups normalize _ <-> space anyway.
+  // "cloud_0_left") or spaces (a name like "main garden gate"). The export
+  // tool underscored every space for filesystem safety, so the slug is
+  // ambiguous; cast usage arbitrates: script members are referenced with spaces,
+  // everything else keeps the underscore form. Runtime lookups normalize _ <->
+  // space anyway.
   return { number, kind, name: kind === 'script' ? rest.replaceAll('_', ' ') : rest };
 }
 
@@ -110,7 +111,7 @@ export function parseMovieTxt(content: string): MovieConfig | null {
     stageBottom: num('stage_bottom'),
     backgroundColor: num('background_color'),
     stageColor: num('stage_color'),
-    // The resolved RGB is what Shockwave renders (e.g. 0x000000 black); keep
+    // The resolved RGB is what a client renders (e.g. 0x000000 black); keep
     // it optional so movies without the field fall back to backgroundColor.
     stageColorRgb: raw['stage_color_rgb'] !== undefined ? num('stage_color_rgb') : undefined,
     tempo: num('tempo'),

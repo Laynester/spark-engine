@@ -1,14 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { DirectorEngine } from '../engine/engine.js';
 import { BundleLoader } from '../bundle/loader.js';
 
-const SPARK = readFileSync(
-  '/Users/laynester/Projects/habbo26/habbo-sw-js/apps/demo/public/casts/31/hh_room_park.spark',
-);
+// Repo root, derived from this file's location so the fixture paths survive a
+// checkout anywhere (dist/test -> dist -> runtime -> packages -> root).
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
+
+const SPARK = readFileSync(resolve(ROOT, 'apps/demo/public/casts/31/hh_room_park.spark'));
 const RM_SCRIPT = readFileSync(
-  '/Users/laynester/Projects/habbo26/habbo-sw-js/exported/31/fuse_client/scripts/0030_script_Resource_Manager_Class.ls',
+  resolve(ROOT, 'exported/31/fuse_client/scripts/0030_script_Resource_Manager_Class.ls'),
   'utf8',
 );
 
@@ -28,7 +32,7 @@ test('preIndexMembers registers park members AND aliases into pAllMemNumList', a
   const script = e.resolveScript('Resource Manager Class')!;
   const rm = e.interp.newInstance(script, []);
   const VC_SCRIPT = readFileSync(
-    '/Users/laynester/Projects/habbo26/habbo-sw-js/exported/31/fuse_client/scripts/0047_script_Variable_Container_Class.ls',
+    resolve(ROOT, 'exported/31/fuse_client/scripts/0047_script_Variable_Container_Class.ls'),
     'utf8',
   );
   e.addScriptMember('Variable Container Class', 'parent', VC_SCRIPT);

@@ -5,13 +5,24 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="icon" href="data:," />
-  <title>habbo-sw-js — runtime demo</title>
+  <title>spark-engine — runtime demo</title>
   <link rel="stylesheet" href="/src/style.css" />
+  <!--
+      The legacy web-gallery bundle (Prototype 1.6.0.2 + the old view/rounder/ajax
+      chrome), the script a real host page still ships. Prototype replaces the built-ins Pixi
+      needs (async-free: Array.prototype.reduce, Array.from, ...), adds its Enumerable
+      helpers to Array.prototype as ENUMERABLE properties, and methodizes
+      Element.Methods over the DOM prototypes — enough to break the renderer before
+      the movie boots ("Uniform type vec4<f32> is not supported" was reduce returning
+      the raw type list instead of Pixi's lookup table). The runtime repairs the realm
+      itself now, before pixi.js is evaluated: see packages/runtime/src/legacy/reclaim.ts.
+  -->
+  <script src="https://casper.fun/web-gallery/static/js/visual.js" type="text/javascript"></script>
 </head>
 
 <body>
   <header class="bar">
-    <span class="logo-text">habbo-sw-js</span>
+    <span class="logo-text">spark-engine</span>
     <span class="badge">&lt;spark-player&gt; embed</span>
   </header>
   <main id="stage-host">
@@ -34,14 +45,15 @@
       sw5="external.variables.txt=/external_vars_14.txt;external.texts.txt=http://localhost/v14/stuff/gamedata/external_texts.txt"
       sw6="use.sso.ticket=0;sso.ticket=test-sso" log="#log"></spark-player> -->
 
-    <spark-player movie="/casts/31/habbo.spark" sw1="site.url=http://www.habbo.ch;url.prefix=http://www.habbo.ch"
-      sw2="connection.info.host=localhost;connection.info.port=12321" sw3="client.reload.url=http://localhost/"
-      sw4="connection.mus.host=localhost;connection.mus.port=12322"
+    <spark-player renderer="webgl" movie="/casts/31/habbo.spark"
+      sw1="site.url=http://www.habbo.ch;url.prefix=http://www.habbo.ch"
+      sw2="connection.info.host=localhost;connection.info.port=3000" sw3="client.reload.url=http://localhost/"
+      sw4="connection.mus.host=localhost;connection.mus.port=3001"
       sw5="external.variables.txt=/external_vars_31.txt?;external.texts.txt=http://localhost/v31/stuff/gamedata/external_texts.txt?"
-      sw6="use.sso.ticket=1;sso.ticket=admin-ticket-1" log="#log"></spark-player>
+      sw6="use.sso.ticket=0;sso.ticket=test-sso" log="#log"></spark-player>
   </main>
   <pre id="log" class="log">waiting for spark…</pre>
-  <!-- Loaded as a module so Vite compiles spark.ts + the @habbo/runtime TS
+  <!-- Loaded as a module so Vite compiles spark.ts + the @spark/runtime TS
        source on the fly — edit packages/runtime/src/** and the page
        hot-reloads, no rebuild needed. (public/spark.js is still built for
        external embedders.) -->

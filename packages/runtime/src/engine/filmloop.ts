@@ -61,13 +61,13 @@ function naturalBounds(frames: FilmTile[][]): { minX: number; minY: number; maxX
   return { minX, minY, maxX, maxY };
 }
 
-/** Plan the composition (DirPlayer render_score_to_bitmap_with_offset parity):
+/** Plan how a film loop's mini-score composes into its bitmap canvas:
  *
  *  - The canvas is the loop's authored rect (the CASt initialRect): the
  *    mini-stage viewport the loop composes into, anchored at (loopX, loopY).
  *  - Tiles draw at NATURAL bitmap size when the authored rect matches the
- *    sprites' natural bounding box (within 10px, DirPlayer prefer_bitmap_dims)
- *    — hh_room_gold's waterloop: authored (162,391,475,483) = 313×92 equals
+ *    sprites' natural bounding box (within 10px) — hh_room_gold's waterloop:
+ *    authored (162,391,475,483) = 313×92 equals
  *    the natural bounds of its eight 250×22 tiles, so the 250×12 display size
  *    in the score is NOT used and the alternating teal rows stay dense. When
  *    the loop is a viewport/crop, tiles draw at the record's display size with
@@ -164,8 +164,8 @@ export function composeFilmLoopFrame(
   for (const t of frame) {
     const tex = textures.get(t.member);
     if (!tex) continue;
-    // Raw blend is inverted 0-255 (0 → opaque, 255 → fully transparent),
-    // matching DirPlayer's filmloop blend handling.
+    // The loop's raw blend is inverted 0-255 (0 → opaque, 255 → fully
+    // transparent), unlike a sprite's 0-100 blend percentage.
     const pct = (255 - Math.min(255, Math.max(0, t.blend))) / 255;
     if (pct <= 0.01) continue;
     const alpha = pct >= 0.99 ? 255 : Math.round(pct * 255);

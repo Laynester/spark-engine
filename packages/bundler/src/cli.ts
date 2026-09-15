@@ -28,7 +28,7 @@ const USAGE = `spark bundle <root> [<outDir>]   — bundle every cast under <roo
               <outDir>  output directory (defaults to a single bundle when omitted)
   flags: --root <dir> --out-dir <dir> --casts a,b,c --out <file> --ext zip|spark
          --jobs <n>     parallel workers (default: CPU count; 1 = sequential)
-  alias:  habbo-bundle (old name)
+  alias:  spark-bundle
 
 spark watch <root> [<outDir>]      — rebuild the cast whose files change, on save
   positional: <root>    exported cast directory (default "exported")
@@ -39,7 +39,7 @@ spark watch <root> [<outDir>]      — rebuild the cast whose files change, on s
 
 function parseArgs(argv: string[]): Args {
   // `spark bundle ...` / `spark watch ...` — accept the optional subcommand so
-  // the CLI reads like a proper tool (the old `habbo-bundle <root> ...` form
+  // the CLI reads like a proper tool (the bare `spark-bundle <root> ...` form
   // still works).
   const args: Args = { root: 'exported', out: 'bundle.spark' };
   if (argv[0] === 'bundle') argv = argv.slice(1);

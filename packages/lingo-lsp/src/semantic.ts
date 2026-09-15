@@ -1,7 +1,7 @@
 // Maps the runtime tokenizer's tokens (plus an overlay for comments, which the
 // tokenizer skips) onto LSP semantic-token types.
 
-import type { Token } from '@habbo/runtime/dist/lingo/tokenizer.js';
+import type { Token } from '@spark/runtime/dist/lingo/tokenizer.js';
 import { KEYWORDS } from './keywords.js';
 
 // Order matters: these indices are what the legend sent in initialize refers to.

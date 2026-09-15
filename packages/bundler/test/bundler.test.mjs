@@ -5,10 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildBundle, buildSparkBundle, readSpark, isSparkBytes, encodePalette, isPaletteBytes } from '../dist/index.js';
 import { unzipSync, zlibSync } from 'fflate';
-import { decodePng, decodePix8, isPix8, BundleLoader, DirectorEngine } from '@habbo/runtime';
+import { decodePng, decodePix8, isPix8, BundleLoader, DirectorEngine } from '@spark/runtime';
 
 function makeFixture() {
-  const dir = mkdtempSync(join(tmpdir(), 'habbo-bundle-'));
+  const dir = mkdtempSync(join(tmpdir(), 'spark-bundle-'));
   const cast = join(dir, 'hh_demo');
   mkdirSync(cast, { recursive: true });
   writeFileSync(join(cast, '0001_script_Loop.ls'), '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n');
@@ -77,7 +77,7 @@ test('bundler builds a zip with a correct manifest', () => {
 });
 
 test('film loop export: filmloops/NNNN_filmloop_*.txt becomes a filmloop member', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'habbo-water-'));
+  const dir = mkdtempSync(join(tmpdir(), 'spark-water-'));
   const cast = join(dir, 'hh_room_gold');
   mkdirSync(join(cast, 'filmloops'), { recursive: true });
   // water frames + the decompiler's film loop export (frames straight from the
@@ -407,7 +407,7 @@ test('shared palette names are content-addressed: no cross-bundle bleed in one l
   // bundle's palette — the greyscale-drape bug. Two sparks with DIFFERENT
   // palettes must keep their own colors when registered together.
   const mk = (name, color) => {
-    const dir = mkdtempSync(join(tmpdir(), 'habbo-collide-'));
+    const dir = mkdtempSync(join(tmpdir(), 'spark-collide-'));
     const cast = join(dir, name);
     mkdirSync(cast, { recursive: true });
     const palette = [[255, 255, 255], color];
@@ -434,7 +434,7 @@ test('shared palette names are content-addressed: no cross-bundle bleed in one l
 });
 
 test('container directories expand into sub-cast bundles under the group', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'habbo-bundle-'));
+  const dir = mkdtempSync(join(tmpdir(), 'spark-bundle-'));
 
   // A normal top-level cast.
   const cast = join(dir, 'hh_demo');
@@ -487,7 +487,7 @@ test('container directories expand into sub-cast bundles under the group', () =>
 });
 
 test('a member-named dir holding casts is a grouping, not a cast member', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'habbo-bundle-'));
+  const dir = mkdtempSync(join(tmpdir(), 'spark-bundle-'));
 
   // A container (like the v31 hof_furni) whose top level has a `sounds`
   // subdirectory that itself CONTAINS casts (the v31 sound-set grouping).

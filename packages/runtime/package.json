@@ -1,5 +1,5 @@
 {
-  "name": "@habbo/runtime",
+  "name": "@spark/runtime",
   "version": "0.1.18",
   "type": "module",
   "main": "dist/index.js",

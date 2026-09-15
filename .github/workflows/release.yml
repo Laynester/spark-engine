@@ -82,7 +82,7 @@ jobs:
 
       # 1) Runtime browser bundle -------------------------------------------
       - name: Bundle runtime (IIFE, global `Spark`)
-        run: npm run bundle -w @habbo/runtime
+        run: npm run bundle -w @spark/runtime
 
       # 2) Bundler: npm package + a single-file CLI -------------------------
       - name: Bundle bundler CLI (single-file)

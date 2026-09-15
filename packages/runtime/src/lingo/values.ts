@@ -1,5 +1,5 @@
 import type { Handler, Script } from './ast.js';
-import { matteRegionMask } from '../stage/matte.js';
+import { matteRegionMask, duotoneRampRgb } from '../stage/matte.js';
 
 export type LVal =
   | number
@@ -356,6 +356,24 @@ export class LImage {
   palette?: number[][];
   depth = 32;
   indices?: Uint8Array | null = null;
+  /**
+   * The movie has WRITTEN pixels into this image, so `indices` (the palette
+   * indices the member was DECODED with) no longer describe the surface.
+   *
+   * Index-based rules must stop reading them once this is set, or they operate
+   * on the wrong pixel positions entirely: `screen3d` (hh_entry_jp) is a member
+   * the Entry Image Scroller paints over every frame, and the ink-36 index key
+   * was resolving "border-connected palette-0" against the ORIGINAL screen art —
+   * 5834 positions of the freshly painted frame were punched transparent, which
+   * is what made the scroller look broken.
+   *
+   * Set by the engine's `imageMutated` (the hook the interpreter fires after
+   * every pixel-writing Lingo call). Camera/photo media keeps its OWN freshly
+   * decoded indices, which is why this is a paint flag and not "the member has
+   * an image": `set member.media` decodes an index raster and those indices are
+   * exactly what the bake wants.
+   */
+  indicesStale = false;
   paletteRef: LVal = VOID;
   useAlpha = false;
 
@@ -575,8 +593,29 @@ export class LImage {
 
     const srcPalette = src.palette;
     const hasPalette = srcPalette && srcPalette.length > 0;
-    const matteMask = (ink === 8 || ink === 7) ? matteRegionMask(s, sw, sh, sx0, sy0, srcW, srcH, srcPalette, src.indices, ink === 8) : null;
-    const srcBgRgb = ink === 36 && hasPalette && (src.depth ?? 32) <= 8 ? srcPalette[0] : null;
+    const srcIndicesFresh = src.indicesStale ? null : src.indices;
+    const matteMask = (ink === 8 || ink === 7) ? matteRegionMask(s, sw, sh, sx0, sy0, srcW, srcH, srcPalette, srcIndicesFresh, ink === 8) : null;
+    // Ink 36 (Background transparent) keys the SPRITE's background colour — WHITE
+    // unless the movie set one (`#bgColor`, handled by applyInkPixel below). For
+    // indexed art whose palette entry 0 is NOT white (so nothing would be keyed
+    // by colour) the INDEX is used instead, but only while those indices still
+    // describe the pixels (see `indicesStale`): the rule exists for the
+    // landscape's `%dir% %class%_mask` art, and it must never run against a
+    // surface the movie has painted over.
+    //
+    // The gate here used to be `palette && src.depth <= 8`, which is dead: the
+    // engine's member rasters carry `palette` + `indices` but never set `depth`
+    // (default 32 — see Engine.memberImage), so ink 36 keyed NOTHING in the CPU
+    // composite path. `Wall_Mask_Manager::renderMask` is what needs it: it fills
+    // the mask image WHITE and copies each window's `%dir% %class%_mask` member
+    // into it with `[#ink: 36]`, and the landscape is then blitted through that
+    // mask (`copyPixels(tBgImg, …, [#maskImage: tMask])` skips every white mask
+    // pixel). With nothing keyed, the mask member's white background landed in
+    // the mask too, the outside view was never copied inside the window, and the
+    // window showed the mask's white fill — "the inside of the window is white".
+    const srcIndices = ink === 36 && srcIndicesFresh && srcIndicesFresh.length >= sw * sh ? srcIndicesFresh : null;
+    const srcBgRgb = ink === 36 && !srcIndices && hasPalette && (src.depth ?? 32) <= 8 ? srcPalette[0] : null;
+    const srcKeysWhite = ink === 36 && !srcIndices && !srcBgRgb;
 
     const orientDet = orient ? orient.a * orient.e - orient.b * orient.d : 0;
     const orientInv = orientDet !== 0 ? 1 / orientDet : 0;
@@ -632,7 +671,11 @@ export class LImage {
             continue;
           }
         }
-        if (srcBgRgb && s[si + 3] >= 128 && s[si] === srcBgRgb[0] && s[si + 1] === srcBgRgb[1] && s[si + 2] === srcBgRgb[2]) {
+        if (srcIndices) {
+          if (srcIndices[sy * sw + sx] === 0) continue;
+        } else if (srcBgRgb && s[si + 3] >= 128 && s[si] === srcBgRgb[0] && s[si + 1] === srcBgRgb[1] && s[si + 2] === srcBgRgb[2]) {
+          continue;
+        } else if (srcKeysWhite && s[si + 3] >= 128 && s[si] === 255 && s[si + 1] === 255 && s[si + 2] === 255) {
           continue;
         }
         const di = (py * dw + px) * 4;
@@ -691,9 +734,9 @@ function alphaBlendPixel(sr: number, sg: number, sb: number, sa: number, dr: num
   // (`(sa * sa + da * inv) / 255`) and clamped with max(., sa), which silently
   // DROPPED the destination alpha on every blended draw: an ink-36 element at
   // blend 50 over a solid panel left the panel at alpha 191, so the room showed
-  // through it. That is the catalogue purse/credits row (`habbo_catalogue.window`
-  // blends 20/30) and the kiosk roommatic input veils (`whitepixel`, blends 70
-  // and 20); measuring the element buffers showed exactly the broken outputs,
+  // through it. That is the catalogue purse/credits row (blends 20/30) and the
+  // kiosk roommatic input veils (`whitepixel`, blends 70 and 20); measuring the
+  // element buffers showed exactly the broken outputs,
   // alpha 201/214 where a 21%-transparent hole sat over the panel.
   //
   // The destination weight also has to carry da, not 255, or the colour is
@@ -777,7 +820,15 @@ function applyInkPixel(
     return srcRgb === 0 ? [dr, dg, db, da] : [255 - sr, 255 - sg, 255 - sb, 255];
   }
   if (ink === 6) {
-    return [dr ^ (255 - sr), dg ^ (255 - sg), db ^ (255 - sb), 255];
+    // Not Reverse is NOT a bitwise op here: the corpus's only ink-6 item has a
+    // band art whose R and B are 0, and the
+    // documented `dst ^ ~src` pins that band to magenta in every room while the
+    // live client paints the DESTINATION's brightness as a green duotone. Full
+    // derivation + the screenshot calibration in stage/blendFilters.ts and
+    // stage/matte.ts (`duotoneRampRgb` is the shared CPU/GPU twin).
+    if (sa === 0) return [dr, dg, db, da];
+    const [xr, xg, xb] = duotoneRampRgb(dr, dg, db);
+    return sa === 255 ? [xr, xg, xb, 255] : alphaBlendPixel(xr, xg, xb, sa, dr, dg, db, da);
   }
   if (ink === 7) {
     return [
@@ -823,6 +874,10 @@ function applyInkPixel(
     return [Math.max(sr, dr), Math.max(sg, dg), Math.max(sb, db), 255];
   }
   if (ink === 38) {
+    // Subtract WRAPS: "If the color value of the new color is less than 0,
+    // Director adds 256" (adobe_director_11.5.txt:3377). The raw difference is
+    // returned here and masked on store into the byte buffer; ink 35 above is
+    // the clamping Subtract Pin.
     return [dr - sr, dg - sg, db - sb, 255];
   }
   if (ink === 39) {
@@ -873,8 +928,8 @@ export function hexColor(s: string): LColor | null {
   // follows them, so `rgb("FFFF33 Hello")` is the same yellow as `rgb("FFFF33")`.
   // The corpus depends on that: the stickie note window takes its paper colour
   // from `rgb(ttype)` where `ttype` is the first word of the item-data string the
-  // server sends (Havana/R39 `IDATA` writes the colour, a SPACE, then the note
-  // text into one field). A strict six-character test made every note with text
+  // server sends (its item-data field carries the colour, a SPACE, then the note
+  // text in one string). A strict six-character test made every note with text
   // black while an empty one (colour alone) rendered fine.
   const leading = /^[0-9a-fA-F]{6}/.exec(h);
   if (leading) return intColor(parseInt(leading[0], 16));

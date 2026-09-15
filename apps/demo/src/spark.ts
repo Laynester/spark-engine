@@ -3,7 +3,7 @@
 // the movie with just one <script> and one <spark> tag:
 //
 //   <script src="/spark.js"></script>
-//   <spark-player movie="./habbo.spark" sw1="external.variables.txt=/external_variables.txt"></spark-player>
-import { defineSpark } from '@habbo/runtime';
+//   <spark-player movie="./movie.spark" sw1="external.variables.txt=/external_variables.txt"></spark-player>
+import { defineSpark } from '@spark/runtime';
 
 defineSpark();

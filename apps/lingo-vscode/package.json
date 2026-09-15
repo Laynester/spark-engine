@@ -1,9 +1,9 @@
 {
   "name": "lingo-vscode",
   "displayName": "Lingo (Director)",
-  "description": "Lingo language support — syntax highlighting, diagnostics, completions and hover via a language server that reuses the Habbo runtime's own parser.",
+  "description": "Lingo language support — syntax highlighting, diagnostics, completions and hover via a language server that reuses the Lingo runtime's own parser.",
   "version": "0.1.18",
-  "publisher": "habbo-sw",
+  "publisher": "spark-engine",
   "license": "MIT",
   "type": "commonjs",
   "engines": {
@@ -42,7 +42,7 @@
     ]
   },
   "scripts": {
-    "build": "npm run build -w @habbo/runtime && npm run build -w @habbo/lingo-lsp && node scripts/gen-grammar.mjs && node scripts/bundle-server.mjs && node scripts/bundle-client.mjs",
+    "build": "npm run build -w @spark/runtime && npm run build -w @spark/lingo-lsp && node scripts/gen-grammar.mjs && node scripts/bundle-server.mjs && node scripts/bundle-client.mjs",
     "typecheck": "tsc --noEmit -p .",
     "vscode:prepublish": "npm run build",
     "package": "vsce package --no-dependencies"

@@ -153,7 +153,7 @@ function makeMovieCastZip(name: string, linkedCasts: { name: string; file: strin
 }
 
 test('movie.txt configures stage + casts.txt registers the full castLib registry', async () => {
-  const habbo = makeMovieCastZip('habbo', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
+  const main = makeMovieCastZip('main', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const fuse = makeCastZip('fuse_client', [], {
@@ -161,19 +161,19 @@ test('movie.txt configures stage + casts.txt registers the full castLib registry
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'fuse_client' ? fuse : null;
+      return name === 'main' ? main : name === 'fuse_client' ? fuse : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
 
   // movie.txt applied.
   assert.equal(e.stageWidth, 720);
   assert.equal(e.stageHeight, 540);
   assert.equal(e.stageLeft, 89);
   assert.equal(e.stageRight, 809);
-  // stage_color_rgb (0x000000 black) is the resolved RGB Shockwave renders.
+  // stage_color_rgb (0x000000 black) is the resolved RGB a client renders.
   assert.equal(e.stageBackground, 0x000000);
   assert.equal(e.frameTempo, 24);
   assert.equal(e.getThe('stageleft', []), 89);
@@ -203,7 +203,7 @@ test('script(member(...)) resolves a script-type member — initializeAndRun ver
   // initializeAndRun: member 5 of castlib 1 (the movie's Internal cast) is a
   // Parent script. The corpus addresses script members by NUMBER REF, not
   // name, so script() must resolve an LMemberRef to its member's script.
-  const habbo = makeMovieCastZip('habbo', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
+  const main = makeMovieCastZip('main', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
     '0005_script_vercode.ls':
       '-- Cast member: vercode\n-- Type: Parent\non getV me, tSec\n' +
@@ -215,12 +215,12 @@ test('script(member(...)) resolves a script-type member — initializeAndRun ver
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : null;
+      return name === 'main' ? main : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
 
   const inst = e.interp.evalExpressionString('new script(member(5, 1))');
   assert.ok(inst instanceof LObject, 'script(member(5,1)) must instantiate vercode, not VOID');
@@ -242,7 +242,7 @@ test('linked cast placeholder movie config does not clobber the movie stage colo
   // stage rect, stage_color_rgb 0xFFFFFF white) alongside its casts.txt.
   // Loading fuse_client mid-boot must NOT turn the movie's black stage
   // white — only the FIRST (boot) movie's config applies.
-  const habbo = makeMovieCastZip('habbo', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
+  const main = makeMovieCastZip('main', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const placeholderMovie = {
@@ -255,12 +255,12 @@ test('linked cast placeholder movie config does not clobber the movie stage colo
   }, placeholderMovie);
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'fuse_client' ? fuse : null;
+      return name === 'main' ? main : name === 'fuse_client' ? fuse : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
   // Boot movie applied its real stage (720x540 black).
   assert.equal(e.stageBackground, 0x000000);
   assert.equal(e.stageWidth, 720);
@@ -277,7 +277,7 @@ test('linked cast with an all-zero stage rect does not clobber the movie stage g
   // boot movie's rect with those zeros — FUSE's window `center()` computes
   // `(the stageRight - the stageLeft) / 2` and a 0/0/0/0 rect moves the
   // Loading Bar window to negative coordinates (top-left / off-screen).
-  const habbo = makeMovieCastZip('habbo', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
+  const main = makeMovieCastZip('main', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const fuse = makeCastZip('fuse_client', [], {
@@ -285,12 +285,12 @@ test('linked cast with an all-zero stage rect does not clobber the movie stage g
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'fuse_client' ? fuse : null;
+      return name === 'main' ? main : name === 'fuse_client' ? fuse : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
   // Boot movie applied its real rect (89/50/809/590).
   assert.equal(e.stageLeft, 89);
   assert.equal(e.stageTop, 50);
@@ -313,7 +313,7 @@ test('linked cast with an all-zero stage rect does not clobber the movie stage g
 });
 
 test('loadCast auto-loads linked casts in order (Director cast links)', async () => {
-  const habbo = makeCastZip('habbo', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
+  const main = makeCastZip('main', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const fuse = makeCastZip('fuse_client', [], {
@@ -321,17 +321,17 @@ test('loadCast auto-loads linked casts in order (Director cast links)', async ()
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'fuse_client' ? fuse : null;
+      return name === 'main' ? main : name === 'fuse_client' ? fuse : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  const cast = await e.loadCast(loader, 'habbo');
+  const cast = await e.loadCast(loader, 'main');
   assert.ok(cast);
   assert.equal(e.casts.length, 2, 'linked cast must be loaded as castLib 2');
-  assert.equal(e.casts[0].name, 'habbo');
+  assert.equal(e.casts[0].name, 'main');
   assert.equal(e.casts[1].name, 'fuse_client');
-  assert.equal(cast.fileName, 'habbo.cst');
+  assert.equal(cast.fileName, 'main.cst');
   // castLib(2) resolves to fuse_client (used by prepareMovie's castLib(2).preloadMode)
   const cl2 = e.getCastLib(2);
   assert.ok(cl2);
@@ -396,7 +396,7 @@ test('engine palette reads accept PALB binary palettes from the bundle', async (
 });
 
 test('loadCast reads single-stream spark bundles (bundler buildSpark format)', async () => {
-  const habbo = makeSparkBundle('habbo', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
+  const main = makeSparkBundle('main', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
     '0002_script_Init.ls': '-- Cast member: Init\n-- Type: Score\non exitFrame me\n  if netDone() then startClient() else go(the frame)\nend\n',
   });
@@ -405,14 +405,14 @@ test('loadCast reads single-stream spark bundles (bundler buildSpark format)', a
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'fuse_client' ? fuse : null;
+      return name === 'main' ? main : name === 'fuse_client' ? fuse : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  const cast = await e.loadCast(loader, 'habbo');
+  const cast = await e.loadCast(loader, 'main');
   assert.ok(cast, 'spark bundle parses, manifest resolves');
-  assert.equal(cast.name, 'habbo');
+  assert.equal(cast.name, 'main');
   assert.equal(e.casts.length, 2, 'linked cast auto-loaded from its spark bundle');
   assert.equal(e.casts[1].name, 'fuse_client');
   // member payloads read out of the sliced spark body
@@ -439,7 +439,7 @@ test('loadCast reads single-stream spark bundles (bundler buildSpark format)', a
 });
 
 test('prepareMovie runs at boot, then startClient fires after netDone completes', async () => {
-  const habbo = makeCastZip('habbo', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
+  const main = makeCastZip('main', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
     '0001_script_Movie.ls': '-- Cast member: Movie\n-- Type: Movie Script\non prepareMovie\n  preloadNetThing(castLib(2).fileName)\nend\n',
     '0002_script_Init.ls': '-- Cast member: Init\n-- Type: Score\non exitFrame me\n  if netDone() then\n    startClient()\n  else\n    go(the frame)\n  end if\nend\n',
   });
@@ -448,12 +448,12 @@ test('prepareMovie runs at boot, then startClient fires after netDone completes'
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'fuse_client' ? fuse : null;
+      return name === 'main' ? main : name === 'fuse_client' ? fuse : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
   e.boot();
   // prepareMovie ran: the linked fuse_client cast is already local, so the
   // preload has nothing to download — it completes immediately. (The
@@ -515,7 +515,7 @@ test('member numbers are Director slot numbers — no castLib*1000 collisions (h
   assert.equal(e.getMemberProp(e.getMember(mesNum)!, 'castlibnum'), 2);
 });
 
-test('call() maps over object lists (Habbo convention)', () => {
+test('call() maps over object lists (corpus convention)', () => {
   const e = new DirectorEngine();
   e.addScriptMember(
     'Counter',
@@ -574,8 +574,8 @@ test('value() tolerates a stray trailing bracket (roomdimmer.props U158)', () =>
 });
 
 test('string * int follows Director coercion (empty string -> 123456789, not 0)', () => {
-  // DirPlayer multiply_datums (String, Int) parity: an EMPTY or non-numeric
-  // string times a non-zero int gives Director's arbitrary 123456789 — NOT 0.
+  // multiply(String, Int): an EMPTY or non-numeric string times a non-zero
+  // int gives Director's arbitrary 123456789 — NOT 0.
   // The corpus's Catalogue Handler gates deal detection with
   // `tdata.item.count >= 11 + tItemCount * 3`, where tItemCount is "" for a
   // plain item. With ""→0 the gate passed, an empty dealList was attached to
@@ -618,7 +618,7 @@ test('layout margin keys resolve despite dropmenu casing (dropmenu #marginh vs s
 });
 
 test('Lingo symbols fold case: equality, proplist keys, list search, object ids', () => {
-  // Director symbols are case-insensitive. The v31 client creates the hotel
+  // Director symbols are case-insensitive. The v31 client creates the network
   // connection under the id it reads from `connection.info.id` (= #info,
   // hh_shared variable index) while 15 corpus files look it up with the
   // literal #Info — `hh_room_utils/0071 Respect Manager Class` does
@@ -681,8 +681,8 @@ test('string chunks: char ranges, items, line counts', () => {
 });
 
 test('delete char <= -30000 deletes the LAST chunk (compiler sentinel — navigator breadcrumbs)', () => {
-  // DirPlayer vm_range_to_host: the Director compiler encodes "the last
-  // element" as chunk index -30000 (`delete the last char of t`), and the
+  // The Director compiler encodes "the last element" as chunk index -30000
+  // (`delete the last char of t`), and the
   // corpus ships `delete char -30003 of tText` in the navigator's
   // createNaviHistory/renderRoomList to strip the trailing RETURN the build
   // loops leave behind. A no-op left the phantom line: the breadcrumb tabs
@@ -709,7 +709,7 @@ test('delete char <= -30000 deletes the LAST chunk (compiler sentinel — naviga
   };
   // The navigator's tText is RETURN-joined with a trailing RETURN.
   assert.equal(call('trimLast', 'hotelview\rPublic\rGames\r'), 'hotelview\rPublic\rGames');
-  // Sentinel read: `char -30000 of t` = last char (DirPlayer parity).
+  // Sentinel read: `char -30000 of t` = last char (Director parity).
   assert.equal(e.interp.evalExpressionString('"abc".char[-30000]'), 'c');
   // Ordinary negative indexes still count from the end.
   assert.equal(e.interp.evalExpressionString('"abc".char[-1]'), 'c');
@@ -933,11 +933,11 @@ test('line chunk access does not go through String.split(regexp) (the 1.1s navig
 });
 
 test('word chunks split on ASCII control chars (wallet frame "59.0\x02")', () => {
-  // Kepler's CREDIT_BALANCE is header 6 + "59.0" + the v14 string terminator
+  // The CREDIT_BALANCE frame is header 6 + "59.0" + the v14 string terminator
   // char(2) + the message terminator char(1). The corpus Purse Handler does
   // `integer(getLocalFloat(tMsg.content.word[1]))` on the RAW params, so the
-  // word chunk must treat char(2)/control chars as delimiters (dirplayer
-  // is_director_whitespace parity) — otherwise word[1] = "59.0\x02" and
+  // word chunk must treat char(2)/control chars as delimiters (Director's
+  // whitespace set) — otherwise word[1] = "59.0\x02" and
   // Number() yields NaN -> credits stuck at 0.
   const e = new DirectorEngine();
   assert.equal(e.interp.evalExpressionString('"59.0" & numToChar(2) & numToChar(1)'), '59.0\x02\x01');
@@ -1085,7 +1085,7 @@ test('the lastChannel defaults to the v14 client movie\'s 1006 sprite channels',
   // Without a movie.txt `channels` field the runtime must NOT fall back to
   // Director's default 150/120 — the FUSE Sprite Manager pools `the
   // lastChannel` channels and v14 windows exhaust 120 in a few opens ("Out
-  // of free sprite channels!"). DirPlayer reads 1006 from the score chunk.
+  // of free sprite channels!"). The score chunk declares 1006.
   const e = new DirectorEngine();
   assert.equal(e.getThe('lastchannel', []), 1006);
 });
@@ -1219,9 +1219,9 @@ test('value(): bare comma-separated literal lists parse to a linear list (U92 av
   const e = new DirectorEngine();
   // Registration Handler handle_availablesets: `tSets = value(tMsg.content)`
   // where content is "1,2,3,4,...". Director parses bare comma-separated
-  // literals as a list (dirplayer parses value() strings as full Lingo
-  // expressions; LibreShockwave parseListOrPropList splits on top-level
-  // commas), so listp(tSets) passes and Figure_System builds the selectable
+  // literals as a list (value() parses its string as full Lingo expressions
+  // and splits a bare comma-separated list on top-level commas), so
+  // listp(tSets) passes and Figure_System builds the selectable
   // part list. It used to survive as the raw string -> listp() false -> []
   // -> count < 2 -> VOID -> getCountOfPart = 0 -> random(0) = VOID
   // ("Can't get the model of part becouse tOrderNum ... is VOID") and the
@@ -1298,7 +1298,7 @@ test('me.prop access walks the #ancestor chain (FUSE manager inheritance)', () =
   );
   const script = e.resolveScript('Text Manager Class')!;
   const obj = e.interp.newInstance(script, []);
-  // Habbo calls construct() explicitly after new() (Director never auto-runs
+  // The corpus calls construct() explicitly after new() (Director never auto-runs
   // construct in newInstance), so mirror that here.
   e.interp.callObjectHandler(obj, 'construct', []);
   // me.pItemList resolves through the ancestor chain.
@@ -1355,18 +1355,18 @@ test('handler in an ancestor reads its OWN property slot when a child shadows th
   const script = e.resolveScript('Queue Public Class')!;
   const obj = e.interp.newInstance(script, []);
   // solveMembers is defined in Active Object Class and dispatched up the
-  // #ancestor chain. DirPlayer's bytecode getprop resolves BARE identifiers
-  // on the handler's OWNING instance in the chain (find_handler_level_instance)
-  // — so pAnimFrame must read 0 from Active Object's slot, not the child's
+  // #ancestor chain. A bytecode getprop resolves BARE identifiers on the
+  // handler's OWNING instance in the chain — so pAnimFrame must read 0 from
+  // Active Object's slot, not the child's
   // never-assigned slot. The child's declared-but-VOID slot would make the
   // member name end in a bare `_` and fail to resolve, exactly the park's
   // 'Couldn't define members: queue_tile2'.
   const name = e.interp.callObjectHandler(obj, 'solveMembers', ['s_queue_tile2']);
   assert.equal(name, 'queue_tile2_0/');
-  // The explicit `me.prop` path (DirPlayer get_obj_prop) resolves on the
-  // OBJECT itself: the child shadows the name, so me.pAnimFrame reads the
+  // The explicit `me.prop` path resolves on the OBJECT itself: the child
+  // shadows the name, so me.pAnimFrame reads the
   // child's declared-but-never-assigned slot (VOID) — the string concat above
-  // proves bare and me. disagree exactly like DirPlayer.
+  // proves bare and me. disagree — they resolve on different instances.
   // Sanity: a handler defined in the CHILD reads the child's own slot for the
   // shadowed name (the handler-level instance is the child itself).
   assert.equal(e.interp.callObjectHandler(obj, 'childRead', []), VOID);
@@ -1392,7 +1392,7 @@ test('dynamic cast slot wipes members immediately on rename-to-empty', async () 
   // window — the next room's window builds referenced them mid-load and the
   // refill yanked them out from under those objects (DEPTH 25 window-recursion
   // loop + dead UI after a couple of room switches).
-  const habbo = makeMovieCastZip('habbo', [], {
+  const main = makeMovieCastZip('main', [], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const priv = makeCastZip('hh_room_private', [], {
@@ -1404,12 +1404,12 @@ test('dynamic cast slot wipes members immediately on rename-to-empty', async () 
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'hh_room_private' ? priv : name === 'hh_room_nlobby' ? nlb : null;
+      return name === 'main' ? main : name === 'hh_room_private' ? priv : name === 'hh_room_nlobby' ? nlb : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
   const slot = e.castByName.get('empty 1')!; // 'empty 1' shell from casts.txt
   const slotRef = e.getCastLib(4)!;
   assert.equal(slot.members.size, 0);
@@ -1447,7 +1447,7 @@ test('re-import into a new dynamic slot purges the superseded holder; stale numb
   // or name-based member lookups resolve against the previous room's members,
   // and stale (slot<<16)|member numbers from pAllMemNumList must re-resolve
   // to the CURRENT holder of the cast (script(720979) -> unknown script).
-  const habbo = makeMovieCastZip('habbo', [], {
+  const main = makeMovieCastZip('main', [], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const priv = makeCastZip('hh_room_private', [], {
@@ -1455,12 +1455,12 @@ test('re-import into a new dynamic slot purges the superseded holder; stale numb
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'hh_room_private' ? priv : null;
+      return name === 'main' ? main : name === 'hh_room_private' ? priv : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
   const slotA = e.castByName.get('empty 1')!; // castLib 4
   const slotB = e.castByName.get('empty 2')!; // castLib 5
   const refA = e.getCastLib(4)!;
@@ -1501,7 +1501,7 @@ test('clearCastMembers unregisters the cast from the corpus Resource Manager (no
   // numbers resolve through membersByGlobal to the new occupant's member (the
   // wrong-sprites corruption: a sound machine GUI member appearing on
   // furniture shadows after window churn).
-  const habbo = makeMovieCastZip('habbo', [], {
+  const main = makeMovieCastZip('main', [], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const privManifest = {
@@ -1526,12 +1526,12 @@ test('clearCastMembers unregisters the cast from the corpus Resource Manager (no
   const priv = zipSync(privEntries, { level: 6 });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'hh_room_private' ? priv : null;
+      return name === 'main' ? main : name === 'hh_room_private' ? priv : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
 
   // Corpus-style Resource Manager (fuse_client 0029) with the real cache
   // handlers: preIndexMembers populates pAllMemNumList, unregisterMembers
@@ -1618,7 +1618,7 @@ test('stale sprite castNum/member re-resolves to the current holder of the cast 
   // same re-resolution getMember()/resolveScriptByNumber() use — so a cleared
   // slot's number lands on the CURRENT holder of the cast instead of going
   // invisible or hitting a reused slot's unrelated member.
-  const habbo = makeMovieCastZip('habbo', [], {
+  const main = makeMovieCastZip('main', [], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const priv = makeCastZip('hh_room_private', [], {
@@ -1626,12 +1626,12 @@ test('stale sprite castNum/member re-resolves to the current holder of the cast 
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'hh_room_private' ? priv : null;
+      return name === 'main' ? main : name === 'hh_room_private' ? priv : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
   const refA = e.getCastLib(4)!;
   const refB = e.getCastLib(5)!;
 
@@ -1699,9 +1699,8 @@ test('proplists keep DUPLICATE keys in order (NAVIGATE [#integer: 0, #integer: 3
   // (`repeat with i = 1 to tParmArr.count: tParmArr.getPropAt(i); tParmArr[i]`).
   // A Map-backed LPropList collapsed the three #integer entries into one
   // (last-write-wins), so count was 1 and the frame carried a single param —
-  // kepler read hideFull=1, categoryId=<empty> and silently dropped NAVIGATE.
-  // Real Lingo proplists (dirplayer PropList(VecDeque<PropListPair>),
-  // LibreShockwave properties_ vector) are ordered pair lists.
+  // The peer read hideFull=1, categoryId=<empty> and silently dropped NAVIGATE.
+  // Real Lingo proplists are ORDERED pair lists, not unordered maps.
   const e = new DirectorEngine();
   e.addScriptMember(
     'NavP',
@@ -1896,8 +1895,8 @@ test('method call on VOID is a silent no-op returning VOID (Download Manager upd
   // iterates a proplist whose count was captured BEFORE the loop, but a task
   // completing mid-loop deleteAt()s itself and shifts the list — a later
   // index reads VOID, so `tTask.getProperty(#url)` runs on VOID. Real
-  // Director / LibreShockwave dispatchObjectMethod: a method call on VOID is
-  // a SILENT no-op returning VOID (no diagnostic).
+  // Director method dispatch: a method call on VOID is a SILENT no-op
+  // returning VOID (no diagnostic).
   const e = new DirectorEngine();
   e.addScriptMember(
     'VoidCall',
@@ -2096,18 +2095,18 @@ test('externalParamValue: sw params by name and index (Core_Thread sw1..sw9)', (
   const e = new DirectorEngine();
   e.setExternalParams({
     sw1: 'external.variables.txt=/external_variables.txt',
-    sw2: 'host=habbo.example',
+    sw2: 'host=example.test',
   });
   assert.equal(e.externalParamValue('sw1'), 'external.variables.txt=/external_variables.txt');
   assert.equal(e.externalParamValue(1), 'external.variables.txt=/external_variables.txt');
-  assert.equal(e.externalParamValue(2), 'host=habbo.example');
-  assert.equal(e.externalParamValue('SW2'), 'host=habbo.example', 'name lookup is case-insensitive');
+  assert.equal(e.externalParamValue(2), 'host=example.test');
+  assert.equal(e.externalParamValue('SW2'), 'host=example.test', 'name lookup is case-insensitive');
   assert.equal(e.externalParamValue('missing'), VOID);
   assert.equal(e.externalParamValue(99), VOID);
   assert.equal(e.externalParamCount(), 2);
   assert.equal(e.externalParamName(1), 'sw1');
   // Reachable from Lingo, which is how Core_Thread reads sw1..sw9.
-  assert.equal(e.interp.evalExpressionString('externalParamValue("sw2")'), 'host=habbo.example');
+  assert.equal(e.interp.evalExpressionString('externalParamValue("sw2")'), 'host=example.test');
   assert.equal(e.interp.evalExpressionString('externalParamCount()'), 2);
 });
 
@@ -2152,19 +2151,18 @@ test('& concatenation coerces VOID to empty (Window Instance CreateElement tClas
   );
   const s = e.resolveScript('T')!;
   const run = s.handlers.find((h) => h.name.toLowerCase() === 'run')!;
-  // string(void) is EMPTY too (C++ StringBuiltins::string -> toStringLikeJava
-  // maps Void -> "", DirPlayer string.rs same) — the Connection Instance
+  // string(void) is EMPTY too (a Void datum maps to "") — the Connection
+  // Instance
   // `send` relies on it to emit empty bodies for commands with no payload
-  // (U80: kepler was receiving the literal 'VOID' in GETUSERFLATCATS /
+  // (U80: the peer was receiving the literal 'VOID' in GETUSERFLATCATS /
   // MESSENGER_GETREQUESTS).
   assert.equal(e.interp.callHandler(s, run, [], null, new Set()), 'window.image.class/ab/component.class/');
 });
 
 test('EMPTY is the empty string: string(EMPTY) blank, string(VOID) too (U50 + U80)', () => {
   // Director's EMPTY constant IS the empty string: `put EMPTY` prints blank,
-  // `string(EMPTY)` = "", `EMPTY = ""` is true. LibreShockwave Datum::
-  // stringValue maps Null -> "" and StringBuiltins::string ->
-  // toStringLikeJava maps Void -> "" as well (DirPlayer string.rs:
+  // `string(EMPTY)` = "", `EMPTY = ""` is true. A Null datum maps to "" and
+  // string() maps Void to "" as well (
   // `Datum::Void => Datum::String("".to_string())`), so string(VOID) is also
   // the empty string. FUSE stores `pLastContent = EMPTY` / `tStr = EMPTY` and
   // &s them into packet strings; toLingoString used to print the literal
@@ -2206,7 +2204,7 @@ test('rect(point, point) is the two-point Director form (avatar pLocFix offset)'
   // where tLocFix = pLocFix = point(-1, 2) (Human Class 0002:273). Director's
   // rect() takes two points = rect(p1.x, p1.y, p2.x, p2.y); asNum(point) = 0
   // zeroed it, so the (-1, 2) offset vanished and the avatar rendered 1px
-  // right / 2px up vs DirPlayer.
+  // right / 2px up.
   const e = new DirectorEngine();
   const ev = (s: string) => e.interp.evalExpressionString(s);
   const rc = (s: string) => {
@@ -2219,8 +2217,8 @@ test('rect(point, point) is the two-point Director form (avatar pLocFix offset)'
   // 4-number form and rect+rect addition are untouched.
   assert.equal(rc('rect(1, 2, 3, 4)'), '1,2,3,4');
   assert.equal(rc('rect(1, 2, 3, 4) + rect(-1, 2, -1, 2)'), '0,4,2,6');
-  // Director rect +/− point offsets each side by the point (DirPlayer
-  // add/subtract_datums Rect+Point cases).
+  // Director rect +/− point offsets each side by the point (the Rect+Point
+  // arithmetic cases).
   assert.equal(rc('rect(1, 2, 3, 4) + point(-1, 2)'), '0,4,2,6');
   assert.equal(rc('rect(1, 2, 3, 4) - point(-1, 2)'), '2,0,4,2');
 });
@@ -2229,8 +2227,8 @@ test('unary minus negates points/rects/lists element-wise (Bodypart getLocation)
   // Bodypart_Class_EX 0003:344 `return -tRegPoint + tCntrPoint` — the head
   // part's offset feeding the Select Arrow's position above the avatar.
   // asNum(point)=0 dropped the regPoint (e.g. point(-20, 74)), so the arrow
-  // hovered at head level instead of above it (DirPlayer inv parity:
-  // arithmetics.rs negates Datum::Point element-wise).
+  // hovered at head level instead of above it (an inverse transform negates
+  // the point element-wise).
   const e = new DirectorEngine();
   const ev = (s: string) => e.interp.evalExpressionString(s);
   const pt = (s: string) => {
@@ -2249,10 +2247,10 @@ test('unary minus negates points/rects/lists element-wise (Bodypart getLocation)
   assert.equal(ev('-VOID'), 0);
 });
 
-test('division/modulo coerce 0 and VOID divisors like DirPlayer (no NaN poisoning)', () => {
-  // DirPlayer divide_datums: a VOID operand gives 0 (a VOID DIVISOR is matched
+test('division/modulo coerce 0 and VOID divisors (no NaN poisoning)', () => {
+  // divide: a VOID operand gives 0 (a VOID DIVISOR is matched
   // BEFORE the int/int case, so x/VOID = 0, not x/1); a numeric divisor 0 is
-  // coerced to 1 (ScummVM LC::divData) — JS would yield Infinity/NaN and
+  // coerced to 1 — JS would yield Infinity/NaN and
   // poison downstream math (geometry factors are 0.0 before a room defines
   // them). mod_handler: zero divisor → 0, VOID → 0, lists mod element-wise
   // (Petpart `1 mod me.pAnimCounter` with a 0 counter must read 0).
@@ -2273,12 +2271,12 @@ test('division/modulo coerce 0 and VOID divisors like DirPlayer (no NaN poisonin
   assert.deepEqual(lm.items, [1, 1, 1]);
 });
 
-test('min/max unwrap a single list arg; sqrt/power keep float typing (DirPlayer)', () => {
-  // DirPlayer min/max (types.rs): one LIST arg is unwrapped element-wise — Room
+test('min/max unwrap a single list arg; sqrt/power keep float typing', () => {
+  // min/max: one LIST arg is unwrapped element-wise — Room
   // Component 0011:341 `tRemoveCount = min([tRemoveCountMax, tActiveObjCount])`
   // and Visualizer Part Wrapper 0079:304 `min(tLocs[#X1])`; without the unwrap
-  // asNum(list) = 0 collapsed the result. sqrt is always Float in DirPlayer
-  // (int.rs:46) and power is Float when either operand is — the mark makes
+  // asNum(list) = 0 collapsed the result. sqrt always returns a Float and
+  // power is a Float when either operand is — the mark makes
   // `sqrt(4) / 2` a float division instead of int-truncated (CIterateSeed's
   // `n / power(2, s)` wire-seed math depends on the division typing).
   const e = new DirectorEngine();
@@ -2296,7 +2294,7 @@ test('min/max unwrap a single list arg; sqrt/power keep float typing (DirPlayer)
   assert.equal(ev('sqrt(4) / 0'), 2); // float-marked: 2.0/1 float path
   assert.equal(ev('power(2, 3)'), 8);
   assert.equal(ev('power(2.0, 3) / 2'), 4);
-  // `the maxInteger` = i32::MAX (DirPlayer movie.rs:307) — Gamesystem
+  // `the maxInteger` = 2147483647 — Gamesystem
   // CIterateSeed 0025:52 does `float(the maxinteger) * 2 + 2 + n` (the wire
   // seed PRNG) and String Services explode (0036:116) bounds on it.
   assert.equal(ev('the maxInteger'), 2147483647);
@@ -2329,8 +2327,8 @@ test('list + list / list - list are element-wise (Window Instance pClientRect bo
 
 test('integer(spriteRef) coerces to the channel (Visualizer Part Wrapper setSprite)', () => {
   // 0079 setSprite: `pSprite = sprite(integer(tSpr))` where tSpr is the sprite
-  // ref from createWrapper's `sprite(reserveSprite(...))`. DirPlayer to_number
-  // parity: sprite refs -> channel, member refs -> member number. Before this,
+  // ref from createWrapper's `sprite(reserveSprite(...))`. Coercion rules:
+  // sprite refs -> channel, member refs -> member number. Before this,
   // integer() returned 0 and the wrapper wrote member/ink/bgColor to channel 0
   // (setSpriteProp early-returns there) — private-room walls/floors never
   // rendered. Direct sprite(5).spriteNum is 5 already; the regression is the
@@ -2474,7 +2472,7 @@ test('dynamic download fills the corpus-tracked path-named shell; release clears
   // corpus later releases the shell (rename-to-empty), so an appended slot
   // would leak its members forever and name lookups would keep resolving to
   // stale art ("loaded into a slot but only replaces a few [images]").
-  const habbo = makeMovieCastZip('habbo', [], {
+  const main = makeMovieCastZip('main', [], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const sm = makeCastZip('hh_furni_xx_sound_machine', [], {
@@ -2483,12 +2481,12 @@ test('dynamic download fills the corpus-tracked path-named shell; release clears
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'hh_furni_xx_sound_machine' ? sm : null;
+      return name === 'main' ? main : name === 'hh_furni_xx_sound_machine' ? sm : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
   const shells = e.casts.length; // Internal, fuse_client, bin, empty 1, empty 2
   const shellRef = e.getCastLib(4)!; // empty 1
 
@@ -2523,7 +2521,7 @@ test('re-import supersedes a stale bare-name holder so lookups resolve to the fr
   // DIFFERENT shell via the file-path name; the rename-time purge (exact name
   // match) misses the bare-named holder, so registerCast must supersede it —
   // otherwise name lookups keep hitting the old slot's members.
-  const habbo = makeMovieCastZip('habbo', [], {
+  const main = makeMovieCastZip('main', [], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const sm = makeCastZip('hh_furni_xx_sound_machine', [], {
@@ -2532,12 +2530,12 @@ test('re-import supersedes a stale bare-name holder so lookups resolve to the fr
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'hh_furni_xx_sound_machine' ? sm : null;
+      return name === 'main' ? main : name === 'hh_furni_xx_sound_machine' ? sm : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
 
   // Leak seed: import into slot 5 with the BARE name (bundle present -> the
   // rename-time fill registers it under manifest.name).
@@ -2694,8 +2692,8 @@ test('delete char N of / char A to B of forms (negative index clamps)', () => {
 
 test('negative char chunk indexes count from the end; -30000 sentinel = LAST chunk; other out-of-range-low is EMPTY (navigator)', () => {
   // The navigator room list does `delete char -30003 of tNameTxt` (its idiom
-  // for dropping the trailing RETURN). DirPlayer vm_range_to_host: the
-  // Director compiler encodes "the last element" as chunk index <= -30000
+  // for dropping the trailing RETURN). The Director compiler encodes "the
+  // last element" as chunk index <= -30000
   // (`delete the last char of t` compiles to `delete char -30000 of t`), so
   // -30003 deletes the LAST char — keeping the W and dropping the RETURN.
   // Other out-of-range-low indexes (e.g. -1 on a 1-char string) stay EMPTY /
@@ -2744,8 +2742,8 @@ test('rasterizeTextMember: boxType-unset Writer members are content-tight (purse
   // The purse checkSaldo renders through a Writer whose scratch member
   // (`createMember("writer_" & getUniqueID(), #text)`) never gets boxType —
   // every other runtime text creator (Text Wrapper, Field Wrapper, Common
-  // Button, balloons, tooltips) sets it explicitly. LibreShockwave renders
-  // boxType-0 (adjust) text CONTENT-TIGHT (renderTextMemberImage: width =
+  // Button, balloons, tooltips) sets it explicitly. boxType-0 (adjust) text
+  // renders CONTENT-TIGHT (width =
   // max(rectW, measured), height = 0 -> content lines), so `the image of`
   // the writer member is ~50x27 for "430" — NOT the auto-size rect height
   // (480 from pDefRect) — and checkSaldo's centering
@@ -2776,7 +2774,7 @@ test('rasterizeTextMember: boxType-unset Writer members are content-tight (purse
     const tight = rasterizeTextMember(m);
     assert.ok(tight);
     // Content-tight: width stays >= the rect 50. Height follows the
-    // LibreShockwave line-box model: the first line box starts at
+    // The line-box model: the first line box starts at
     // topSpacing + 1 = 4 and holds 1 line of (fixedLineSpace 21 + topSpacing
     // 3) = 24, so the box is 28 (the glyph cell overhang leaves the
     // first-line box 4 + 24 = 28 — not 480).
@@ -2905,9 +2903,9 @@ test('member.height: non-wrapping #adjust (boxType-unset) text members report CO
   // re-sizes it as `rect(0, 0, tWidth, pMember.height)`; fakeAlphaRender then
   // builds `image(pMember.width, pMember.height, 8)`. If member.height still
   // reports 480 the mask/tOut are 480 tall and the centering math shoves the
-  // glyphs ~230px off the top — the labels never appear. DirPlayer
-  // auto-sizes a NON-WRAPPING #adjust member to its content (text.rs
-  // box_height; the v7 Habbo Purse checkSaldo case); word-wrapping #adjust
+  // glyphs ~230px off the top — the labels never appear. A NON-WRAPPING
+  // #adjust member auto-sizes to its content (the purse's checkSaldo case);
+  // word-wrapping #adjust
   // members keep their set box (roomlist/ToS bakes rely on it).
   const { document } = globalThis as { document?: unknown };
   const ctxMock = {
@@ -2976,7 +2974,7 @@ test('member.height: non-wrapping #adjust (boxType-unset) text members report CO
     e.setMemberProp(ref4, 'fixedlinespace', 9);
     e.setMemberProp(ref4, 'topspacing', 1);
     e.setMemberProp(ref4, 'wordwrap', 1); // pWriterPlainNormWrap has wordWrap=1
-    e.setMemberProp(ref4, 'text', 'These are habbo public rooms like you');
+    e.setMemberProp(ref4, 'text', 'These are local public rooms like you');
     const h4 = asNum(e.getMemberProp(ref4, 'height'));
     assert.ok(h4 > 0 && h4 < 100, `wordWrap=1 #adjust height ${h4}, not0 or480`);
     assert.equal(h4, 11, 'content height for wordWrap=1 #adjust with Volter 9px');
@@ -3107,8 +3105,8 @@ test('a stale #adjust box is repaired on every raster read, so Writer masks copy
 test('rasterizeTextMember: fixed-line members bottom-sit glyphs in the line box (U143 dropdown text)', () => {
   // The DropDown class sets tTextMember.fixedLineSpace = pLineHeight (the
   // window-def row height, e.g. 18) with NO topSpacing. Em-box centering
-  // ((lineH - fontSize) / 2) rode the glyphs high in the bar; LibreShockwave
-  // renderWithBitmapFont bottom-sits each line's glyph cell — the extra line
+  // ((lineH - fontSize) / 2) rode the glyphs high in the bar; the bitmap font
+  // renderer bottom-sits each line's glyph cell — the extra line
   // height (lineH - fontLineHeight) goes ABOVE the glyphs. Volter 9px
   // measures fontBoundingBox ascent 8 + descent 2 = 10, so the glyphs start
   // at 18 - 10 = 8 (not 5) and the content box is exactly one 18px line (not
@@ -3340,7 +3338,7 @@ test('the <prop> of <object> reads an instance property (Manager Template exists
 });
 
 test('window-title #txtColor/#txtBgColor fall back to #color/#bgColor when absent (U83)', () => {
-  // All window title elements (habbo_basic window_title #EEEEEE on #6794A7,
+  // All window title elements (a window_title #EEEEEE on #6794A7,
   // messenger #996600 on #FFCB00, purse_header #663300 on #FFCA42) author
   // their text colors as #color/#bgColor; the corpus Layout Parser only maps
   // those to #txtColor/#txtBgColor for old version-less defs, so the Text
@@ -3380,8 +3378,8 @@ test('proplist getOne returns the key (raw) and 0 when missing; findPos returns 
 test('proplist getPos matches the VALUE 1-based and getPropAt returns the key (String Services convertSpecialChars reverse)', () => {
   // FUSE String Services 0036: pConvList maps chars -> replacements; the
   // reverse direction does `tPos = pConvList.getPos(tChar); ...
-  // pConvList.getPropAt(tPos)` — DirPlayer getPos finds the pair whose VALUE
-  // equals tChar, getPropAt returns the KEY at that position. Before U78 the
+  // pConvList.getPropAt(tPos)` — getPos finds the pair whose VALUE equals
+  // tChar, getPropAt returns the KEY at that position. Before U78 the
   // warn 'propList method getPos not implemented' fired on every figure-creator
   // page leave (getMyDataFromFields -> convertSpecialChars).
   const e = new DirectorEngine();
@@ -3446,7 +3444,7 @@ test('VOID = 0 is true and VOID <> 0 is false (showHotel getSprById loop)', () =
   // Entry Interface showHotel: `tSpr = tVisObj.getSprById(tAnimationType[1] & j)`
   // then `if tSpr <> 0 then ... else exit repeat`. getSprById returns a proplist
   // miss (VOID) once the id runs out — Director coerces VOID to 0 in numeric
-  // equality (LibreShockwave lingoEquals), so `VOID <> 0` is FALSE and the
+  // equality (Director coerces VOID to 0), so `VOID <> 0` is FALSE and the
   // repeat-while-1 loop exits. Our lingoEquals compared null === 0 -> false, so
   // `<>` stayed true and the loop spun 2M iterations creating objects forever.
   const e = new DirectorEngine();
@@ -3579,8 +3577,7 @@ test('rgb()/color() return #color objects; ilk(x, #color) gates pass', () => {
   );
   const script = e.resolveScript('RGB')!;
   const run = script.handlers.find((h) => h.name.toLowerCase() === 'run')!;
-  // string(#color) drops the # (C++ toStringLikeJava / DirPlayer string.rs:
-  // symbols stringify to their bare name).
+  // string(#color) drops the # (symbols stringify to their bare name).
   assert.equal(e.interp.callHandler(script, run, [], null, new Set()), 'color:111:128,64,32:1');
 });
 
@@ -3727,8 +3724,8 @@ test('image.useAlpha + setAlpha: flat level and 8-bit mask with matte polarity (
   // fuse_client Writer Class fakeAlphaRender (0068): builds an 8-bit matte of
   // the text (black glyphs on the white palette-0 fill), composites the color
   // into a 32-bit out, then `tOut.useAlpha = 1` + `tOut.setAlpha(tFakeAlpha)`.
-  // LibreShockwave imageSetAlpha: 32-bit only; a level arg sets a flat 0-255
-  // alpha; an 8-bit same-sized image arg writes its LUMA into the alpha
+  // imageSetAlpha: 32-bit only; a level arg sets a flat 0-255 alpha; an
+  // 8-bit same-sized image arg writes its LUMA into the alpha
   // channel (255-luma when matte polarity: transparent px, or a mostly-white
   // edge + dark interior, or white corners + dark px) and sets useAlpha.
   const e = new DirectorEngine();
@@ -3857,7 +3854,7 @@ test('image.paletteRef remaps 8-bit pixels through the target palette (U67 messe
   assert.deepEqual([px[4], px[5], px[6]], [50, 50, 50], 'index 50 remaps by INDEX: src[50] grey -> target[50] grey-50');
   assert.deepEqual((out as LImage).palette![100], [197, 157, 0], 'palette swapped so matte keys off the new background');
   // resolvePaletteTable: space-form string resolves, #grayscale is the Mac
-  // system grey ramp (index 0 = white, like DirPlayer + every .pal sidecar
+  // system grey ramp (index 0 = white, like every .pal sidecar
   // that ships with #grayscale art — the PC index-0-black order inverted
   // button/arrow art through the paletteRef remap), unresolvable names and
   // non-palette values return null.
@@ -4302,6 +4299,11 @@ test('member image painted via copyPixels flips plain bitmap channel to live sur
   const vis = last[last.length - 1];
   assert.ok(vis.image instanceof LImage, 'visual must carry the member painted surface');
   assert.equal((vis.image as LImage).data![1], 255, 'green pixel survives into the surface');
+  // The decoded palette indices stop describing the surface on the first write,
+  // so index-based key rules must stop reading them (see LImage.indicesStale —
+  // hh_entry_jp's scroller paints `screen3d` every frame).
+  assert.equal((a.mem.image as LImage).indicesStale, true, 'painting marks the decoded indices stale');
+  assert.equal((b.mem.image as LImage).indicesStale, true, 'painting marks the decoded indices stale');
 });
 
 test('value() parses real v14 struct strings with "# key" spacing', () => {
@@ -4388,8 +4390,8 @@ test('ilk property works on every value (Director)', () => {
   e.addScriptMember('T', 'movie', ['on run', '  tid = #foo', '  return string(tid.ilk)', 'end'].join('\n'));
   const s = e.resolveScript('T')!;
   const run = s.handlers.find((h) => h.name.toLowerCase() === 'run')!;
-  // string(#symbol) = "symbol" without the # (C++ toStringLikeJava /
-  // DirPlayer string.rs).
+  // string(#symbol) = "symbol" without the # (a symbol stringifies to its
+  // bare name).
   assert.equal(e.interp.callHandler(s, run, [], null, new Set()), 'symbol');
 });
 
@@ -4534,10 +4536,9 @@ test('sprite.color accepts rgb() LColor + hex strings (Visualizer buildVisual)',
 });
 
 test('sprite.backColor palette index resolves via the member bitmap palette (Entry Car)', () => {
-  // Entry Car Class: ink=41 + backColor=random(150)+20. DirPlayer keeps the
-  // number as a palette INDEX and resolves it against the sprite member's OWN
-  // bitmap palette at render time (sprite.rs ColorRef + bitmap.rs
-  // resolve_color_ref via src.palette_ref) — never the movie palette.
+  // Entry Car Class: ink=41 + backColor=random(150)+20. The number is kept as a
+  // palette INDEX and resolved against the sprite member's OWN bitmap palette
+  // at render time — never the movie palette.
   const e = new DirectorEngine();
   const bm = e.addScriptMember('car2', 'unknown', '');
   bm.kind = 'bitmap';
@@ -5064,7 +5065,7 @@ test('xmlparser Xtra parses FUSE partSet/action XML (figure data path)', () => {
   assert.equal(out, '0|Mismatched closing tag: partSets');
 });
 
-/** MUS binary frame helpers (kepler MusNetworkEncoder layout): 0x7200 header
+/** MUS binary frame helpers: 0x7200 header
  *  + u32 length + payload {i32 errorCode, i32 timestamp, even-padded subject,
  *  even-padded sender, u32 receiver count + receivers, u16 content tag, even-
  *  padded content string}. */
@@ -5091,19 +5092,18 @@ function musFrameBytes(subject: string, contentStr: string): Uint8Array {
   return new Uint8Array(frame);
 }
 /**
- * Quackster/Havana's MUS decoder, transcribed (MusNetworkDecoder.decode +
- * MusUtil.readEvenPaddedString/readPropList). This is the server the client
- * really talks to, so the frames the runtime SENDS have to survive it — bodies
+ * An independent MUS decoder, written from the wire format alone (tag + body,
+ * even-padded strings, proplists). The frames the runtime SENDS have to survive
+ * a reader that shares no code with it — bodies
  * are big-endian, strings are u32 length + bytes + even padding, and a PropList
  * body is `count` + `[u16 Symbol, key, u16 valueType, value]` where the value
  * type tag appears ONCE per entry. A body that repeats the container's own type
  * tag desynchronises every following field.
  *
- * Throws if the body is not exactly consumed, which is what the emulator turns
- * into `IndexOutOfBoundsException: readerIndex(n) + length(m) exceeds
- * writerIndex`.
+ * Throws if the body is not exactly consumed, which is how a desynchronised
+ * frame shows up on the receiving side (a read past the end of the buffer).
  */
-function havanaMusDecode(frame: Uint8Array): {
+function musFrameDecode(frame: Uint8Array): {
   subject: string;
   receivers: string[];
   contentType: number;
@@ -5158,29 +5158,29 @@ function havanaMusDecode(frame: Uint8Array): {
   return { subject, receivers, contentType, propList, contentString };
 }
 
-/** Havana's MusUtil.writeEvenPaddedString / writeMedia, for building the frames
- *  the server sends back (big-endian, even padded). */
-function havanaMusString(s: string): Uint8Array {
+/** Even-padded, big-endian MUS string/media writer, for building the frames the
+ *  peer sends back. */
+function musString(s: string): Uint8Array {
   const bytes = new Uint8Array(s.length);
   for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i) & 0xff;
-  return havanaMusPadded(havanaMusConcat([havanaMusU32(bytes.length), bytes]));
+  return musPadded(musConcat([musU32(bytes.length), bytes]));
 }
-function havanaMusU32(n: number): Uint8Array {
+function musU32(n: number): Uint8Array {
   const o = new Uint8Array(4);
   new DataView(o.buffer).setUint32(0, n >>> 0);
   return o;
 }
-function havanaMusI32(n: number): Uint8Array {
+function musI32(n: number): Uint8Array {
   const o = new Uint8Array(4);
   new DataView(o.buffer).setInt32(0, n | 0);
   return o;
 }
-function havanaMusU16(n: number): Uint8Array {
+function musU16(n: number): Uint8Array {
   const o = new Uint8Array(2);
   new DataView(o.buffer).setUint16(0, n);
   return o;
 }
-function havanaMusConcat(parts: Uint8Array[]): Uint8Array {
+function musConcat(parts: Uint8Array[]): Uint8Array {
   let len = 0;
   for (const p of parts) len += p.length;
   const out = new Uint8Array(len);
@@ -5191,8 +5191,8 @@ function havanaMusConcat(parts: Uint8Array[]): Uint8Array {
   }
   return out;
 }
-function havanaMusPadded(bytes: Uint8Array): Uint8Array {
-  return bytes.length % 2 ? havanaMusConcat([bytes, new Uint8Array([0])]) : bytes;
+function musPadded(bytes: Uint8Array): Uint8Array {
+  return bytes.length % 2 ? musConcat([bytes, new Uint8Array([0])]) : bytes;
 }
 
 /**
@@ -5200,17 +5200,17 @@ function havanaMusPadded(bytes: Uint8Array): Uint8Array {
  * (MusConnectionHandler: subject BINARYDATA, PropList of image(Media) + time
  * (String) + cs(Integer)).
  */
-function havanaMusPhotoReply(image: Uint8Array, time: string, cs: number): Uint8Array {
-  const body = havanaMusConcat([
-    havanaMusI32(0), havanaMusI32(0),
-    havanaMusString('BINARYDATA'), havanaMusString('System'),
-    havanaMusU32(1), havanaMusString('*'),
-    havanaMusU16(10), havanaMusU32(3),
-    havanaMusConcat([havanaMusU16(2), havanaMusString('image'), havanaMusU16(20), havanaMusPadded(havanaMusConcat([havanaMusU32(image.length), image]))]),
-    havanaMusConcat([havanaMusU16(2), havanaMusString('time'), havanaMusU16(3), havanaMusString(time)]),
-    havanaMusConcat([havanaMusU16(2), havanaMusString('cs'), havanaMusU16(1), havanaMusI32(cs)]),
+function musPhotoReply(image: Uint8Array, time: string, cs: number): Uint8Array {
+  const body = musConcat([
+    musI32(0), musI32(0),
+    musString('BINARYDATA'), musString('System'),
+    musU32(1), musString('*'),
+    musU16(10), musU32(3),
+    musConcat([musU16(2), musString('image'), musU16(20), musPadded(musConcat([musU32(image.length), image]))]),
+    musConcat([musU16(2), musString('time'), musU16(3), musString(time)]),
+    musConcat([musU16(2), musString('cs'), musU16(1), musI32(cs)]),
   ]);
-  return havanaMusConcat([havanaMusU16(0x7200), havanaMusU32(body.length), body]);
+  return musConcat([musU16(0x7200), musU32(body.length), body]);
 }
 
 /** Minimal MUS frame decode: subject + String content (for assert checks). */
@@ -5277,7 +5277,7 @@ test('Multiuser Xtra routes through the persistence worker (hidden-tab path)', (
   fake.push({ type: 'ws-open', url: 'ws://persist.test' });
   assert.equal(e.xtraMethod(obj, 'isconnected', []), 1);
 
-  // Outbound send goes to the worker as latin1 bytes (kepler binary frames),
+  // Outbound send goes to the worker as latin1 bytes (MUS binary frames),
   // routed to this connection's url.
   e.xtraMethod(obj, 'sendnetmessage', [0, 0, 'hi']);
   const sent = fake.sent[fake.sent.length - 1];
@@ -5288,7 +5288,7 @@ test('Multiuser Xtra routes through the persistence worker (hidden-tab path)', (
   // Register the handler; an inbound frame is queued on arrival (no tick yet).
   e.xtraMethod(obj, 'setnetmessagehandler', [new LSymbol('h'), tgt]);
   // This connection is mode 0 (binary), so inbound frames are MUS frames —
-  // kepler's HELLO reply to our Logon handshake.
+  // the peer's HELLO reply to our Logon handshake.
   const ab = musFrameBytes('HELLO', '').buffer as ArrayBuffer;
   fake.push({ type: 'ws-data', url: 'ws://persist.test', bytes: ab });
   assert.equal(e.xtraMethod(obj, 'getnumberwaitingnetmessages', []), 2, 'connect msg + frame queued');
@@ -5347,7 +5347,7 @@ test('Multiuser Xtra opens BOTH connections from the script args (info + mus)', 
   tgt.props.set('p', 0);
   e.xtraMethod(info, 'setnetmessagehandler', [new LSymbol('h'), tgt]);
   e.xtraMethod(mus, 'setnetmessagehandler', [new LSymbol('h'), tgt]);
-  // The mus connection is mode 0, so inbound data is a MUS frame (kepler's
+  // The mus connection is mode 0, so inbound data is a MUS frame (the peer's
   // HELLO), not a v14 @-frame.
   fake.push({ type: 'ws-data', url: 'ws://localhost:3004', bytes: musFrameBytes('HELLO', '').buffer as ArrayBuffer });
   assert.equal(e.xtraMethod(mus, 'getnumberwaitingnetmessages', []), 1, 'mus got the frame');
@@ -5357,8 +5357,8 @@ test('Multiuser Xtra opens BOTH connections from the script args (info + mus)', 
 test('MUS connection speaks the binary protocol (Logon handshake + HELLO + LOGIN framing)', () => {
   // The Binary Manager's MUS connection (connectToNetServer mode 0) is a
   // second Xtra instance on its own port (connection.mus.host/port from sw4).
-  // Like DirPlayer, the Xtra sends a Logon frame on socket open (kepler
-  // replies Logon + HELLO, which flips the Binary Manager's
+  // The Xtra sends a Logon frame on socket open (the peer replies Logon +
+  // HELLO, which flips the Binary Manager's
   // pHandshakeFinished), inbound frames are parsed into {subject, content},
   // and sendNetMessage("*", subject, content) ships MUS binary frames.
   const e = new DirectorEngine();
@@ -5383,7 +5383,7 @@ test('MUS connection speaks the binary protocol (Logon handshake + HELLO + LOGIN
   assert.equal(logon.bytes[1], 0x00);
   assert.equal(musDecode(logon.bytes).subject, 'Logon');
 
-  // Inbound kepler HELLO parses to subject "HELLO" / empty string content.
+  // Inbound HELLO parses to subject "HELLO" / empty string content.
   const rec = e.addScriptMember('REC', 'parent', ['property p', 'on h', '  p = p + 1', 'end'].join('\n'));
   const tgt = e.interp.makeInstance(rec.script!);
   tgt.props.set('p', 0);
@@ -5399,19 +5399,19 @@ test('MUS connection speaks the binary protocol (Logon handshake + HELLO + LOGIN
   assert.equal(e.xtraMethod(mus, 'getnumberwaitingnetmessages', []), 0);
 
   // sendNetMessage("*", "LOGIN", [userId, machineId]) ships a MUS frame whose
-  // content is the space-joined string kepler's LOGIN handler parses.
+  // content is the space-joined string the LOGIN handler parses.
   e.xtraMethod(mus, 'sendnetmessage', ['*', 'LOGIN', new LList(['123', 'abc'])]);
   const login = fake.sent.filter((s) => s.type === 'send' && s.url === 'ws://localhost:3004').pop()!;
   assert.ok(login.bytes, 'LOGIN frame has bytes');
   assert.deepEqual(musDecode(login.bytes), { subject: 'LOGIN', content: '123 abc' });
 });
 
-test('photo upload: the BINDATA frame survives Havana\'s MUS decoder', () => {
+test('photo upload: the BINDATA frame survives an independent MUS decoder', () => {
   // `Photo Component Class::storePicture` (hh_photo/0003) queues
   // `[#image: <member media>, #time: <stamp>, #cs: <checksum>]` and the Binary
   // Manager ships it with `sendBinary(the data of tTask)` ->
-  // `sendNetMessage("*", "BINDATA", propList)`. Havana reads that frame with
-  // MusNetworkDecoder/MusUtil.readPropList and stores
+  // `sendNetMessage("*", "BINDATA", propList)`. The receiving reader parses
+  // the proplist and stores
   // `getPropAsBytes("image")`; when the value tag was written a second time
   // inside the PropList body the server died with
   // `readerIndex(48) + length(131072) exceeds writerIndex(110)` and the photo
@@ -5436,7 +5436,7 @@ test('photo upload: the BINDATA frame survives Havana\'s MUS decoder', () => {
   e.xtraMethod(mus, 'sendnetmessage', ['*', 'BINDATA', photo]);
   const frame = fake.sent.filter((s) => s.type === 'send').pop()!.bytes!;
 
-  const parsed = havanaMusDecode(frame);
+  const parsed = musFrameDecode(frame);
   assert.equal(parsed.subject, 'BINDATA');
   assert.deepEqual(parsed.receivers, ['*']);
   assert.equal(parsed.contentType, 10, 'content is a PropList');
@@ -5447,7 +5447,7 @@ test('photo upload: the BINDATA frame survives Havana\'s MUS decoder', () => {
   assert.equal(Buffer.from(parsed.propList.get('cs')!.data).readInt32BE(0), 42123);
   assert.equal(parsed.propList.get('image')?.dataType, 20, 'image is a Media payload');
   assert.equal(parsed.propList.get('image')!.data.length, image.length, 'the member media rides along as bytes');
-  // `items_photos.photo_data` is a MySQL blob (tools/havana.sql) — 65,535 bytes.
+  // The photo column is a fixed-width blob — 65,535 bytes.
   // A 161x117 camera frame is 75,348 bytes of RGBA, which the insert rejects
   // with "Data too long for column 'photo_data'"; an indexed 8-bit frame is
   // 18,837.
@@ -5455,9 +5455,9 @@ test('photo upload: the BINDATA frame survives Havana\'s MUS decoder', () => {
 });
 
 test('photo media: the payload is Director bitmap media (DTIB chunk + PackBits, even stride)', () => {
-  // A real Shockwave client does not send pixels — it sends a bitmap cast
-  // member's own media. Decoded from the one real row in the emulator's database
-  // (`items_photos.photo_id=31`, 3273 bytes for the 161x117 camera frame): a
+  // A real client does not send pixels — it sends a bitmap cast member's own
+  // media. Decoded from one real stored row (3273 bytes for the
+  // 161x117 camera frame): a
   // 60-byte member header, then the chunk id `DTIB` (Director's byte-reversed
   // `BITD`), a little-endian u32 length, then PackBits rows of 8-bit palette
   // indices at an EVEN stride — 162 bytes for a 161-wide member, pad byte 0. The
@@ -5571,7 +5571,7 @@ test('photo preview: media survives the MUS round trip as indices (countCS holds
   // Drain the synthetic connect message, then ingest the reply.
   (e as unknown as { ingestNetBytes(st: unknown, bytes: Uint8Array): void }).ingestNetBytes(
     [...(e as unknown as { multiuserState: Map<string, unknown> }).multiuserState.values()][0],
-    havanaMusPhotoReply(image, 'Tuesday, September 15, 2026 11:32', 42123),
+    musPhotoReply(image, 'Tuesday, September 15, 2026 11:32', 42123),
   );
   const msg = e.xtraMethod(mus, 'getnetmessage', []) as LPropList;
   const content = msg.props.get('content');
@@ -5629,8 +5629,8 @@ test('photo preview: the decoded raster is materialised through #grayscale (phot
   // the raster up in. It used to fall back to `grey = index` — the IDENTITY ramp
   // — while `#grayscale` is the opposite way round: the hh_photo `.pal` sidecars
   // (`0012_bitmap_photo_placeholder.pal`, `0020_bitmap_cam_display.pal`) all run
-  // `255 255 255` at index 0 down to `0 0 0` at 255, and LibreShockwave's
-  // Palette::grayscalePalette() is built as `255 - index`. The stage bakes from
+  // `255 255 255` at index 0 down to `0 0 0` at 255, i.e. the table is built as
+  // `255 - index`. The stage bakes from
   // `image.data` (bakeSurface -> `img.ensure()`), so a photo previewed as a
   // negative no matter what palette was attached next to it.
   const e = new DirectorEngine();
@@ -5723,14 +5723,14 @@ test('persistence worker drives engine.tick() at 1 Hz only while the page is hid
 
 test('memberExists finds members by name (underscore/space) and global number', () => {
   // Corpus references window defs with the decompiler's underscore spelling
-  // ("habbo_basic.window") while the bundled member name has the real
-  // Director spaces ("habbo basic.window"). Layout Parser gates every
+  // ("sample_window.window") while the bundled member name has the real
+  // Director spaces ("sample window.window"). Layout Parser gates every
   // window-def parse on memberExists() — it used to read VOID and report
-  // "Member not found: habbo_basic.window".
+  // "Member not found: sample_window.window".
   const e = new DirectorEngine();
-  e.addScriptMember('habbo basic.window', 'movie', ['on run', 'end'].join('\n'));
-  assert.equal(e.memberExists('habbo_basic.window'), true);
-  assert.equal(e.memberExists('habbo basic.window'), true);
+  e.addScriptMember('sample window.window', 'movie', ['on run', 'end'].join('\n'));
+  assert.equal(e.memberExists('sample_window.window'), true);
+  assert.equal(e.memberExists('sample window.window'), true);
   assert.equal(e.memberExists('no.such.member'), false);
   // by number: movie-global (Director slot: (castLib<<16)+local) works, cast-local miss is false.
   assert.equal(e.memberExists(65537), true);
@@ -5741,20 +5741,20 @@ test('memberExists finds members by name (underscore/space) and global number', 
   // engine with no corpus the bare call is deliberately unresolved (removed
   // fake builtin) — falsy, never a hard 1/0 — while the method form above is
   // the engine API under test.
-  assert.ok(!e.interp.evalExpressionString('memberExists("habbo_basic.window")'));
-  assert.equal(e.interp.evalExpressionString('member("habbo_basic.window").name'), 'habbo basic.window');
+  assert.ok(!e.interp.evalExpressionString('memberExists("sample_window.window")'));
+  assert.equal(e.interp.evalExpressionString('member("sample_window.window").name'), 'sample window.window');
 });
 
 test('proplist reads tolerate underscore/space member-name spelling (pAllMemNumList)', () => {
   // Resource Manager indexes members as pAllMemNumList[tmember.name] (stored
   // with spaces) but reads back pAllMemNumList[tMemName] with the corpus
-  // underscore spelling — getmemnum("habbo_basic.window") must hit.
+  // underscore spelling — getmemnum("sample_window.window") must hit.
   const e = new DirectorEngine();
   e.addScriptMember('T', 'movie', [
     'on run',
     '  t = [:]',
-    '  t["habbo basic.window"] = 42',
-    '  return t["habbo_basic.window"] + t.getaProp("habbo_basic.window")',
+    '  t["sample window.window"] = 42',
+    '  return t["sample_window.window"] + t.getaProp("sample_window.window")',
     'end',
   ].join('\n'));
   const s = e.resolveScript('T')!;
@@ -6390,7 +6390,7 @@ test('copyPixels #color/#bgColor tints grayscale art (purse title brown-on-gold)
   // black), and the element render passes [#color: #663300, #bgColor: #FFCA42]
   // (Grouped Element 0056 render -> pParams). Director tints near-grayscale
   // pixels along the gray -> (fg, bg) ramp: black becomes #color, white
-  // becomes #bgColor (DirPlayer drawing.rs "Bitmap ink=0 colorization").
+  // becomes #bgColor (the "Bitmap ink=0 colorization" case).
   const art = new LImage(12, 8);
   const a = art.ensure();
   for (let y = 0; y < 8; y++) {
@@ -6473,7 +6473,7 @@ test('copyPixels with a blend keeps the panel underneath OPAQUE (no punched hole
   // the source term by its own alpha, so an opaque destination came out at
   // alpha 191 (blend 50) / 201 (blend 70) / 214 (blend 20) — each blended
   // overlay punched a hole and the room behind showed through. Measured live in
-  // habbo_catalogue.window (its credits row is `catalog_credits_down`, ink 0
+  // the catalogue window (its credits row is `catalog_credits_down`, ink 0
   // blend 20, and the beams are blend 30) and in the kiosk roommatic input
   // veils (`whitepixel`, ink 36, blends 70 and 20), whose element buffers
   // carried exactly those 201/214 alphas over the input boxes.
@@ -6526,8 +6526,8 @@ test('copyPixels ink 8 + bgColor does NOT tint grayscale (catalogue product prev
   // paletteIndex(0xFFFFFF) = palette entry 255 (the *ffffff no-color marker is
   // masked to the last palette entry, black in the radiator's palette). The old
   // ink-8 grayscale tint lerped the whole gray body toward that bgColor, so the
-  // grunge radiator's native gray art rendered BLACK. DirPlayer's ink-8 path
-  // (drawing.rs) uses foreColor only — bgColor is inert for ink 8 (it belongs
+  // grunge radiator's native gray art rendered BLACK. The ink-8 path uses
+  // foreColor only — bgColor is inert for ink 8 (it belongs
   // to ink 0 / ink 36). Native grayscale art must survive an ink-8 copy that
   // passes ONLY #bgColor.
   const e = new DirectorEngine();
@@ -6655,8 +6655,7 @@ test('copyPixels scales a 1x1 panel pixel into its box (9-slice window pieces)',
 
 test('copyPixels nearest-neighbor-stretches a 1xN strip (window border piece)', () => {
   // content.top.middle is a 1x6 vertical gradient stretched horizontally to
-  // 175x6. Matches LibreShockwave's C++ rect-form copyPixels, which samples
-  // nearest-neighbor (sx = srcLeft + dx*srcW/destW, sy = srcTop + dy*srcH/destH)
+  // 175x6. The rect form of copyPixels samples nearest-neighbor (sx = srcLeft + dx*srcW/destW, sy = srcTop + dy*srcH/destH)
   // — integer division, no interpolation, so pixel art stays crisp.
   const src = new LImage(1, 4);
   const sd = src.ensure();
@@ -7023,7 +7022,7 @@ test('member names keep underscores and resolve in both forms (cloud round-trip)
   // Entry Cloud Class reads pSprite.member.name and splits it on "_" to
   // rebuild the art name ("cloud_0_left"), then getmemnum(pMemName & "_" &
   // tdir) — so the STORED name must keep its underscores while lookups stay
-  // tolerant of the space form (the visualizer text uses "Habbo UK garden").
+  // tolerant of the space form (the visualizer text uses a spaced place name).
   const e = new DirectorEngine();
   e.addScriptMember('cloud_0_left', 'score', 'on exitFrame\nend');
   const n = e.getmemnum('cloud_0_left');
@@ -7268,13 +7267,13 @@ test('the stage binds the pointer events a Director movie needs (outside release
   assert.equal(view.handlers.size, 0, 'cleanup unbinds the window');
 });
 
-test('navigator row math truncates on DirPlayer integer pointer coords (click lands on the row under the cursor)', () => {
+test('navigator row math truncates on integral pointer coords (click lands on the row under the cursor)', () => {
   // U136 regression: the Navigator's `tClickedLine = integer(tParm.locV /
   // pListItemHeight) + 1` (Navigator Roomlist 0045:87) must resolve the row
   // UNDER the cursor. The click point comes from Image Wrapper's mouseUp:
   // `point(the mouseH - the locH of the pSprite of me + pOwnX + pOffX, ...)`
-  // (0058:181-184). DirPlayer truncates pointer coords to i32 at the JS
-  // boundary, so tParm.locV is an INTEGral pixel and `locV / 18` integer-
+  // (0058:181-184). Pointer coords truncate to i32 at the JS boundary, so
+  // tParm.locV is an INTEGral pixel and `locV / 18` integer-
   // divides (27 / 18 = 1 -> row 2). A subpixel float (27.33) float-divides
   // (1.518) and the U128 rounding integer() rounds up to row 3 — one below.
   const e = new DirectorEngine();
@@ -7284,15 +7283,15 @@ test('navigator row math truncates on DirPlayer integer pointer coords (click la
   assert.equal(e.interp.evalExpressionString('integer(17 / 18) + 1'), 1, 'locV=17 (bottom of row 1) -> row 1');
   assert.equal(e.interp.evalExpressionString('integer(36 / 18) + 1'), 3, 'locV=36 (top of row 3) -> row 3');
   // The full click-point chain: Image Wrapper's point math on INTEGER mouse
-  // coords stays integral, so the division truncates like DirPlayer.
+  // coords stays integral, so the division truncates.
   e.dispatchPointerEvent('mouseDown', 1, 517, 45);
   assert.equal(e.interp.evalExpressionString('the mouseH - 490 + 0'), 27);
 });
 
 test('the doubleClick tracks a second press within 500ms (furniture double-click actions)', () => {
   // Furniture classes gate double-click actions on `the doubleClick` (Sound
-  // Machine state toggle, Bottle roll, E-Dice throw, Credit Furni). DirPlayer
-  // parity: true from the 2nd mouseDown through that click's mouseUp.
+  // Machine state toggle, Bottle roll, E-Dice throw, Credit Furni): true from
+  // the 2nd mouseDown through that click's mouseUp.
   const e = new DirectorEngine();
   assert.equal(e.interp.evalExpressionString('the doubleClick'), 0);
   const realNow = Date.now;
@@ -7334,7 +7333,7 @@ test('image.getPixel returns a color with hexString/#integer/paletteIndex (room 
     0xff0000,
     '#integer form returns 24-bit RGB on 32-bit art',
   );
-  // DirPlayer get_pixel_color_ref: out of bounds returns the BACKGROUND color
+  // getPixel: out of bounds returns the BACKGROUND color
   // (palette index 0 for palette art, white RGB otherwise) — never VOID, so a
   // click on a furniture sprite's edge (art smaller than the sprite rect)
   // reads as white -> click-through instead of a dead click (no select).
@@ -7424,8 +7423,8 @@ test('mouseWithin fires while the cursor stays over a sprite (dropmenu rollover 
   // cursor and paints the highlight — without it the open menu never
   // highlighted an option, pRollOverItem stayed VOID, and clicks closed the
   // menu without selecting (which re-opened + re-ordered it — the dropdown
-  // "jumped"). DirPlayer dispatches mouseWithin on each pointer move over the
-  // same sprite (events.rs dispatch_rollover_events); we used to only send
+  // "jumped"). mouseWithin is dispatched on each pointer move over the same
+  // sprite; we used to only send
   // mouseEnter/mouseLeave transitions, so the Event Broker's mouseWithin
   // redirect never ran.
   const e = new DirectorEngine();
@@ -7455,8 +7454,8 @@ test('mouseWithin fires while the cursor stays over a sprite (dropmenu rollover 
 
 test('rollover(n) is a DIRECT hit test of that sprite, ignoring z-order (E-Dice lower part)', () => {
   // E-Dice select checks `rollover(me.pSprList[2])` (its LOWER part) while the
-  // die (upper part) is under the cursor — DirPlayer implements rollover(n) as
-  // concrete_sprite_hit_test(sprite n), independent of what is stacked above.
+  // die (upper part) is under the cursor — rollover(n) hit-tests sprite n
+  // itself, independent of what is stacked above.
   // Comparing against the topmost rollover picked the wrong branch.
   const e = new DirectorEngine();
   e.addScriptMember('Setup', 'score', 'on exitFrame\nend');
@@ -7487,8 +7486,8 @@ test('rollover(n) is a DIRECT hit test of that sprite, ignoring z-order (E-Dice 
 test('the clickOn is the topmost sprite at the last mouseDown (Club TV bottom-part walk)', () => {
   // Furniture Club TV select: `tSprNum = the clickOn` then double-click on the
   // bottom/stand parts (pSprList 3-5) returns 0 -> walk to the floor instead
-  // of toggling the TV. DirPlayer sets click_on_sprite to get_sprite_at(
-  // scripted=false) on mouseDown and keeps it through the release.
+  // of toggling the TV. The sprite under the mouseDown (scripted=false) is
+  // kept as click_on_sprite through the release.
   const e = new DirectorEngine();
   e.addScriptMember('Setup', 'score', 'on exitFrame\nend');
   const m = new Member(1, 1, 'tv_stand', 'bitmap');
@@ -7687,7 +7686,7 @@ function paintRect(m: Member, x0: number, y0: number, x1: number, y1: number): v
 /**
  * The reported bug: an avatar sitting on a chair clicked the CHAIR.
  *
- * Habbo stacks a sitter between the chair's own parts — `#zshift` in the
+ * Furniture stacks a sitter between the chair's own parts — `#zshift` in the
  * furniture props interleaves them (a part drawn in front of the avatar has a
  * bigger locZ than `pMatteSpr.locZ = pSprite.locZ + 1`, Human_Class_EX
  * 0002:912), and the chair's art is far smaller than its sprite rectangle. The
@@ -7955,7 +7954,7 @@ test('the keyboardFocusSprite get+set and the key/keyCode/keyDown/keyUp state', 
   assert.equal(e.interp.evalExpressionString('the keyboardFocusSprite'), 12);
   e.dispatchKeyEvent('keyDown', 'a', 65);
   assert.equal(e.interp.evalExpressionString('the key'), 'a');
-  // Browser keyCode 65 ('a') is Director keyCode 0 (DirPlayer keyboard_map).
+  // Browser keyCode 65 ('a') is Director keyCode 0 (the keyboard map).
   assert.equal(e.interp.evalExpressionString('the keyCode'), 0);
   assert.equal(e.interp.evalExpressionString('the keyDown'), 1);
   assert.equal(e.interp.evalExpressionString('the keyUp'), 0);
@@ -8039,7 +8038,7 @@ test('typing goes into the focused editable field member (Director native editin
 
 test('boxType #limit live text clips at the field box (chat input / tooltips)', () => {
   // The room bar chat input (0035_text_room_bar.window.txt): #boxType: #limit,
-  // #wordWrap: 0 — DirPlayer cuts the typed text off at the field width. The
+  // #wordWrap: 0 — the typed text is cut off at the field width. The
   // live PIXI text path has no canvas to clip against (only the rasterizer
   // does), so the channel visual must ask the stage to mask the text node to
   // its rect. boxType presence = fixed box, exactly like the rasterizer's
@@ -8271,7 +8270,7 @@ test('call() with a VOID handler is a silent no-op (stale delay after deconstruc
   // tTask is VOID when the timeout outlived its owner — the corpus's
   // deconstruct forget() passes the task LIST (getPropAt value) instead of the
   // delay key, so the real timeout survives and fires stale after `delays = [:]`.
-  // LibreShockwave call(): a VOID handler name stringifies to "" and the
+  // call(): a VOID handler name stringifies to "" and the
   // dispatch misses silently (returns VOID, no diagnostic). Was: warn per boot.
   const e = new DirectorEngine();
   e.addScriptMember('Plain', 'movie', 'on new me\n  return me\nend');
@@ -8457,7 +8456,7 @@ test('member.image = img auto-centers the regPoint (balloon spawn anchor)', () =
   // so the sprite loc (the character's head X) lands at the balloon's
   // BOTTOM-CENTER — the bubble centers over the head and the pulse tip below
   // meets its bottom edge. Director centers the regPoint whenever
-  // `member.image =` is assigned (DirPlayer bitmap.rs member.image setter;
+  // `member.image =` is assigned (the member.image setter;
   // the corpus itself compensates where it matters — Common Button saves
   // tTempOffset = member.regPoint, assigns image, then restores it). Without
   // it the regPoint stays (0, 0) and the balloon anchors its LEFT edge at
@@ -8590,19 +8589,19 @@ test('rasterizeTextMember: chunk styles render the styled range in its own font/
 test('onCastLoaded fires when a cast registers (embed fonts hook)', async () => {
   // embed.ts hooks this to load a cast's TTF fonts once its manifest registers
   // (boot's lazy preloads happen long after the initial loadFonts call).
-  const habbo = makeCastZip('habbo', [], { '0001_script_Loop.ls': '-- Cast member: Loop\non exitFrame me\nend\n' });
+  const main = makeCastZip('main', [], { '0001_script_Loop.ls': '-- Cast member: Loop\non exitFrame me\nend\n' });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : null;
+      return name === 'main' ? main : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
   const loaded: string[] = [];
   e.onCastLoaded = (name) => loaded.push(name);
-  const cast = await e.loadCast(loader, 'habbo');
+  const cast = await e.loadCast(loader, 'main');
   assert.ok(cast);
-  assert.ok(loaded.includes('habbo'), `hook must fire for the registered cast, got ${loaded.join(',')}`);
+  assert.ok(loaded.includes('main'), `hook must fire for the registered cast, got ${loaded.join(',')}`);
 });
 
 test('near-white text flush on the member edge gets keyed by the ink-36 display bake (U51 header fix)', () => {
@@ -8710,7 +8709,7 @@ test('setMemberProp(text) rebuilds channels so typed input shows (U51)', () => {
 
 test('tintSpriteBackground recolors grayscale pixels toward bgColor (figure-creator swatch = white shadow.pixel)', () => {
   // U78: the avatar-editor color swatch is a white shadow.pixel box tinted by
-  // `sprite.bgColor = rgb(...)`. DirPlayer tints near-grayscale pixels (max-min
+  // `sprite.bgColor = rgb(...)`. bgColor tints near-grayscale pixels (max-min
   // <= 16): t = gray/255, out = t*bg (fg black). Colorful pixels untouched.
   const d = new Uint8Array(4 * 4 * 4);
   // row 0: white, gray 128, black, colorful (255,0,0)
@@ -8929,7 +8928,7 @@ test('createMatte() keys the opaque-white background (avatar part)', () => {
 });
 
 test('createMask() is a 1-bit luminance mask, NOT createMatte (catalogue spaces window)', () => {
-  // Habbo v31 Catalogue Spaces preview: catalog_spaces_window_mask is a black
+  // The catalogue Spaces preview: catalog_spaces_window_mask is a black
   // frame + white glass interior; the frame art catalog_spaces_window draws
   // the glass as magenta placeholder pixels. Director createMask thresholds
   // to 1 bit at 50% luma — DARK opaque (source shows), LIGHT transparent
@@ -9152,7 +9151,7 @@ test('nothing(), rollover(n), inside(pt, rect), getWindowIdList resolve', () => 
   e.createWindow('test_win');
   // A real sprite under the cursor: the fresh rollover hit-test resolves it
   // (a bare setRollover(n) cache would also answer, but Lingo reads must come
-  // from a live hit test at the mouse position — DirPlayer get_sprite_at).
+  // from a live hit test at the mouse position).
   const m = new Member(1, 1, 'hit_box', 'bitmap');
   const img = new LImage(10, 10);
   img.data = new Uint8Array(10 * 10 * 4).fill(255);
@@ -9221,7 +9220,7 @@ test('member.char.count chunk reads member text (U91 window title width)', () =>
   // U91: the Text Wrapper sizes centered titles with
   // `charPosToLoc(char.count).locH + 16`. member.char.count returned 0 (chunk
   // on a member ref read no text), charPosToLoc clamped to char 1, and the
-  // title "Habbo Console" collapsed to a 21px box, clipping header text.
+  // title collapsed to a 21px box, clipping header text.
   const e = new DirectorEngine();
   e.addScriptMember(
     'U91',
@@ -9235,7 +9234,7 @@ test('member.char.count chunk reads member text (U91 window title width)', () =>
       '  t.fixedLineSpace = 15',
       '  t.alignment = #center',
       '  t.rect = rect(0, 0, 60, 15)',
-      '  t.text = "Habbo Console"',
+      '  t.text = "Hello Console"',
       '  c = member(n).char.count',
       '  first = member(n).char[1]',
       '  w = member(n).charPosToLoc(member(n).char.count).locH + 16',
@@ -9420,8 +9419,8 @@ test('paletteIndex(n) resolves RGB from the movie palette (Figure colors)', () =
   const run = script.handlers.find((h) => h.name.toLowerCase() === 'run')!;
   const out = e.interp.callHandler(script, run, [], null, new Set()) as unknown as { items: number[] };
   // 512 is OUT of palette range (0-255) — Director treats a >255 integer as a
-  // 0xRRGGBB color value (LibreShockwave int->color: only 0..255 is a palette
-  // index), so paletteIndex(512) = 0x000200, NOT a masked palette entry.
+  // 0xRRGGBB color value (int->color: only 0..255 is a palette index), so
+  // paletteIndex(512) = 0x000200, NOT a masked palette entry.
   assert.deepEqual(out.items, [255, 0, 128, 255, 255, 255, 0, 2, 0], 'paletteIndex: 0-255 resolves the palette entry; >255 is the RGB value');
 });
 
@@ -9589,9 +9588,9 @@ test('propList count returns the number of pairs', () => {
   assert.equal(out, 3, 'proplist.count = pair count (DropDown define chain)');
 });
 
-test('copyPixels ink 0 copies an 8-bit palette source VERBATIM (DirPlayer indexed ink-0 parity)', () => {
-  // DirPlayer drawing.rs: the indexed (1-8 bit) ink-0 branch has NO bg key —
-  // matte_mask is computed but never consumed there (only ink 2/36 key
+test('copyPixels ink 0 copies an 8-bit palette source VERBATIM (indexed ink-0 parity)', () => {
+  // The indexed (1-8 bit) ink-0 branch has NO bg key — a matte mask may be
+  // computed but is never consumed there (only ink 2/36 key
   // bgColor, ink 8 edge-floods). The chat-balloon pieces are white-rect
   // fragments whose white body is edge-connected WITHIN each piece; keying
   // them at ink 0 ate the whole body (Chat_Bubble renderBackground pastes
@@ -9667,8 +9666,8 @@ test('chat-balloon composite: ink-0 piece pastes keep the white body (U-balloon 
 test('the floatPrecision get/set + keyDown/optionDown/shiftDown/commandDown/controlDown (rooms)', () => {
   // Room Geometry getScreenCoordinate does `tPrecision = the floatPrecision;
   // set the floatPrecision to 2; ...; set the floatPrecision to tPrecision`
-  // and Room Hiliter reads `the optionDown` — DirPlayer float_precision
-  // defaults to 4, get returns the int, set stores it (u8), and the key-state
+  // and Room Hiliter reads `the optionDown`. `the floatPrecision` defaults to
+  // 4, get returns the int, set stores it (u8), and the key-state
   // props mirror the keyboard manager. (Was: unsupported -> VOID every frame.)
   const e = new DirectorEngine();
   e.addScriptMember(
@@ -9719,7 +9718,7 @@ test('fontStyleFlags parses Director fontStyle lists/symbols/strings', () => {
   });
 });
 
-test('value() passes non-strings through (LibreShockwave TypeBuiltins::value parity)', () => {
+test('value() passes non-strings through (value() parity)', () => {
   const e = new DirectorEngine();
   // Director: value() only parses strings; symbols/lists/numbers return
   // unchanged. The Variable Container GetValue depends on this — value(#info)
@@ -9769,9 +9768,9 @@ test('list * scalar lerps element-wise (Human Class walk pScreenLoc)', () => {
   // asNum(list)=0, so the product was 0 and pScreenLoc stayed pStartLScreen
   // for the whole walk — the avatar never glided and only moved when the
   // next status message's resetValues snapped it to the new tile (the
-  // teleport-between-squares bug). DirPlayer multiply_datums parity:
-  // list*scalar and scalar*list are the same element-wise multiply
-  // (commutative); list*list is element-wise min-length.
+  // teleport-between-squares bug). multiply: list*scalar and scalar*list are
+  // the same element-wise multiply (commutative); list*list is element-wise
+  // min-length.
   const e = new DirectorEngine();
   const ev = (s: string) => e.interp.evalExpressionString(s) as LList;
   const lst = (s: string) => (ev(s).items as number[]).join(',');
@@ -9871,10 +9870,10 @@ test('float() / decimal literals force float division (Human walk tFactor)', () 
   );
 });
 
-test('integer() rounds to nearest (DirPlayer/LibreShockwave parity); trunc() truncates (U128 hilite)', () => {
+test('integer() rounds to nearest (not truncation); trunc() truncates (U128 hilite)', () => {
   // Director docs: integer() "rounds the value of an expression to the nearest
-  // whole integer" (integer(3.9) = 4); DirPlayer: Datum::Float(f) => f.round();
-  // LibreShockwave: javaRoundToInt. Our integer() was Math.trunc — identical
+  // whole integer" (integer(3.9) = 4) — floats round half away from zero.
+  // Our integer() was Math.trunc — identical
   // to trunc() — so Room Geometry getWorldCoordinate resolved the CENTER of a
   // tile to the tile up-left and the room hiliter hovered the wrong tile.
   const e = new DirectorEngine();
@@ -9895,7 +9894,7 @@ test('integer() rounds to nearest (DirPlayer/LibreShockwave parity); trunc() tru
   );
 });
 
-test('integer() on a non-numeric string returns VOID (LibreShockwave parity — variable.index dump)', () => {
+test('integer() on a non-numeric string returns VOID (variable.index dump)', () => {
   // The corpus Variable Container dump parses `key = value` lines and converts
   // numeric-looking values with `if integerp(integer(tValue)) then if
   // length(string(integer(tValue))) = length(tValue) then tValue =
@@ -9904,8 +9903,8 @@ test('integer() on a non-numeric string returns VOID (LibreShockwave parity — 
   // With integer("h") = 0 the guard converted "h" to 0 (integerp(0) is true
   // and both lengths are 1) and the part LIST to 0 — every figure lookup then
   // broke ("human.partset.figure.0 not found!", "No human part order found
-  // human.parts.h.3", avatars never rendered). LibreShockwave's integer()
-  // returns VOID for a non-numeric string, so integerp() is false and the
+  // human.parts.h.3", avatars never rendered). integer() returns VOID for a
+  // non-numeric string, so integerp() is false and the
   // value survives untouched. "sh" was already safe (length 2 vs 1).
   const e = new DirectorEngine();
   const ev = (s: string) => e.interp.evalExpressionString(s);
@@ -10196,7 +10195,7 @@ test('dynamic download rename (full CDN URL) fills the empty shell in place for 
   // must resolve through castNameFromUrl but fill THIS shell (its number is
   // what acquireAssetsFromCast reads) and keep the URL name (the corpus's
   // FindCastNumber matches on the exact name).
-  const habbo = makeMovieCastZip('habbo', [], {
+  const main = makeMovieCastZip('main', [], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const sofa = makeCastZip('hh_furni_xx_club_sofa', [], {
@@ -10209,12 +10208,12 @@ test('dynamic download rename (full CDN URL) fills the empty shell in place for 
         _onProgress?.(sofa.length, sofa.length); // real fetch reports bytes; kills the fake ramp
         return sofa;
       }
-      return name === 'habbo' ? habbo : null;
+      return name === 'main' ? main : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
   e.boot(); // preloadNetThing ramps need tick() to advance
   const url = 'http://localhost:5173/casts/hof_furni/hh_furni_xx_club_sofa.cct';
   const slot = e.castByName.get('empty 1')!;
@@ -10269,9 +10268,8 @@ test('dynamic download rename (full CDN URL) fills the empty shell in place for 
 test('directorTransformFlip: rotation 180 + skew 180 is a horizontal mirror (Director semantics)', () => {
   // The corpus's furniture-flip trick (`*` memberalias variants):
   //   if tSpr.rotation = 180 then tSpr.skew = 180
-  // In Director that pair is a horizontal mirror — LibreShockwave's
-  // hasDirectorHorizontalMirror(rot==180 && skew==180) with
-  // effectiveFlipH = isFlipH ^ mirror; DirPlayer's is_skew_flip agrees.
+  // In Director that pair is a horizontal mirror: effectiveFlipH = flipH XOR
+  // (rotation == 180 && skew == 180).
   // A naive pixi rotation 180 + skewX 180 would render a point reflection
   // (upside down) instead, so the engine folds the pair into flipX.
 
@@ -10292,7 +10290,7 @@ test('directorTransformFlip: rotation 180 + skew 180 is a horizontal mirror (Dir
 });
 
 test('member change resets rotation/skew/flipH/flipV (releaseSprite reuse); castNum keeps them (furniture flip)', () => {
-  // DirPlayer sprite.rs reset_for_member_change: the Member setter resets
+  // The Member setter resets
   // transforms (FUSE releaseSprite releases via `tsprite.member = member(0)`),
   // but castNum does NOT — so the furniture flip (`tSpr.rotation = 180;
   // tSpr.skew = 180` set BEFORE `tSpr.castNum = tMemNum`) survives. Without
@@ -10333,8 +10331,8 @@ test('member set drops a stale explicit width/height so a recycled sprite render
   // FUSE releaseSprite resets pooled sprites with `rect(0, 0, 1, 1)`; the
   // Human class then re-assigns the shadow member (`pShadowSpr.member =
   // pDefShadowMem`) but never re-sizes the sprite, so a re-reserved shadow
-  // kept the pool's 1x1 override and rendered one pixel (DirPlayer shows the
-  // shadow at natural size — the Member setter re-derives geometry). A
+  // kept the pool's 1x1 override and rendered one pixel (the shadow should
+  // render at natural size — the Member setter re-derives geometry). A
   // stretch set AFTER the member must still win.
   const e = new DirectorEngine();
   const cast = e.casts[0] ?? new CastLib(1, 'internal');
@@ -10374,7 +10372,7 @@ test('member set drops a stale explicit width/height so a recycled sprite render
 
 test('inverseDirectorTransformPoint: hit tests mirror with the rendered sprite (furniture flip)', () => {
   // The corpus flip is `rotation 180 + skew 180` = horizontal mirror around
-  // the sprite loc (DirPlayer concrete_sprite_hit_test inverse transform).
+  // the sprite loc (the hit test inverse-transforms the point).
   // A point on the mirrored side must map back into the untransformed rect.
   // Mirror pair: loc at 100, point 30px right of loc maps 30px left.
   assert.deepEqual(inverseDirectorTransformPoint(180, 180, 0, 0, 100, 200, 130, 200), { tx: 70, ty: 200 });
@@ -10512,7 +10510,7 @@ test('member.duration: sound samples near a 2000ms slot boundary snap down to th
   const cast = e.casts[0] ?? new CastLib(1, 'internal');
   if (!e.casts.includes(cast)) e.casts.push(cast);
 
-  // Habbo's sound-machine samples declare durations that are exact multiples
+  // The sound-machine samples declare durations that are exact multiples
   // of the 2000ms timeline slot (2000/4000/8000...) while the MP3 payloads run
   // ~140-155ms longer (encoder tail). The raw frame-walk would push the corpus's
   // ceil(duration/2000) slot count one over, `tRepeats = length/slotLength`
@@ -10689,7 +10687,7 @@ test('Song Player builtins: queueSound/startSoundChannel/stopSoundChannel/playSo
 });
 
 test('updated movie boot: the traceScript/traceLogFile/activeWindow props, _movie/_player globals, windowList guard', async () => {
-  // Mirrors exported/habbo/scripts/0003_script_Initialization.ls: the guards
+  // Mirrors the corpus's Initialization script: the guards
   // read `the traceScript`, set it + traceLogFile to EMPTY, poke
   // `_movie.traceScript` / `_player.traceScript`, check
   // `_player.windowList.count` and `(the activeWindow).name`, and call
@@ -10726,18 +10724,18 @@ on stopMovie
   go(1)
 end
 `;
-  const habbo = makeMovieCastZip('habbo', [], {
+  const main = makeMovieCastZip('main', [], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
     '0003_script_Initialization.ls': src,
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : null;
+      return name === 'main' ? main : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
   e.boot();
   // The boot guards passed cleanly: no unsupported-property / unresolved-
   // handler / undeclared-identifier noise, and the movie ran through.
@@ -10812,7 +10810,7 @@ end
 });
 
 test('fontBaseCandidates: flat layout resolves from the movie dir itself', () => {
-  // Flat layout: movie at casts/habbo.spark, manifest font rel is
+  // Flat layout: movie at casts/movie.spark, manifest font rel is
   // "hh_interface/fonts/…" — the movie dir IS the casts root.
   const candidates = fontBaseCandidates('http://x/casts/');
   assert.deepEqual(candidates, ['http://x/casts/', 'http://x/']);
@@ -10823,7 +10821,7 @@ test('fontBaseCandidates: flat layout resolves from the movie dir itself', () =>
 });
 
 test('fontBaseCandidates: multiversion layout walks up to the casts root', () => {
-  // Multiversion layout: movie at casts/31/habbo.spark, manifest font rel is
+  // Multiversion layout: movie at casts/31/movie.spark, manifest font rel is
   // "31/hh_interface/fonts/…" (group-prefixed, rooted at casts/) — the movie
   // dir alone yields the doubled "31/31/…" URL; the casts root is one up.
   const candidates = fontBaseCandidates('http://x/casts/31/');

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, bakeSurface, blendModeForInk, setMatteIdentityFill, DARKEST_BLEND_MODE, LIGHTEST_BLEND_MODE, matteRegionMask, NOT_REVERSE_BLEND_MODE, REVERSE_BLEND_MODE, spritePixelHitTest, SUBTRACT_BLEND_MODE, tintSpriteBackground, tintSpriteDarken } from '../stage/matte.js';
+import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, bakeSurface, blendFilterMode, blendModeForInk, inkUsesPixelHitTest, setMatteIdentityFill, DARKEST_BLEND_MODE, LIGHTEST_BLEND_MODE, matteRegionMask, PASS_THROUGH_BLEND_MODE, REVERSE_BLEND_MODE, spritePixelHitTest, SUBTRACT_BLEND_MODE, SUBTRACT_WRAP_BLEND_MODE, tintSpriteBackground, tintSpriteDarken, NOT_REVERSE_BLEND_MODE, DUOTONE_RAMP_STEEPNESS, duotoneRampRgb, boostSaturation } from '../stage/matte.js';
 
 /** Build an RGBA buffer; fill(x, y, r, g, b, a) default opaque white. */
 function makeImage(width: number, height: number): { data: Uint8ClampedArray; fill: (x: number, y: number, r: number, g: number, b: number, a?: number) => void } {
@@ -113,7 +113,7 @@ test('background transparent ink (36): near-white backdrop removed with toleranc
 });
 
 test('background transparent (36) with art bleeding to the bottom edge (garden-style)', () => {
-  // Habbo UK garden: white sky on top, green/gray art reaches the bottom edge
+  // A garden scene: white sky on top, green/gray art reaches the bottom edge
   // and one corner — the C++ corner/75%-edge gates reject it, leaving a white
   // box. The edge-connected flood fill only removes the connected white sky;
   // interior white detail (cloud puff in the art) must survive.
@@ -160,12 +160,11 @@ test('key ink (1/36) still blanket-keys white on a transparent-bordered canvas (
   // The avatar canvas is a 32-bit image with a TRANSPARENT border (the drawn
   // body never reaches the edges) but the indexed body parts paste OPAQUE
   // white backgrounds onto it, so the interior is white-filled around the
-  // colored art. The ink-36 key must remove that white — DirPlayer color-keys
-  // against sprite bgColor (white default) EVEN for 32-bit alpha bitmaps
-  // (rendering_gpu/webgl2/mod.rs, use_embedded_alpha + ink 36 path: "Plain
-  // 32-bit-with-alpha members still need the key so ink 36 can actually do
-  // its job"). A transparent border is NOT a reason to skip the key — doing
-  // so leaves the white box around every avatar in a room.
+  // colored art. The ink-36 key must remove that white — the reference renderer
+  // color-keys against sprite bgColor (white default) EVEN for 32-bit alpha
+  // bitmaps ("plain 32-bit-with-alpha members still need the key so ink 36 can
+  // actually do its job"). A transparent border is NOT a reason to skip the key
+  // — doing so leaves the white box around every avatar in a room.
   const { data, fill } = makeImage(9, 9);
   for (let y = 0; y < 9; y++) {
     for (let x = 0; x < 9; x++) fill(x, y, 255, 255, 255, 0); // transparent border
@@ -212,8 +211,9 @@ test('no matte when edges disagree (no 75% dominant color) -> bake is a no-op', 
 
 test('matte on a fully-white image removes it (C++ white-edge short-circuit)', () => {
   // resolveRgbFloodFillMatte returns {white, 0} the moment any opaque edge
-  // pixel is pure white — no uniform-image guard on that path (LibreShockwave
-  // behavior). An all-white sprite under matte ink is fully transparent.
+  // pixel is pure white — no uniform-image guard on that path (the reference
+  // implementation's behavior). An all-white sprite under matte ink is fully
+  // transparent.
   const { data } = makeImage(3, 3); // all white
   const changed = bakeEdgeBackground(data, 3, 3, 'matte');
   assert.equal(changed, true);
@@ -260,9 +260,9 @@ test('ink -> bake mode mapping (Director id::InkMode)', () => {
   assert.equal(bakeModeForInk(1), 'key'); // transparent
   assert.equal(bakeModeForInk(8), 'matte'); // matte (clouds)
   // BACKGROUND_TRANSPARENT (36) is a BLANKET color-key, not a flood fill:
-  // DirPlayer's WebGL ink-36 shader discards every pixel within tolerance of
-  // the background color — enclosed whites included (the hotel tower's
-  // enclosed whites used to survive our edge-connected flood).
+  // the reference renderer's ink-36 shader discards every pixel within
+  // tolerance of the background color — enclosed whites included (the tower
+  // art's enclosed whites used to survive our edge-connected flood).
   assert.equal(bakeModeForInk(36), 'key');
   assert.equal(bakeModeForInk(0), null); // copy shows the bitmap as-is
   assert.equal(bakeModeForInk(9), null); // mask uses a mask member
@@ -277,8 +277,8 @@ test('ink -> bake mode mapping (Director id::InkMode)', () => {
   // min against the stage, or the tinted floor blackens behind the dark stage.
   // The sprite-level matte fires too: the catalogue Spaces floor/wall preview
   // elements are ink-41 sprites whose buffers feedImage white-fills before the
-  // tinted pattern is pasted — DirPlayer mattes ink-41 sprites (should_matte_
-  // sprite(41)), so the edge-connected white fill must go transparent or it
+  // tinted pattern is pasted — the reference renderer mattes ink-41 sprites, so
+  // the edge-connected white fill must go transparent or it
   // covers the previews stacked behind it.
   assert.equal(bakeModeForInk(41), 'matte');
   assert.equal(blendModeForInk(41), 'normal');
@@ -334,7 +334,7 @@ test('ink 7 (Not Ghost) 1x1 black indexed art vanishes (terrace curtain handle)'
 
 test('ink 7 (Not Ghost) 32-bit art blanket-keeps the authored key color', () => {
   // 32-bit (no indices) Not Ghost with an authored key: only key-colored
-  // pixels survive, everything else goes transparent (DirPlayer shader).
+  // pixels survive, everything else goes transparent (reference shader).
   const W = 3, H = 1;
   const { data, fill } = makeImage(W, H);
   fill(0, 0, 0, 0, 255); // key blue
@@ -349,8 +349,9 @@ test('ink 7 (Not Ghost) 32-bit art blanket-keeps the authored key color', () => 
 
 test('ink 7 (Not Ghost) 32-bit 1x1 black art with no authored bgColor keys WHITE (pool ClickArea)', () => {
   // The pool room's ClickArea elements are a 1x1 BLACK 32-bit bitmap at ink 7
-  // with no authored bgColor. DirPlayer keys 32-bit ink 7 on the sprite's
-  // DEFAULT bgColor (white — the Layout Parser defaults #bgColor and skips
+  // with no authored bgColor. The reference renderer keys 32-bit ink 7 on the
+  // sprite's DEFAULT bgColor (white — the Layout Parser defaults #bgColor and
+  // skips
   // passing it when white), so the black pixel fails the match and is
   // discarded: an invisible click target. Keying the art's top-left (0,0)=
   // black instead blanket-kept the black pixel and rendered a black box over
@@ -365,13 +366,13 @@ test('ink 7 (Not Ghost) 32-bit 1x1 black art with no authored bgColor keys WHITE
 
 test('ink 7 (Not Ghost) authored BLACK bgColor is a real key (entry elevator shadow)', () => {
   // The entry room's elevator shadow (tower_elevator_sd) is authored
-  // #bgColor: "#000000" at ink 7 with a palette — DirPlayer keys indexed
-  // ink 7 on the SPRITE's bgColor (black), not the white default. The
+  // #bgColor: "#000000" at ink 7 with a palette — the reference renderer keys
+  // indexed ink 7 on the SPRITE's bgColor (black), not the white default. The
   // two-stage pipeline still applies: the matte floods edge-connected black
   // and the shader keeps only black, so a black blob sealed inside white
   // stays, while the white field and the edge-touching black both vanish.
   // The real shadow bitmap is a blob that touches the edges on all sides,
-  // so it ends fully transparent — same result as DirPlayer.
+  // so it ends fully transparent — same result as the reference renderer.
   const W = 5, H = 5;
   const palette = [[255, 255, 255], [0, 0, 0]]; // 0 = white, 1 = black
   const { data, fill } = makeImage(W, H);
@@ -437,10 +438,10 @@ test('key with no palette falls back to exact white (legacy behavior)', () => {
   assert.equal(alphaAt(data, 3, 1, 1), 0, 'exact white keyed');
 });
 
-test('ink-36 key with real hotel palette removes enclosed whites (DirPlayer)', () => {
-  // The hotel tower's 172 truly-enclosed white pixels are palette index 0;
+test('ink-36 key with real palette removes enclosed whites (reference parity)', () => {
+  // The tower art's 172 truly-enclosed white pixels are palette index 0;
   // the edge-connected flood (old behavior) kept them visible. The blanket
-  // key removes them, matching DirPlayer's ink-36 shader.
+  // key removes them, matching the reference renderer's ink-36 shader.
   const palette = [[255, 255, 255], [0, 0, 0], [153, 87, 109]];
   const { data, fill } = makeImage(6, 6);
   for (let y = 0; y < 6; y++) {
@@ -457,6 +458,91 @@ test('ink-36 key with real hotel palette removes enclosed whites (DirPlayer)', (
   assert.equal(alphaAt(data, 6, 2, 2), 0, 'enclosed palette-0 white keyed');
   assert.equal(alphaAt(data, 6, 2, 3), 255, 'palette-2 art survives');
   assert.equal(alphaAt(data, 6, 1, 1), 255, 'black art survives');
+});
+
+test('ink 36 keys by COLOUR only — the index raster is never consulted', () => {
+  // Ink 36 is "Makes all the pixels in the background color of the selected
+  // sprite appear transparent": a COLOUR rule about the sprite, with WHITE as
+  // the Tools-window default. Reaching for the member's palette entry 0 instead
+  // is what broke hh_entry_jp's Entry Image Scroller: the member it paints the
+  // scrolling screen into (`screen3d`) has BLACK at palette index 0, that black
+  // IS art (the screen sits in a black field whose left edge is index 0 for the
+  // top 48 rows, so a border flood walks straight into it), and the movie has
+  // painted over the art by the time the sprite is drawn. An index rule then keys
+  // the ORIGINAL art's background positions out of the freshly painted frame.
+  const W = 6, H = 6;
+  const palette = [[0, 0, 0], [255, 255, 255]]; // 0 = black art, 1 = white backdrop
+  const { data, fill } = makeImage(W, H);
+  const indices = new Uint8Array(W * H).fill(1);
+  for (let x = 0; x < W; x++) {
+    // index-0 black art that TOUCHES the border (the scroller's left column)
+    indices[x] = 0;
+    fill(x, 0, 0, 0, 0);
+  }
+  const changed = bakeEdgeBackground(data, W, H, 'key', palette, indices);
+  assert.ok(changed, 'the white backdrop is keyed');
+  assert.equal(alphaAt(data, W, 0, 0), 255, 'border-connected index-0 art survives — ink 36 asks for white');
+  assert.equal(alphaAt(data, W, 3, 3), 255, 'the white backdrop is what gets keyed');
+});
+
+test('ink 36 leaves a non-white palette-0 background standing (sprite colour, not member background)', () => {
+  // The other half of the same rule: art whose palette entry 0 is NOT white has
+  // no white to key, so ink 36 keys nothing at all. Callers that need that
+  // background gone are asking for ink 8 (matte = the member's index-0 rule), or
+  // must set the sprite's `bgColor`, which is what `keyRgb` carries.
+  const W = 4, H = 4;
+  const palette = [[221, 221, 221], [0, 0, 0]];
+  const { data, fill } = makeImage(W, H);
+  const indices = new Uint8Array(W * H);
+  const put = (x: number, y: number, idx: number): void => {
+    indices[y * W + x] = idx;
+    fill(x, y, palette[idx][0], palette[idx][1], palette[idx][2]);
+  };
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) put(x, y, 0);
+  for (let y = 1; y <= 2; y++) for (let x = 1; x <= 2; x++) put(x, y, 1);
+  const changed = bakeEdgeBackground(data, W, H, 'key', palette, indices);
+  assert.equal(changed, false, 'no exact-white pixel exists to key');
+  assert.equal(alphaAt(data, W, 0, 0), 255, 'palette-0 #dddddd background survives ink 36');
+
+  // The sprite's own background colour, when the movie sets one, still keys.
+  const bg = data.slice();
+  const changedByBg = bakeEdgeBackground(bg, W, H, 'key', palette, indices, 0xdddddd);
+  assert.ok(changedByBg, 'an explicit sprite bgColor keys that colour');
+  assert.equal(alphaAt(bg, W, 0, 0), 0, 'bgColor-keyed background gone');
+  assert.equal(alphaAt(bg, W, 1, 1), 255, 'black art survives');
+});
+
+test('bakeSurface forwards the surface\'s own palette and indices (remapped / adopted image members)', () => {
+  // `bakeImagePixels` (the image path) used to hand the bake the CHANNEL member's
+  // palette and no indices at all, while the frame path handed it the decoded
+  // indices. For an image that came from somewhere else — the mover's preview
+  // gets an icon image assigned onto a shared member, and a `paletteTarget`
+  // remap rewrites the RGB the pixels carry — matching the palette-0 COLOUR stops
+  // matching the background. The index rule does not care what colour it is.
+  const W = 5, H = 5;
+  // Palette-0's colour (#0000ff) is NOT the colour the surface's background
+  // pixels hold (#0a0a0a), exactly as after a remap.
+  const palette = [[0, 0, 255], [200, 40, 40]];
+  const { data, fill } = makeImage(W, H);
+  const indices = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) fill(x, y, 10, 10, 10);
+  for (let y = 1; y <= 3; y++) for (let x = 1; x <= 3; x++) {
+    indices[y * W + x] = 1;
+    fill(x, y, 200, 40, 40);
+  }
+
+  const noIndices = bakeSurface(data, W, H, 'matte', null, undefined, 8, 0, palette);
+  assert.equal(noIndices.changed, false, 'without indices the palette-0 colour matches nothing');
+
+  const withIndices = bakeSurface(data, W, H, 'matte', null, undefined, 8, 0, palette, null, null, indices);
+  assert.ok(withIndices.changed, 'with indices the member background is keyed');
+  assert.equal(alphaAt(withIndices.pixels, W, 0, 0), 0, 'matte keys the border-connected index-0 background');
+  assert.equal(alphaAt(withIndices.pixels, W, 2, 2), 255, 'art survives');
+
+  const keyByIdx = bakeSurface(data, W, H, 'key', null, undefined, 36, 0, palette, null, null, indices);
+  assert.ok(keyByIdx.changed, 'ink 36 keys its background by index too');
+  assert.equal(alphaAt(keyByIdx.pixels, W, 0, 0), 0, 'ink 36 background keyed');
+  assert.equal(alphaAt(keyByIdx.pixels, W, 2, 2), 255, 'ink 36 art survives');
 });
 
 test('matte with a palette floods from palette index 0 (cloud turn slices)', () => {
@@ -501,45 +587,116 @@ test('matte bake keeps edge-touching art (light1: black diamond on white, ink 33
 test('ink -> blend mode mapping (add pin 33 is additive, per user report)', () => {
   assert.equal(blendModeForInk(33), 'add'); // light1 light rays
   assert.equal(blendModeForInk(34), 'add'); // add
-  // 35/38 -> a real GL reverse-subtract registered by PixiStage.init. pixi's
+  // 35 -> a real GL reverse-subtract registered by PixiStage.init. pixi's
   // advanced 'subtract' is a broken back-texture filter (source composites
   // verbatim), which made the v31 room dimmer paint a solid black room.
-  assert.equal(blendModeForInk(35), SUBTRACT_BLEND_MODE); // subtract pin
-  assert.equal(blendModeForInk(38), SUBTRACT_BLEND_MODE); // subtract
-  // 37/39/40 -> GL MAX/MIN but registered with the destination ALPHA preserved.
+  assert.equal(blendModeForInk(35), SUBTRACT_BLEND_MODE); // subtract pin CLAMPS
+  // 38 (Subtract) keeps its registered wrap-subtract shader, but its only user
+  // is the X-Ray Divider, whose ink-6 layer covers it: see the hc_rntgn test.
+  assert.equal(blendModeForInk(38), PASS_THROUGH_BLEND_MODE);
+  // 37/40 -> GL MAX but registered with the destination ALPHA preserved.
   // Pixi's own min/max are [ONE, ONE, ONE, ONE, MIN, MIN], so they took the
   // min/max of alpha too and a sprite's transparent pixels drove the room's
-  // alpha to 0 over the whole sprite quad.
+  // alpha to 0 over the whole sprite quad. (39, the other MIN ink, is the X-Ray
+  // Divider's covered under-layer and passes through — see below.)
   assert.equal(blendModeForInk(37), LIGHTEST_BLEND_MODE); // lightest
   assert.equal(blendModeForInk(40), LIGHTEST_BLEND_MODE); // lightest
-  assert.equal(blendModeForInk(39), DARKEST_BLEND_MODE); // darkest
+  assert.equal(blendModeForInk(39), PASS_THROUGH_BLEND_MODE);
   assert.equal(blendModeForInk(0), 'normal');
   assert.equal(blendModeForInk(8), 'normal'); // matte: baked alpha, normal composite
   assert.equal(blendModeForInk(36), 'normal');
 });
 
-test('hc_rntgn ink set maps to alpha-preserving blend modes', () => {
+test('hc_rntgn ink set: 38/39 pass through so the ink-6 ramp reads the ROOM', () => {
   // Furni props carry per-part inks as SPRITE inks
   // (hh_furni_xx_hc_rntgn/hc_rntgn.props: b/e ink 39, c/f ink 38, g/h ink 6,
-  // everything else matte 8; Passive Object Class solveInk -> tSpr.ink). The
-  // 39/38 parts must not be pixi's alpha-min/max, and 6 (Not Reverse) is a
-  // destination XOR with no fixed-function equivalent — it is served by the
-  // shader blend modes in stage/blendFilters.ts.
-  assert.equal(blendModeForInk(39), DARKEST_BLEND_MODE);
-  assert.equal(blendModeForInk(38), SUBTRACT_BLEND_MODE);
+  // everything else matte 8; Passive Object Class solveInk -> tSpr.ink), and the
+  // three layers are the SAME band art (member aliases) at zshift 1/2/3, so the
+  // ink-6 copy covers the other two exactly.
+  //
+  // 39/38 are PASS THROUGHS, not MIN/wrap-subtract: every arithmetic reading of
+  // the stack paints the band magenta or inverts the room's brightness (see
+  // stage/blendFilters.ts), and leaving them arithmetic would also leave layer
+  // b's `matteIdentity` WHITE rectangle visible — the keyed corners of c/g are
+  // transparent, so b's white fill shows through them as white corners around a
+  // flat green band.
+  assert.equal(blendModeForInk(39), PASS_THROUGH_BLEND_MODE);
+  assert.equal(blendModeForInk(38), PASS_THROUGH_BLEND_MODE);
   assert.equal(blendModeForInk(8), 'normal');
-  // Ink 6's XOR shader exists and is verified (scripts/ink-xor-blend-snippet.js)
-  // but is left OFF: over the black destination the 39/38 copies of the same
-  // art leave behind it reads as pink/black. See INK6_XOR in stage/matte.ts.
-  assert.equal(blendModeForInk(6), 'normal');
+  // Ink 6 (Not Reverse) is the X-Ray Divider's destination duotone: a shader pass
+  // that maps the ROOM's brightness onto the measured green ramp, which no
+  // bitwise RGB operator can produce (the documented `dst XOR ~src` pins R and B
+  // to 255 for a #005500 band art) and no fixed-function blend can express.
+  assert.equal(blendModeForInk(6), NOT_REVERSE_BLEND_MODE);
+  // Ink 2 (Reverse) is the documented `dst XOR src`, still a shader pass.
   assert.equal(blendModeForInk(2), REVERSE_BLEND_MODE);
-  // Ink 6 still bakes its matte. White is the identity for `dst XOR ~src`, so
-  // the bake is a no-op on the shader path, but it keeps the layer's white
-  // rectangle out of the frame when the shader cannot run at all (pixi's canvas
-  // fallback drops every custom blend mode). Ink 2 keys BLACK as its identity,
+  // Ink 6 still bakes its matte, which is what keys the band's white corner
+  // triangles out (they then show the room). Ink 2 keys BLACK as its identity,
   // so baking it would not be faithful — it stays unbaked.
   assert.equal(bakeModeForInk(6), 'matte');
   assert.equal(bakeModeForInk(2), null);
+});
+
+test('the duotone band ramp keeps its measured endpoints and darkens the middle', () => {
+  // Calibrated off a real client screenshot: every colour the band paints is
+  // on the straight line from #74fa4c (the room's darkest tones) to #225413 (its
+  // lightest), and both endpoints are exact colours from that shot.
+  assert.deepEqual(duotoneRampRgb(0, 0, 0), boostSaturation(116, 250, 76)); // #74fa4c at black
+  assert.deepEqual(duotoneRampRgb(255, 255, 255), boostSaturation(34, 84, 19)); // #225413 at white
+  // Between them the transfer is gamma-compressed, so a mid room tone lands
+  // CLOSER to the dark green than the straight `1 - lum` line did — that was the
+  // "nearly perfect, a little bright" report. Endpoints are untouched by it.
+  const midTone = 128 * 3; // a room pixel of byte 128 in every channel
+  const got = duotoneRampRgb(midTone, midTone, midTone);
+  const linear = [34 + 82 * 0.5, 84 + 166 * 0.5, 19 + 57 * 0.5].map((v) => Math.round(v));
+  assert.ok(got[1] < linear[1], `mid tone must be darker than the linear ramp: ${got} vs ${linear}`);
+  assert.ok(got[1] > 19, `but still on the ramp: ${got}`);
+  // Monotone brighter room -> darker output, for every byte level.
+  for (let lum = 0; lum < 255; lum++) {
+    const a = duotoneRampRgb(lum, lum, lum);
+    const b = duotoneRampRgb(lum + 1, lum + 1, lum + 1);
+    assert.ok(b[1] <= a[1], `ramp must not get brighter as the room does: ${lum}`);
+  }
+  // The greens are chroma-boosted about their own luma, so the band reads as
+  // green rather than olive without getting lighter: the dark endpoint loses
+  // red and blue, and the lime keeps its green while shedding them too.
+  const dark = duotoneRampRgb(255, 255, 255);
+  assert.ok(dark[0] < 34 && dark[2] < 19, `dark endpoint goes greener: ${dark}`);
+  assert.ok(dark[1] > 84, `dark endpoint keeps its green up: ${dark}`);
+  const lime = duotoneRampRgb(0, 0, 0);
+  assert.ok(lime[0] < 116 && lime[2] < 76, `lime endpoint sheds red/blue: ${lime}`);
+  assert.ok(lime[1] >= 250, `lime endpoint stays lime: ${lime}`);
+  // Byte-for-byte agreement with the shader twins in stage/blendFilters.ts
+  // (inkNotReverseRamp is `clamp(luma + (c - luma) * 1.35)` over
+  // `mix(light, dark, clamp(1 - pow(lum, 0.75)))`).
+  for (let lum = 0; lum <= 255; lum++) {
+    const t = Math.max(0, Math.min(1, 1 - Math.pow(lum / 255, DUOTONE_RAMP_STEEPNESS)));
+    const want = boostSaturation(34 + 82 * t, 84 + 166 * t, 19 + 57 * t);
+    assert.deepEqual(duotoneRampRgb(lum, lum, lum), want);
+  }
+});
+
+test('every custom blend mode is a blend FILTER, so the back buffer gets enabled', () => {
+  // `PixiStage.syncBackBuffer` decides `renderer.backBuffer.useBackBuffer` from
+  // `blendFilterMode()`. Getting this predicate wrong is silent and looks like a
+  // rendering bug rather than a blend bug: pixi's `FilterSystem` checks
+  // `filter.blendRequired && !useBackBuffer`, warns, DISABLES the filter and
+  // draws the sprite as a normal composite. That is exactly what the X-Ray
+  // Divider did after ink 6 moved off REVERSE_BLEND_MODE onto NOT_REVERSE_BLEND_MODE
+  // while the back-buffer gate still only named the XOR and wrap-subtract passes:
+  // the band art was painted verbatim — flat `#005500` plus layer b's white
+  // corners, i.e. "just green + white corners".
+  assert.equal(blendFilterMode(REVERSE_BLEND_MODE), true);
+  assert.equal(blendFilterMode(SUBTRACT_WRAP_BLEND_MODE), true);
+  assert.equal(blendFilterMode(NOT_REVERSE_BLEND_MODE), true);
+  assert.equal(blendFilterMode(PASS_THROUGH_BLEND_MODE), true);
+  // The GL blend-state modes need no back texture, and neither does a plain
+  // composite.
+  assert.equal(blendFilterMode('normal'), false);
+  assert.equal(blendFilterMode('add'), false);
+  assert.equal(blendFilterMode(SUBTRACT_BLEND_MODE), false);
+  assert.equal(blendFilterMode(DARKEST_BLEND_MODE), false);
+  assert.equal(blendFilterMode(LIGHTEST_BLEND_MODE), false);
 });
 
 /** 4x1 lantern stem: white | white | green | green — the picker keys white, the
@@ -627,12 +784,13 @@ test('Darkest (39) identity rectangle is never taken by the bgColor tint', () =>
   }
 });
 
-test('spritePixelHitTest: the pixels a sprite displays are its active area, the rest is click-through', () => {
+test('spritePixelHitTest: keyed/alpha art uses its displayed pixels, other inks keep the rectangle', () => {
   // Director: "the active area is the portion of the image that is displayed"
   // (drmx2004_scripting_ref.txt:6979, 7027; the `cursor` doc agrees at 28823) —
-  // so ANY pixel the sprite renders as nothing belongs to the sprite underneath,
-  // whether the hole came from an ink's keying bake or from the artwork's own
-  // alpha channel. The room leans on the alpha case: furniture sprites are ink 8
+  // but only for the inks whose active area really IS the displayed art. The
+  // test is ink-aware so BOTH behaviours coexist: keyed/alpha art uses the
+  // displayed pixels, every other ink keeps the full rectangle. The room leans
+  // on the keyed case: furniture sprites are ink 8
   // by default (`solveInk` returns 8 when `*.props` names no ink — real chair
   // props carry only `#zshift`), and their `#zshift`ed parts interleave WITH a
   // sitter, so the part drawn in front of the avatar has a bigger locZ than
@@ -643,18 +801,83 @@ test('spritePixelHitTest: the pixels a sprite displays are its active area, the 
   fill(0, 0, 0, 0, 0, 0); // zero-filled (unpainted) pixel at (0,0) — note 6 args: x,y,r,g,b,a
   fill(1, 1, 255, 0, 0, 255); // single opaque pixel at (1,1)
   fill(2, 2, 0, 0, 0, 0); // explicit transparent pixel at (2,2)
-  assert.equal(spritePixelHitTest(data, 4, 4, 1, 1), true, 'opaque pixel hits');
-  assert.equal(spritePixelHitTest(data, 4, 4, 2, 2), false, 'transparent pixel falls through');
-  assert.equal(spritePixelHitTest(data, 4, 4, 0, 0), false, 'unpainted (zero-filled) pixel falls through');
+  assert.equal(spritePixelHitTest(8, data, 4, 4, 1, 1), true, 'ink 8: opaque pixel hits');
+  assert.equal(spritePixelHitTest(8, data, 4, 4, 2, 2), false, 'ink 8: transparent pixel falls through');
+  assert.equal(spritePixelHitTest(8, data, 4, 4, 0, 0), false, 'ink 8: unpainted (zero-filled) pixel falls through');
   fill(3, 3, 0, 0, 0, 0); // a second explicit hole, away from the edges
-  assert.equal(spritePixelHitTest(data, 4, 4, 3, 3), false, 'every transparent pixel falls through, not only a corner');
+  assert.equal(spritePixelHitTest(8, data, 4, 4, 3, 3), false, 'ink 8: every transparent pixel falls through, not only a corner');
+  // Ink 36 (background transparent), 4 and 7 key pixels too, so they use the
+  // displayed-pixel rule as well.
+  assert.equal(spritePixelHitTest(36, data, 4, 4, 2, 2), false, 'ink 36: transparent pixel falls through');
+  assert.equal(spritePixelHitTest(4, data, 4, 4, 2, 2), false, 'ink 4: transparent pixel falls through');
+  assert.equal(spritePixelHitTest(7, data, 4, 4, 2, 2), false, 'ink 7: transparent pixel falls through');
+  // Every OTHER ink keeps Director's rectangle rule: the sprite owns the whole
+  // rectangle even where the buffer is transparent, so a composited window
+  // panel / flat fill cannot open a click hole in the chrome (the navigator's
+  // room-list panel used to swallow the back-tab click this way).
+  assert.equal(spritePixelHitTest(0, data, 4, 4, 2, 2), true, 'ink 0: rectangle rule, transparent pixel still ours');
+  assert.equal(spritePixelHitTest(1, data, 4, 4, 2, 2), true, 'ink 1: rectangle rule');
+  assert.equal(spritePixelHitTest(39, data, 4, 4, 2, 2), true, 'ink 39: rectangle rule');
+  // ...unless the artwork carries a real alpha channel of its own, which is
+  // honoured for ANY ink.
+  assert.equal(spritePixelHitTest(0, data, 4, 4, 2, 2, true), false, 'ink 0 + alpha art: transparent pixel falls through');
+  assert.equal(spritePixelHitTest(0, data, 4, 4, 1, 1, true), true, 'ink 0 + alpha art: opaque pixel hits');
+  assert.equal(inkUsesPixelHitTest(8), true, 'ink 8 uses the pixel rule');
+  assert.equal(inkUsesPixelHitTest(36), true, 'ink 36 uses the pixel rule');
+  assert.equal(inkUsesPixelHitTest(0), false, 'ink 0 uses the rectangle rule');
+  assert.equal(inkUsesPixelHitTest(0, true), true, 'alpha art uses the pixel rule whatever the ink');
   // Missing surface / out-of-bounds must stay a HIT: the rectangle is the
   // fallback, so a drifted mapping can never make a sprite unclickable.
-  assert.equal(spritePixelHitTest(undefined, 4, 4, 2, 2), true, 'no surface -> rect hit');
-  assert.equal(spritePixelHitTest(null, 4, 4, 2, 2), true, 'null surface -> rect hit');
-  assert.equal(spritePixelHitTest(data, 0, 0, 2, 2), true, 'empty surface -> rect hit');
-  assert.equal(spritePixelHitTest(data, 4, 4, 9, 9), true, 'out-of-bounds -> rect hit');
-  assert.equal(spritePixelHitTest(data, 4, 4, -1, 2), true, 'negative coord -> rect hit');
+  assert.equal(spritePixelHitTest(8, undefined, 4, 4, 2, 2), true, 'no surface -> rect hit');
+  assert.equal(spritePixelHitTest(8, null, 4, 4, 2, 2), true, 'null surface -> rect hit');
+  assert.equal(spritePixelHitTest(8, data, 0, 0, 2, 2), true, 'empty surface -> rect hit');
+  assert.equal(spritePixelHitTest(8, data, 4, 4, 9, 9), true, 'out-of-bounds -> rect hit');
+  assert.equal(spritePixelHitTest(8, data, 4, 4, -1, 2), true, 'negative coord -> rect hit');
+});
+
+test('spritePixelHitTest: a keyed-away pixel still belongs to sprite art that is solid there (navigator back links)', () => {
+  // The navigator's breadcrumb strip is `nav_roomlistBackLinks`: an ink-36
+  // element whose buffer is a runtime `image(w,h,32)` the movie fills and then
+  // feeds the rendered history text into. Ink 36 keys the feed's background
+  // colour away, so BETWEEN the glyphs the RENDERED buffer is empty — but the
+  // element is the whole strip, and it is the element that carries the
+  // `expandHistoryItem` handler (Navigator Roomlist Interface Class, the
+  // "nav_roomlistBackLinks" case). Reading the rendered pixel alone routed the
+  // click to the `nav_roomlistBackTabs` frame drawn underneath (which has no
+  // handler), so the sub-tab did nothing.
+  const { data: rendered, fill: fillRendered } = makeImage(6, 3);
+  const { data: art, fill: fillArt } = makeImage(6, 3);
+  // The sprite's own 32-bit buffer is solid across the strip (the movie filled
+  // it with the element's background before feeding the text over it)...
+  for (let y = 0; y < 3; y++) for (let x = 0; x < 6; x++) fillArt(x, y, 51, 102, 102);
+  // ...and ink 36 keys that background off, so the rendered buffer keeps only
+  // the glyph pixels (columns 1 and 4) and is empty everywhere else.
+  for (let y = 0; y < 3; y++) for (let x = 0; x < 6; x++) fillRendered(x, y, 0, 0, 0, 0);
+  for (const x of [1, 4]) for (let y = 0; y < 2; y++) fillRendered(x, y, 51, 102, 102);
+  const surface = { pixels: art, width: 6, height: 3, depth: 32 };
+  assert.equal(alphaAt(rendered, 6, 0, 0), 0, 'sanity: the keyed background renders nothing');
+  assert.equal(alphaAt(rendered, 6, 1, 0), 255, 'sanity: a glyph pixel is drawn');
+  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 0, 0, false, surface), true, 'solid art keeps the whole strip clickable');
+  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 3, 2, false, surface), true, 'a hole between glyphs is still the element');
+  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 1, 0, false, surface), true, 'a glyph pixel hits too');
+  // Where the sprite's OWN art has a hole as well, the click really does belong
+  // to the sprite underneath (the chair/sitter rule is untouched).
+  fillArt(3, 2, 0, 0, 0, 0);
+  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 3, 2, false, surface), false, 'both surfaces empty -> falls through');
+  // INDEXED art (depth < 32) carries no alpha of its own — its transparency is
+  // exactly what the bake computes — so it must keep deciding on the rendered
+  // pixel alone. Otherwise every 8-bit furniture part (`#ink: 36` is common in
+  // `*.props`) would claim its whole rectangle again and swallow the click
+  // aimed at the avatar it carries.
+  const indexed = { pixels: art, width: 6, height: 3, depth: 8 };
+  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 0, 0, false, indexed), false, 'indexed art does not rescue a keyed pixel');
+  // A surface with no pixels at all can never rescue anything either.
+  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 0, 0, false, { pixels: null, width: 6, height: 3, depth: 32 }), false, 'no art pixels -> no rescue');
+  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 0, 0, false, null), false, 'absent surface -> no rescue');
+  // The rescue is NOT a licence to skip the ink gate: an ink that keeps the
+  // rectangle rule already returned true above, and an out-of-frame sample still
+  // falls back to the rectangle.
+  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 99, 99, false, surface), true, 'out-of-frame -> rect hit');
 });
 
 test('matte keys the opaque white block on a transparent-bordered avatar canvas (respect flash / x-ray)', () => {
@@ -739,7 +962,7 @@ test('ink 4 (Not copy) bakes the white canvas rectangle out like matte (Ice FX)'
 test('ink-8 matte skips transparent-bordered text images (entry_bar white glyphs survive)', () => {
   // The corpus Text Wrapper pastes the field member image ink-8 over its own
   // pimage.fill() background. The member `.image` is TRANSPARENT + white
-  // glyphs (DirPlayer text bitmaps are 0,0,0,0-filled). The old matte resolved
+  // glyphs (reference text bitmaps are 0,0,0,0-filled). The old matte resolved
   // "white" from the glyph pixels touching the image edge, and the transparent
   // border seeded the flood to roam through every transparent pixel and eat
   // the matching white glyphs — entry_bar labels (txtColor #FFFFFF) vanished.
@@ -813,7 +1036,7 @@ test('opaque white-backdrop art still gets the ink-8 matte (cloud regression)', 
 });
 
 test('matteRegionMask prefers white when the (0,0) pixel is content (composed room buffers)', () => {
-  // Live dump (scripts/avatar-key-diag-snippet.js on a hotel client): composed
+  // Live dump (scripts/avatar-key-diag-snippet.js on a live client): composed
   // `obj.disp.*` / element buffers have white borders but a CONTENT top-left
   // pixel — `RoomInfoWindow_room_info_room_name` is pixel00 #eeeeee with 329 of
   // 350 edge pixels pure white. matteRegionMask had no white rule at all, so it
@@ -859,7 +1082,7 @@ test('ink-8 matte keys an all-near-white member instead of bailing out (room nam
 });
 
 test('copyPixels ink-8 matte keys the (0,0) pixel color on a 32-bit source (purse shadow)', () => {
-  // DirPlayer copy_pixels_with_params: for a 32-bit source WITHOUT alpha the
+  // The reference renderer's copyPixels: for a 32-bit source WITHOUT alpha the
   // ink-8 matte background is EXACTLY the source's top-left pixel (0,0)
   // (edge_matte_color) — no edge-voting. The purse_sd drop-shadows are
   // white-backdrop art (grey shadow bleeding into the edges): pixel (0,0) is
@@ -879,7 +1102,7 @@ test('copyPixels ink-8 matte keys the (0,0) pixel color on a 32-bit source (purs
 });
 
 test('copyPixels ink-8 matte on a 32-bit source with black (0,0) keys black (U69 glyphs)', () => {
-  // U69 regression, DirPlayer parity: entry_bar field-member images are black
+  // U69 regression, reference parity: entry_bar field-member images are black
   // (0,0) with white glyphs touching the left edge. The matte background is
   // pixel (0,0) = black — the flood keys the black and the white glyphs
   // survive. (A white-glyph edge pixel must NOT hijack the matte to white.)
@@ -898,8 +1121,9 @@ test('nav 9-slice pieces with the shared palette table attached key white / past
   // The navigator chrome ships as 32-bit PNGs with NO per-member .pal — the
   // pieces rely on the shared nav_ui_palette (index 0 = white), attached by
   // Unique Element via `pimage.paletteRef = <member>`. With the table on the
-  // image, the ink-8 matte keys palette[0] = white exactly like DirPlayer's
-  // 8-bit indexed path: the corner's white backdrop is keyed (black outline +
+  // image, the ink-8 matte keys palette[0] = white exactly like the reference
+  // renderer's 8-bit indexed path: the corner's white backdrop is keyed (black
+  // outline +
   // gray fill kept), and strips with no white at all (nav_tb_px solid gray,
   // nav_tb_ed black/gray) get a NULL mask and paste as-is. Without the
   // palette, the pixel-(0,0) fallback keys black/gray and eats the outline /
@@ -930,7 +1154,7 @@ test('nav 9-slice pieces with the shared palette table attached key white / past
 test('matteRegionMask with raw indices keys ONLY index 0 (fuzzy floor dither)', () => {
   // The fuzzy floor tile: palette index 0 = white background, but indices 17/18
   // (the dither interior) also resolve to 203-gray / white through the pattern
-  // palette. DirPlayer floods by palette INDEX, so the white 18s are art and
+  // palette. The reference renderer floods by palette INDEX, so the white 18s are art and
   // survive; an RGB-keyed flood eats them (they are edge-connected through the
   // index-0 background), and the black V outlines of tiles behind show through
   // as a grid.
@@ -1010,11 +1234,11 @@ test('bakeEdgeBackground matte with raw indices keeps same-colored dither (fuzzy
 });
 
 test('ink 9 (Mask): applyMaskAlpha cuts the source to the mask black regions', () => {
-  // The Habbo pool water: vesi1 is a fully OPAQUE blue rectangle, vesimask1 is
-  // its black/white cutout (black = swim area, white = shoreline/edges). Ink 9
+  // The pool water: vesi1 is a fully OPAQUE blue rectangle, vesimask1 is its
+  // black/white cutout (black = swim area, white = shoreline/edges). Ink 9
   // bakes the NEXT member's bitmap as a grayscale alpha mask onto the source:
   // black(0) -> opaque, white(255) -> transparent, grays -> partial, and pixels
-  // outside the mask coverage are transparent (DirPlayer parity).
+  // outside the mask coverage are transparent (reference parity).
   const W = 6, H = 6;
   const { data, fill } = makeImage(W, H); // opaque blue water
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) fill(x, y, 0, 128, 255);
@@ -1064,7 +1288,7 @@ test('ink 9 (Mask): applyMaskAlpha cuts the source to the mask black regions', (
 
 test('ink 41 (Darken) tints through the authored fg+bg duotone (sepia camera photo)', () => {
   // The camera photo display element sets #color: "#681F10" (dark brown) +
-  // #bgColor: "#FFCC66" (light gold) with ink 41. DirPlayer's ink-41 shader
+  // #bgColor: "#FFCC66" (light gold) with ink 41. The reference ink-41 shader
   // remaps EVERY pixel as mix(fg, bg, src) = fg + (bg-fg)*src per channel:
   // black -> the dark fg, white -> the light bg, midtones -> the warm ramp.
   // The old multiply-only (bg*src, fg assumed black) dropped the fg term and
@@ -1125,8 +1349,8 @@ test('ink-41 sprite matte keys the feedImage white fill but keeps the tinted pat
   // `pBuffer.image.fill(tTargetRect, pProps[#bgColor])` where the Layout
   // Parser defaults #bgColor to WHITE, then pastes the already-tinted pattern
   // (copyPixels with [#maskImage: createMatte(), #ink: 41, #bgColor: tColor])
-  // on top. DirPlayer's should_matte_sprite(41) is true, so the edge-
-  // connected white fill is keyed at the sprite and the pattern shows through
+  // on top. The reference renderer mattes ink-41 sprites, so the edge-connected
+  // white fill is keyed at the sprite and the pattern shows through
   // — the wall preview must not render as an opaque white slab that hides the
   // floor preview stacked behind it.
   const W = 10, H = 10;
