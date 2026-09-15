@@ -3038,7 +3038,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         if (tex) this.filmTextures.set(t.member, tex);
       }
     }
-    const pixels = composeFilmLoopFrame(plan, index, this.filmTextures);
+    const pixels = composeFilmLoopFrame(plan, index, this.filmTextures, loop.filmImage?.data ?? undefined);
     loop.filmImage = filmLoopImage(pixels, plan.width, plan.height, loop.filmImage);
     loop.image = undefined;
   }
@@ -4463,6 +4463,11 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     this.unindexCast(cast.number);
     for (const member of cast.members.values()) {
       this.membersByGlobal.delete(this.memberGlobalNum(cast.number, member.number));
+      // Clean up any film textures cached for this member.
+      this.filmTextures.delete(member);
+      this.filmPlans.delete(member);
+      // Clean up the image owner reference so the LImage can be GC'd.
+      if (member.image) this.imageOwners.delete(member.image);
       if (member.name) {
         const hit = this.scriptsByName.get(member.name.toLowerCase());
         if (hit?.member.castLibNumber === cast.number && hit.member.number === member.number) {
@@ -4477,6 +4482,17 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     }
     cast.members.clear();
     cast.byName.clear();
+    // Dispose any channels that belonged to this cast so their
+    // textures and sprites are freed — without this, leaving a
+    // room leaks every sprite's GPU texture (the "landscape climb"
+    // symptom: new windows keep allocating textures on top of old
+    // ones that were never destroyed).
+    for (let n = 1; n < this.channels.length; n++) {
+      const ch = this.channels[n];
+      if (ch.member && ch.member.castLibNumber === cast.number) {
+        this.adapter?.setChannel(ch.number, null);
+      }
+    }
   }
 
   getWindowProp(w: LWindowRef, prop: string): LVal {

@@ -468,7 +468,7 @@ export class PixiStage implements StageAdapter {
       gl?: WebGLRenderingContext | WebGL2RenderingContext;
       state?: { blendModesMap?: Record<string, number[]> };
       backBuffer?: { useBackBuffer?: boolean };
-      texture?: { managedTextures?: unknown[] };
+      texture?: { managedTextures?: (unknown | null)[] };
     };
     const gl = r.gl;
     let gpu: string | null = null;
@@ -485,6 +485,16 @@ export class PixiStage implements StageAdapter {
     }
     const renderer = this.rendererName();
     const box = (this.app.canvas as HTMLCanvasElement | undefined)?.getBoundingClientRect();
+    // pixi's `managedTextures` getter is Object.values() over a hash whose
+    // unloaded entries are set to null and only compacted after 10,000 holes
+    // (GCSystem.runOnHash), so its `.length` only ever grows: a texture that WAS
+    // disposed still counts. Count the non-null entries so the overlay reports
+    // the textures that actually exist, not every source ever created.
+    const texHash = (r.texture as unknown as { _managedTextures?: { items?: Record<string, unknown | null> } } | undefined)
+      ?._managedTextures?.items;
+    const liveTextures = texHash
+      ? Object.values(texHash).reduce<number>((n, s) => (s ? n + 1 : n), 0)
+      : (r.texture?.managedTextures ?? []).filter(Boolean).length;
     const map = r.state?.blendModesMap;
     const mem = (performance as unknown as {
       memory?: { usedJSHeapSize: number; totalJSHeapSize: number; jsHeapSizeLimit: number };
@@ -501,7 +511,10 @@ export class PixiStage implements StageAdapter {
       canvasCssH: box?.height ?? 0,
       dpr: window.devicePixelRatio || 1,
       nodes: this.nodes.size,
-      textures: r.texture?.managedTextures?.length ?? 0,
+      textures: liveTextures,
+      // Blob textures kept alive in the reuse cache (not on stage, so not part
+      // of `textures`) — a climbing count here is a real disposal problem.
+      idleTextures: this.freeBlobs.length,
       frames: perf.frames,
       ticks: perf.ticks,
       tickMs: perf.tickMs,
@@ -592,6 +605,11 @@ export class PixiStage implements StageAdapter {
       const pixels = baked && baked.changed ? baked.pixels : img.ensure();
       const finalBake = baked && baked.changed ? bake : null;
       if (!node.visual || !(node.visual instanceof Sprite)) {
+        // The node has no sprite of its own to own the texture, so free any
+        // texture left over from a previous visual before replacing it (a
+        // cleared image whose node was not reclaimed, e.g. a 0-sized image).
+        node.imgTexture?.destroy(true);
+        node.imgTexture = undefined;
         node.imgSource = new BufferImageSource({ resource: pixels, width: w, height: h, format: 'rgba8unorm', scaleMode: 'nearest' });
         node.imgTexture = new Texture({ source: node.imgSource });
         const sprite = new Sprite(node.imgTexture);
@@ -742,16 +760,16 @@ export class PixiStage implements StageAdapter {
     }
   }
 
-  private syncBgFill(channel: number): void {
-    const node = this.nodes.get(channel);
-    const ch = this.engine.getChannel(channel);
-    const remove = (): void => {
-      if (node?.bgFill) {
-        node.bgFill.destroy();
-        node.bgFill = undefined;
-      }
-    };
-    if (!node || !node.visual || !node.imgLImage || !ch || !ch.bgColorIsRgb || ch.bgColor == null) return remove();
+   private syncBgFill(channel: number): void {
+     const node = this.nodes.get(channel);
+     const ch = this.engine.getChannel(channel);
+     const remove = (): void => {
+       if (node?.bgFill) {
+         node.bgFill.destroy({ context: true, texture: true, textureSource: true });
+         node.bgFill = undefined;
+       }
+     };
+     if (!node || !node.visual || !node.imgLImage || !ch || !ch.bgColorIsRgb || ch.bgColor == null) return remove();
     if (ch.bgColor === 0xffffff) return remove();
     const ink = ch.ink ?? 0;
     if (ink === 1 || ink === 8 || ink === 36) return remove();
@@ -835,37 +853,46 @@ export class PixiStage implements StageAdapter {
 
   setChannel(channel: number, visual: ChannelVisual | null): void {
     let node = this.nodes.get(channel);
+    if (!node && !visual) {
+      // Nothing is drawn on this channel and nothing ever was: clearing it is
+      // a no-op. Creating a node just to hide it kept it in the map forever, so
+      // the dev overlay's node count only ever grew (spam-opening the navigator).
+      this._blendFilterChannels.delete(channel);
+      return;
+    }
     if (!node) {
       node = { container: new Container(), visual: null, regX: 0, regY: 0 };
       this.layer.addChild(node.container);
       this.nodes.set(channel, node);
     }
+    // Save the existing source/texture before cleanup so we can
+    // reuse them when the same image is being re-set (e.g. static
+    // landscape backgrounds that don't change between frames). The bake mode
+    // and pixel buffer are captured too: the cleanup below clears them, and a
+    // reuse test that read the cleared values could never be true.
+    const oldImgSource = node.imgSource;
+    const oldImgTexture = node.imgTexture;
+    const oldImgLImage = node.imgLImage;
+    const oldImgBuffer = node.imgBuffer;
+    const oldBakeMode = node.bakeMode;
     if (node.visual) {
-      // Destroy the visual and all its children (text groups contain Text +
-      // Graphics objects that would otherwise survive as orphans).
       node.visual.destroy({ children: true });
       node.visual = null;
     }
     this.releaseBlob(node.blobEntry);
     node.blobEntry = undefined;
     node.imgLImage = undefined;
-    node.imgSource = undefined;
     node.imgBuffer = undefined;
     node.hitBufW = undefined;
     node.hitBufH = undefined;
-    // Destroy the texture explicitly: Sprite.destroy() with no options keeps
-    // the texture alive, so without this every setChannel call leaked one
-    // Texture + BufferImageSource into pixi's managed-texture list.
-    node.imgTexture?.destroy(true);
-    node.imgTexture = undefined;
+    // NOTE: node.imgTexture is NOT destroyed yet — kept alive as
+    // oldImgTexture so the visual.image branch can reuse it when the
+    // same LImage is re-set (avoids GPU churn for static landscapes).
+    // It is destroyed in each branch below if reuse is not possible.
     node.bakeMode = undefined;
     node.bakeBuf = undefined;
     node.baseW = undefined;
     node.baseH = undefined;
-    // A text visual sets the hit box (see the `kind === 'text'` branch below);
-    // it MUST be forgotten with the visual, or a channel recycled from a text
-    // element into a bitmap keeps the old box and the hit test samples the
-    // bitmap at the wrong pixel (sw / hit.w above).
     node.hitW = undefined;
     node.hitH = undefined;
     node.shape = undefined;
@@ -874,10 +901,10 @@ export class PixiStage implements StageAdapter {
     node.caretX = undefined;
     node.caretY = undefined;
     node.caretH = undefined;
-    if (node.bgFill) {
-      node.bgFill.destroy();
-      node.bgFill = undefined;
-    }
+     if (node.bgFill) {
+       node.bgFill.destroy({ context: true, texture: true, textureSource: true });
+       node.bgFill = undefined;
+     }
     node.bgFillScanBuf = undefined;
     node.bgFillScanDirty = undefined;
     node.bgFillTransparent = undefined;
@@ -888,6 +915,15 @@ export class PixiStage implements StageAdapter {
     if (!visual) {
       node.container.visible = false;
       this._blendFilterChannels.delete(channel);
+      oldImgTexture?.destroy(true);
+      node.imgTexture = undefined;
+      node.imgSource = undefined;
+      // Reclaim the node: no visual is drawn on this channel any more, so its
+      // Container and bookkeeping are freed and the dev overlay's node count
+      // tracks the sprites actually on the stage instead of every channel ever
+      // used. A later setChannel re-creates the node.
+      this.nodes.delete(channel);
+      node.container.destroy({ children: true });
       return;
     }
     if (visual.kind === 'text') {
@@ -932,40 +968,73 @@ export class PixiStage implements StageAdapter {
       node.hitW = w;
       node.hitH = h;
       node.container.addChild(group);
+      oldImgTexture?.destroy(true);
+      node.imgTexture = undefined;
     } else if (visual.image) {
-      node.imgLImage = visual.image;
-      visual.image.dirty = false;
-      if (visual.image.width >= 1 && visual.image.height >= 1) {
-        const img = visual.image;
-        const w = Math.round(img.width);
-        const h = Math.round(img.height);
-        const ch = this.engine.getChannel(channel);
-        const bake = this.bakeForChannel(ch, img, w, h);
-        const tint = this.tintForChannel(ch);
-        const duotone = this.duotoneForChannel(ch);
-        const baked = bake || tint || duotone ? this.bakeImagePixels(node, img, w, h, bake, tint, this.ink7KeyForChannel(ch), ch.ink ?? 0, ch.member?.palette, duotone) : null;
-        const pixels = baked && baked.changed ? baked.pixels : img.ensure();
-        node.bakeMode = baked && baked.changed ? bake : null;
+      const img = visual.image;
+      const w = Math.round(img.width);
+      const h = Math.round(img.height);
+      const ch = this.engine.getChannel(channel);
+      const bake = this.bakeForChannel(ch, img, w, h);
+      const tint = this.tintForChannel(ch);
+      const duotone = this.duotoneForChannel(ch);
+      const baked = bake || tint || duotone ? this.bakeImagePixels(node, img, w, h, bake, tint, this.ink7KeyForChannel(ch), ch.ink ?? 0, ch.member?.palette, duotone) : null;
+      const pixels = baked && baked.changed ? baked.pixels : img.ensure();
+      const finalBake = baked && baked.changed ? bake : null;
+      // Reuse the existing texture when the same image, size, and
+      // bake/tint/duotone parameters are in play — avoids allocating a new
+      // Texture + BufferImageSource for a static landscape on every rebuild.
+      const canReuse = oldImgLImage === img
+        && oldImgSource !== undefined && oldImgSource.width === w && oldImgSource.height === h
+        && oldBakeMode === finalBake
+        && oldImgBuffer === pixels;
+      node.imgLImage = img;
+      img.dirty = false;
+      if (w >= 1 && h >= 1) {
+        if (canReuse && oldImgSource && oldImgTexture) {
+          // The texture still holds the right source; the visual was destroyed
+          // by the cleanup above, so a fresh Sprite reattaches it. Re-upload
+          // the pixels because the image may have been repainted in place.
+          node.imgSource = oldImgSource;
+          node.imgTexture = oldImgTexture;
+          node.visual = new Sprite(oldImgTexture);
+          node.container.addChild(node.visual);
+          oldImgSource.update();
+         } else {
+           oldImgTexture?.destroy(true);
+           node.imgSource = new BufferImageSource({ resource: pixels, width: w, height: h, format: 'rgba8unorm', scaleMode: 'nearest' });
+           node.imgTexture = new Texture({ source: node.imgSource });
+           const sprite = new Sprite(node.imgTexture);
+           node.baseW = w;
+           node.baseH = h;
+           node.visual = sprite;
+           node.container.addChild(sprite);
+         }
+        node.bakeMode = finalBake;
         node.imgBuffer = pixels;
-        node.imgSource = new BufferImageSource({ resource: pixels, width: w, height: h, format: 'rgba8unorm', scaleMode: 'nearest' });
-        node.imgTexture = new Texture({ source: node.imgSource });
-        const sprite = new Sprite(node.imgTexture);
-        node.baseW = w;
-        node.baseH = h;
-        node.visual = sprite;
-        node.container.addChild(sprite);
+        node.hitBufW = w;
+        node.hitBufH = h;
       }
       this.applyTransform(channel);
-    } else if (visual.shape) {
-      node.shape = visual.shape;
-      node.baseW = Math.max(1, Math.round(visual.shape.width));
-      node.baseH = Math.max(1, Math.round(visual.shape.height));
-      const g = new Graphics();
-      node.visual = g;
-      node.container.addChild(g);
-    } else if (visual.bytes) {
+     } else if (visual.shape) {
+       node.shape = visual.shape;
+       node.baseW = Math.max(1, Math.round(visual.shape.width));
+       node.baseH = Math.max(1, Math.round(visual.shape.height));
+       const g = new Graphics();
+       node.visual = g;
+       node.container.addChild(g);
+       oldImgTexture?.destroy(true);
+       node.imgTexture = undefined;
+     } else if (visual.bytes) {
       const ch = this.engine.getChannel(channel);
       if (ch.ink === 9 && visual.maskBytes) {
+        // This path (and the tint path below) creates a node-owned texture, so
+        // the pre-existing one is freed here and node.imgTexture keeps the new
+        // one. Nulling node.imgTexture at the end of the branch orphaned it —
+        // the sprite still referenced it, but the next rebuild had an
+        // undefined oldImgTexture and could never destroy it (textures climbed
+        // and never fell).
+        oldImgTexture?.destroy(true);
         const offX = (visual.maskRegX ?? 0) - (visual.regX ?? 0);
         const offY = (visual.maskRegY ?? 0) - (visual.regY ?? 0);
         let width = 0;
@@ -1016,6 +1085,7 @@ export class PixiStage implements StageAdapter {
         // colour effects' ink 8 + RGB foreColor) — see Engine.duotoneForChannel.
         const duotone = this.duotoneForChannel(ch);
         if (tint !== null || duotone !== null) {
+          oldImgTexture?.destroy(true);
           let width = 0;
           let height = 0;
           let rgba: Uint8ClampedArray | null = null;
@@ -1060,6 +1130,10 @@ export class PixiStage implements StageAdapter {
             node.hitBufH = height;
           }
         } else {
+          // The blob cache owns this texture; the node owns none.
+          oldImgTexture?.destroy(true);
+          node.imgTexture = undefined;
+          node.imgSource = undefined;
           const entry = this.acquireBlob(visual.bytes, bake, ch.member?.palette, visual.remapPalette, ink7Key);
           node.blobEntry = entry;
           const sprite = new Sprite(entry.texture);
@@ -1069,14 +1143,14 @@ export class PixiStage implements StageAdapter {
           node.container.addChild(sprite);
           // Raw cast bytes (walls, tiles, furniture, film-loop frames): the
           // baked RGBA the texture came from is the sprite's displayed portion.
-          node.imgBuffer = entry.rgba;
-          node.hitBufW = entry.width;
-          node.hitBufH = entry.height;
-        }
-      }
-    }
-    this.refreshChannel(channel);
-  }
+           node.imgBuffer = entry.rgba;
+           node.hitBufW = entry.width;
+           node.hitBufH = entry.height;
+         }
+       }
+     }
+     this.refreshChannel(channel);
+   }
 
   private static paletteKey(palette: number[][] | undefined): string {
     if (!palette || palette.length === 0) return 'none';
@@ -1181,15 +1255,11 @@ export class PixiStage implements StageAdapter {
   }
 
   private dropBlob(entry: BlobEntry): void {
-    try {
-      entry.texture.destroy();
-    } catch {
-    }
+    try { entry.texture.destroy(true); } catch { }
     const byBake = this.blobCache.get(entry.bytes);
-    if (byBake) {
-      byBake.delete(entry.key);
-      if (byBake.size === 0) this.blobCache.delete(entry.bytes);
-    }
+    if (byBake) { byBake.delete(entry.key); if (byBake.size === 0) this.blobCache.delete(entry.bytes); }
+    entry.rgba = null;
+    entry.bytes = new Uint8Array(0);
   }
 
   debugDump(): object[] {
@@ -1326,10 +1396,56 @@ export class PixiStage implements StageAdapter {
     }
   }
 
-  /** Unbind the pointer listeners (the embed element's disconnect). */
+  /** Unbind the pointer listeners and destroy all GPU resources. */
   dispose(): void {
     this.pointerCleanup?.();
     this.pointerCleanup = null;
+    // Destroy every node's texture, sprite, and background fill.
+    for (const [, node] of this.nodes) {
+      if (node.blobEntry) {
+        try { node.blobEntry.texture.destroy(true); } catch { }
+        node.blobEntry = undefined;
+      }
+      node.imgTexture?.destroy(true);
+      node.imgTexture = undefined;
+      node.imgSource = undefined;
+      node.imgBuffer = undefined;
+      node.imgLImage = undefined;
+      if (node.visual) {
+        node.visual.destroy({ children: true });
+        node.visual = null;
+      }
+      if (node.bgFill) {
+        node.bgFill.destroy({ context: true, texture: true, textureSource: true });
+        node.bgFill = undefined;
+      }
+      node.caret?.destroy({ context: true, texture: true, textureSource: true });
+      node.caret = undefined;
+      node.textObj = undefined;
+      node.container.removeChildren();
+    }
+    // Drop all cached blob textures (GPU-side) and free the entries.
+    for (const entry of this.freeBlobs) {
+      try { entry.texture.destroy(true); } catch { }
+      entry.rgba = null;
+      entry.bytes = new Uint8Array(0);
+    }
+    this.freeBlobs.length = 0;
+    this.blobCache.clear();
+    // Destroy the stage texture.
+    if (this.stageTexture) {
+      this.stageTexture.destroy(true);
+      this.stageTexture = null;
+    }
+    if (this.stageSprite) {
+      this.stageSprite.destroy();
+      this.stageSprite = null;
+    }
+    // Destroy the pixi application (and its renderer/WebGL context).
+    try {
+      this.app.destroy(false, { children: true, texture: true });
+    } catch {
+    }
   }
 
   /** `StageAdapter.pointerSpriteAt` — the engine's `the rollover` / `the clickOn`

@@ -147,10 +147,18 @@ export function composeFilmLoopFrame(
   plan: FilmLoopPlan,
   index: number,
   textures: Map<Member, FilmTexture>,
+  out?: Uint8Array,
 ): Uint8Array {
   const w = plan.width;
   const h = plan.height;
-  const canvas = new Uint8Array(w * h * 4);
+  const need = w * h * 4;
+  // Reuse the loop's previous frame buffer when it is the right size. The
+  // renderer keys its texture on the buffer identity, so composing into the
+  // same array lets the stage re-upload via BufferImageSource.update() instead
+  // of allocating a new Texture + BufferImageSource for every frame of an
+  // animated loop (moving clouds, water).
+  const canvas = out && out.length === need ? out : new Uint8Array(need);
+  canvas.fill(0);
   const frame = plan.frames[index];
   if (!frame) return canvas;
   for (const t of frame) {

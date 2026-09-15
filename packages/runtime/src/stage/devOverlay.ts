@@ -29,6 +29,8 @@ export interface DevSnapshot {
   dpr: number;
   nodes: number;
   textures: number;
+  /** Blob textures parked in the reuse cache (off-stage, so not in `textures`). */
+  idleTextures: number;
   /** Monotonic counters (see perf.ts). `*MaxMs`/`*MaxAt` are the peaks since boot. */
   frames: number;
   ticks: number;
@@ -222,7 +224,7 @@ export class DevOverlay {
     lines.push(`peak      tick ${s.tickMaxMs.toFixed(0)}ms ${secs(s.tickMaxAt)}  sync ${s.syncMaxMs.toFixed(0)}ms ${secs(s.syncMaxAt)}`);
     lines.push(`work      bakes ${s.bakes} (+${rate(s.bakes, this.prev?.bakes ?? s.bakes)}/s, ${rate(s.bakeTotalMs, this.prev?.bakeTotalMs ?? s.bakeTotalMs)}ms/s)`);
     lines.push(`calls     ${kilo(s.ticks)} ticks  ${kilo(s.frames)} frames  avg tick ${avg(s.tickTotalMs, s.ticks)}  avg sync ${avg(s.syncTotalMs, s.frames)}`);
-    lines.push(`scene     nodes ${s.nodes}  textures ${s.textures}  channels ${s.channels}  casts ${s.castLibs}`);
+    lines.push(`scene     nodes ${s.nodes}  textures ${s.textures}${s.idleTextures ? ` +${s.idleTextures} idle` : ''}  channels ${s.channels}  casts ${s.castLibs}`);
     lines.push(`heap      ${s.heapUsed === null ? 'n/a (Chrome only)' : mb(s.heapUsed) + ' / ' + mb(s.heapTotal ?? 0) + ' of ' + mb(s.heapLimit ?? 0) + '  ' + hrate(s.heapUsed, this.prev?.heapUsed ?? null, dt)}`);
     // Boot phases are a fixed timeline (never trimmed), slow frames a rolling
     // window — show the phases first, then the worst recent frames.

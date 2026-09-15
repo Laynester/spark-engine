@@ -4188,6 +4188,37 @@ test('runtime bitmap member (no raw) renders via kind:image channel visual', () 
   assert.equal((hit!.image as LImage).height, 3);
 });
 
+test('releasing a pooled sprite (`member = member(0)`) clears its channel visual', () => {
+  // FUSE Sprite Manager releaseSprite resets a pooled sprite with
+  // `tsprite.member = member(0)`. The stage must be told the channel has NO
+  // visual any more, or its node and texture stay on (and in) the stage forever
+  // — spamming the navigator open/close then climbed the dev overlay's node and
+  // texture counts window element by window element.
+  const calls: { ch: number; kind: string }[] = [];
+  const adapter = {
+    setBackground() {},
+    resize() {},
+    refreshChannel() {},
+    setChannel(ch: number, v: { kind: string } | null) {
+      calls.push({ ch, kind: v ? v.kind : 'null' });
+    },
+  };
+  const e = new DirectorEngine(adapter as never);
+  e.addScriptMember('Setup', 'score', 'on exitFrame\nend');
+  const num = e.createNamedMember('win_elem', 'bitmap', 1);
+  const ref = e.getMemberByName('win_elem')!;
+  e.setMemberProp(ref, 'image', new LImage(4, 4));
+  const s = e.getSprite(7);
+  // `tsprite.castNum = tmember.number` (Window Instance buildVisual)
+  e.setSpriteProp(s, 'castNum', num === ref.number ? ((ref.castLibNumber << 16) | ref.number) : num);
+  e.flushChannelVisuals();
+  assert.ok(calls.some((c) => c.ch === 7 && c.kind === 'image'), 'channel shows the element image');
+  calls.length = 0;
+  e.setSpriteProp(s, 'member', 0); // member(0) -> VOID -> no member
+  e.flushChannelVisuals();
+  assert.ok(calls.some((c) => c.ch === 7 && c.kind === 'null'), 'release clears the channel visual');
+});
+
 test('debugCopyOwner names the member behind an LImage (U66 copyPixels source log)', () => {
   const e = new DirectorEngine();
   e.addScriptMember('Setup', 'score', 'on exitFrame\nend'); // establish cast 1

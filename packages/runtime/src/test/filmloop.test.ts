@@ -388,3 +388,30 @@ test('full-content loops render tiles at NATURAL bitmap size (not the sprite dis
   assert.deepEqual(px(loop.filmImage, 10, 5, 3), [0, 128, 128, 255], 'tile rendered at natural size');
   assert.deepEqual(px(loop.filmImage, 10, 1, 1), [0, 0, 0, 0], 'matte white still keyed');
 });
+
+test('animated loops compose into the SAME frame buffer so the stage can reuse one texture', async () => {
+  // The renderer keys its texture on the pixel buffer identity (see
+  // PixiStage.setChannel `canReuse`): composing into the loop's existing
+  // filmImage.data lets an animated loop (moving clouds, water) re-upload via
+  // BufferImageSource.update() instead of allocating a new Texture +
+  // BufferImageSource every tick.
+  const { e, loader } = loadComposedEngine();
+  const cast = await e.loadCast(loader, 'hh_room_gold');
+  assert.ok(cast, 'cast loads');
+  e.boot();
+  const num = e.getmemnum('waterloop');
+  const loop = e.memberFor({
+    castLibNumber: (num >> 16) & 0xffff,
+    number: num & 0xffff,
+    kind: 'filmloop',
+    name: 'waterloop',
+    castLibNumber2: 0,
+  } as never);
+  assert.ok(loop && loop.filmImage, 'loop composed');
+  const first = loop.filmImage.ensure();
+  e.tick();
+  assert.equal(loop.filmImage.ensure(), first, 'the next frame composes into the same buffer');
+  // ...and the reused buffer is cleared, so pixels the new frame does not cover
+  // do not show the previous frame's art.
+  assert.deepEqual(px(loop.filmImage, 25, 3, 1), [0, 0, 0, 0], 'stale pixels from the prior frame are cleared');
+});
