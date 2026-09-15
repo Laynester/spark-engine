@@ -18,6 +18,7 @@ import type { CastListEntry, CastManifest, MemberEntry, MovieConfig } from '../b
 import { CastLib, Member, normalizeTextLines, parsePaletteBytes, parseShapeText, type ShapeDef } from './members.js';
 import { composeFilmLoopFrame, filmLoopImage, planFilmLoopComposition, prepareFilmTexture, type FilmLoopPlan, type FilmTexture, type FilmTile } from './filmloop.js';
 import { decodeImage } from './pix8.js';
+import { decodeMemberMedia, encodeMemberMedia } from './media.js';
 import { decodePng } from './png.js';
 import { decodeGif } from './gif.js';
 import { inverseDirectorTransformPoint } from '../stage/pixi.js';
@@ -234,31 +235,63 @@ function musStr(s: string): Uint8Array {
   return out;
 }
 
-function musValue(v: LVal): Uint8Array {
+/** Resolves a cast-member value to the media bytes the MUS frame should carry
+ *  for it (see `DirectorEngine.memberMediaBytes`). A member that cannot be
+ *  expressed as media stays a Void value. */
+type MusMediaResolver = (v: LVal) => Uint8Array | null;
+
+function musPad(bytes: Uint8Array): Uint8Array {
+  return bytes.length % 2 ? concatBytes([bytes, new Uint8Array([0])]) : bytes;
+}
+
+/**
+ * A MUS value as {type tag, body}. The tag is written ONCE by the enclosing
+ * frame or container — Havana's decoder reads the tag and then the body
+ * (MusNetworkDecoder: `setContentType(body.readShort())` then, for a PropList,
+ * `MusUtil.readPropList(body)` = count + [Symbol tag + key + value tag +
+ * value]). Emitting the tag a second time inside the body shifted every
+ * following field by two bytes, which is what made the photo upload die in the
+ * server with `readEvenPaddedString` reading a bogus 131072-byte string.
+ *
+ * `resolver` turns a cast-member value into media bytes (type 20): the corpus
+ * sends `[#image: <member media>, #time: ..., #cs: ...]` for a photo, and the
+ * server stores whatever bytes that `image` prop carries
+ * (MusConnectionHandler: `getPropAsBytes("image")`).
+ */
+function musValueParts(v: LVal, resolver?: MusMediaResolver): { tag: number; body: Uint8Array } {
   if (typeof v === 'number') {
-    return concatBytes([u16Bytes(MUS_INT), i32Bytes(Math.trunc(v))]);
+    return { tag: MUS_INT, body: i32Bytes(Math.trunc(v)) };
   }
   if (typeof v === 'string') {
-    return concatBytes([u16Bytes(MUS_STRING), musStr(v)]);
+    return { tag: MUS_STRING, body: musStr(v) };
   }
   if (v instanceof LSymbol) {
-    return concatBytes([u16Bytes(MUS_SYMBOL), musStr(v.name)]);
+    return { tag: MUS_SYMBOL, body: musStr(v.name) };
   }
   if (v instanceof Uint8Array) {
-    return concatBytes([u16Bytes(MUS_MEDIA), u32Bytes(v.length), v, v.length % 2 ? new Uint8Array([0]) : new Uint8Array()]);
+    return { tag: MUS_MEDIA, body: musPad(concatBytes([u32Bytes(v.length), v])) };
   }
   if (v instanceof LList) {
-    const parts: Uint8Array[] = [u16Bytes(MUS_LIST), u32Bytes(v.items.length)];
-    for (const item of v.items) parts.push(musValue(item));
-    return concatBytes(parts);
+    const parts: Uint8Array[] = [u32Bytes(v.items.length)];
+    for (const item of v.items) parts.push(musValue(item, resolver));
+    return { tag: MUS_LIST, body: concatBytes(parts) };
   }
   if (v instanceof LPropListClass) {
     const pairs: [string, LVal][] = [...v.props.entries()];
-    const parts: Uint8Array[] = [u16Bytes(MUS_PROPLIST), u32Bytes(pairs.length)];
-    for (const [k, val] of pairs) parts.push(musValue(new LSymbol(k)), musValue(val));
-    return concatBytes(parts);
+    const parts: Uint8Array[] = [u32Bytes(pairs.length)];
+    for (const [k, val] of pairs) parts.push(musValue(new LSymbol(k), resolver), musValue(val, resolver));
+    return { tag: MUS_PROPLIST, body: concatBytes(parts) };
   }
-  return u16Bytes(0);
+  const media = resolver?.(v);
+  if (media) {
+    return { tag: MUS_MEDIA, body: musPad(concatBytes([u32Bytes(media.length), media])) };
+  }
+  return { tag: 0, body: new Uint8Array(0) };
+}
+
+function musValue(v: LVal, resolver?: MusMediaResolver): Uint8Array {
+  const parts = musValueParts(v, resolver);
+  return concatBytes([u16Bytes(parts.tag), parts.body]);
 }
 
 function musFrame(subject: string, senderId: string, recipients: string[], contentType: number, content: Uint8Array): Uint8Array {
@@ -341,6 +374,16 @@ function parseMusBody(body: Uint8Array): MusFrame | null {
       case MUS_STRING:
         content = readStr();
         break;
+      case MUS_MEDIA: {
+        // Binary payload (the server answers GETBINDATA with a PropList whose
+        // `image` prop is Media, but a whole-frame Media content is legal too):
+        // hand the corpus raw bytes so `member.media = <payload>` can consume
+        // them instead of an empty string.
+        const len = readU32();
+        content = body.slice(off, off + len);
+        off += len + (len % 2 ? 1 : 0);
+        break;
+      }
       case MUS_PROPLIST: {
         const count = readU32();
         const map = new Map<string, LVal>();
@@ -354,7 +397,7 @@ function parseMusBody(body: Uint8Array): MusFrame | null {
             const dlen = readU32();
             const data = body.subarray(off, off + dlen);
             off += dlen + (dlen % 2 ? 1 : 0);
-            map.set(key, dataTag === MUS_STRING ? latin1Of(data) : data);
+            map.set(key, dataTag === MUS_STRING || dataTag === MUS_SYMBOL ? latin1Of(data) : data);
           }
         }
         content = new LPropListClass(map);
@@ -964,13 +1007,10 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
           return 0;
         }
         if (mode === 0) {
-          st.logon = musFrame(
-            'Logon',
-            toLingoString(args[0] ?? ''),
-            ['System'],
-            MUS_LIST,
-            musValue(new LList([toLingoString(args[4] ?? ''), toLingoString(args[0] ?? ''), toLingoString(args[1] ?? '')])),
+          const logonContent = musValueParts(
+            new LList([toLingoString(args[4] ?? ''), toLingoString(args[0] ?? ''), toLingoString(args[1] ?? '')]),
           );
+          st.logon = musFrame('Logon', toLingoString(args[0] ?? ''), ['System'], logonContent.tag, logonContent.body);
         } else {
           st.logon = undefined;
         }
@@ -1054,12 +1094,12 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
           const contentVal = args[2];
           let contentType = MUS_STRING;
           let contentBytes: Uint8Array;
-          if (contentVal instanceof LPropListClass) {
-            contentType = MUS_PROPLIST;
-            contentBytes = musValue(contentVal);
-          } else if (contentVal instanceof Uint8Array) {
-            contentType = MUS_MEDIA;
-            contentBytes = musValue(contentVal);
+          if (contentVal instanceof LPropListClass || contentVal instanceof Uint8Array) {
+            // Typed content: the tag goes in the frame header ONCE (see
+            // musValueParts) — the body must not repeat it.
+            const parts = musValueParts(contentVal, (v) => this.memberMediaBytes(v));
+            contentType = parts.tag;
+            contentBytes = parts.body;
           } else if (contentVal instanceof LList) {
             contentBytes = musStr(contentVal.items.map(toLingoString).join(' '));
           } else {
@@ -1793,6 +1833,50 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       return null;
     }
     return member?.palette ?? null;
+  }
+
+  /**
+   * The media bytes of a cast-member value, for the MUS serializer — a member
+   * inside a propList travels as a Media value carrying its media, which is how
+   * `[#image: tmember.media, ...]` reaches the server (`MusConnectionHandler`
+   * reads it with `getPropAsBytes("image")` and stores the bytes verbatim).
+   */
+  memberMediaBytes(v: LVal): Uint8Array | null {
+    if (!(v instanceof LMemberRefClass)) return null;
+    const member = this.memberFor(v);
+    if (!member) return null;
+    return this.encodeMemberMediaFor(member);
+  }
+
+  encodeMemberMediaFor(member: Member): Uint8Array | null {
+    const image = member.image;
+    if (image && image.width > 0 && image.height > 0) {
+      return encodeMemberMedia({
+        width: image.width,
+        height: image.height,
+        data: image.ensure(),
+        // Paletted surfaces travel indexed, as Director's own bitmap media does
+        // (one byte per pixel, PackBits-compressed: the server column is a 64 KiB
+        // blob and a 161x117 frame is 75 KB as RGBA). See media.ts.
+        indices: image.indices ?? null,
+        palette: image.palette && image.palette.length > 0 ? image.palette : undefined,
+      });
+    }
+    if (member.raw) {
+      try {
+        const dec = decodeImage(member.raw, member.palette);
+        return encodeMemberMedia({
+          width: dec.width,
+          height: dec.height,
+          data: dec.rgba,
+          indices: dec.indices ?? null,
+          palette: member.palette,
+        });
+      } catch {
+        return null;
+      }
+    }
+    return null;
   }
 
   memberExists(v: number | string): boolean {
@@ -2650,13 +2734,20 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       if (tx < left || tx > left + w || ty < top || ty > top + h) continue;
       hits.push({ ch, z: ch.locZ, n: i });
     }
+    let scriptedFallback = 0;
     hits.sort((a, b) => (b.z - a.z) || (b.n - a.n));
     for (const hit of hits) {
+      if (scriptedFallback === 0 && hit.ch.isPointerTarget(true)) scriptedFallback = hit.n;
       const w = hit.ch.width ?? hit.ch.member!.width;
       const h = hit.ch.height ?? hit.ch.member!.height;
       if (this.spritePixelAccept(hit.ch, w, h, x, y)) return hit.n;
     }
-    return 0;
+    // No candidate DISPLAYS anything at the point: a scripted sprite still owns
+    // it by its rectangle (see PixiStage.hitTest). The Object Mover's ghost
+    // carries its `#mouseDown` proc on the sprite, so a click on a transparent
+    // pixel of its art must still reach it or placing silently does nothing.
+    // Plain scenery keeps the pixel rule — a transparent hole is click-through.
+    return scriptedFallback;
   }
 
   /**
@@ -3652,6 +3743,17 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         return this.memberImage(member);
       case 'media':
         return m;
+      case 'scripttext':
+        // Director: a script member's source, EMPTY for every other kind —
+        // including a bitmap with no behaviour attached. Only one place in the
+        // corpus reads this, and it is a guard, not a display:
+        // `hh_photo/0003 Photo Component Class::binaryDataReceived` does
+        // `if pPhotoMember.type <> #bitmap or pPhotoMember.scriptText <> EMPTY`
+        // to reject a media blob that is really a script member, then `erase()`s
+        // the member and bails. Answering VOID made VOID <> EMPTY true for
+        // EVERY photo, so the window kept its photo_placeholder and the decoded
+        // picture was never assigned to the sprite.
+        return member.kind === 'script' ? member.text ?? '' : '';
       case 'color':
         return member.color ?? VOID;
       case 'rect':
@@ -3705,6 +3807,29 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       member.chunkStyles = undefined;
       invalidateTextImage();
       rebuildChannels();
+      return;
+    }
+    if (p === 'scripttext') {
+      // Only script members carry text; Director errors on anything else and
+      // the corpus relies on that (`scriptText = EMPTY` clears a behaviour).
+      if (member.kind !== 'script') {
+        this.warn(`member(${member.number}).scriptText = : not a script member`);
+        return;
+      }
+      const source = toLingoString(value);
+      const prior = member.script;
+      const script = parseLingo(source);
+      script.name = member.name;
+      script.type = prior?.type ?? 'parent';
+      member.text = source;
+      member.script = script;
+      this.scriptsByName.set(member.name.toLowerCase(), { script, member });
+      for (const [name, ref] of this.globalHandlers) {
+        if (ref.script === prior) this.globalHandlers.delete(name);
+      }
+      if (script.type !== 'parent') {
+        for (const h of script.handlers) this.globalHandlers.set(h.name.toLowerCase(), { script, handler: h });
+      }
       return;
     }
     if (p === 'color') {
@@ -3823,6 +3948,54 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       return;
     }
     if (p === 'media') {
+      if (value instanceof Uint8Array) {
+        // Media arriving from the server (the photo binary payload read back
+        // with `retrieveBinaryData`). Decoding it makes the member displayable
+        // again, palette included — `countCS` re-hashes the result against the
+        // checksum the sender stored, and `getPixel().paletteIndex` needs the
+        // same table to land on the same indices.
+        //
+        // The camera's table is the decode's fallback palette, not just the
+        // member's afterwards. A real photo's media is a BARE INDEX RASTER with
+        // no palette of its own (Director keeps it on the member/element), so
+        // `rgbaFromIndices` had nothing to look the raster up in and fell back
+        // to `grey = index` — the identity ramp. That is the opposite of
+        // `#grayscale`, whose index 0 is WHITE (the hh_photo `.pal` sidecars
+        // 0x0012/0x0020 all start `255 255 255 ... 0 0 0`, and LibreShockwave's
+        // Palette::grayscalePalette is `255 - index`), so every photo previewed
+        // as a negative while the palette attached next to it said otherwise.
+        // The stage bakes from `image.data` (bakeSurface -> img.ensure()), so
+        // the RGBA and the table have to be built through the SAME ramp.
+        const blob = decodeMemberMedia(value, GRAYSCALE_PALETTE);
+        if (blob) {
+          if (member.image) this.imageOwners.delete(member.image);
+          // A real photo's media is a bare index raster with no palette of its
+          // own (Director keeps it on the member/element), and the corpus paints
+          // it through the camera's palette — `#palette: #grayscale` on both
+          // cam_display and photo_picture. Without it the indices would have no
+          // colours and the preview would be black.
+          const table = blob.palette ?? GRAYSCALE_PALETTE;
+          const img = new LImage(blob.width, blob.height);
+          img.data = new Uint8Array(blob.rgba);
+          img.palette = table;
+          img.indices = blob.indices ?? null;
+          img.depth = blob.indices ? 8 : 32;
+          img.dirty = true;
+          member.kind = 'bitmap';
+          member.image = img;
+          member.imagePainted = true;
+          member.raw = undefined;
+          member.palette = table;
+          this.imageOwners.set(img, member);
+          for (let n = 1; n < this.channels.length; n++) {
+            const ch = this.channels[n];
+            if (ch.member === member) this.buildChannelVisual(ch);
+          }
+        } else {
+          this.warn(`set member(${member.number}).media: unrecognised media payload (${value.length}B)`);
+        }
+        return;
+      }
       if (value instanceof LMemberRefClass) {
         const src = this.memberFor(value);
         if (src) {

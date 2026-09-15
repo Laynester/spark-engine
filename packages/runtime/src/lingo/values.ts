@@ -305,6 +305,51 @@ export class LWindowRef {
   constructor(public id: string, public host?: MemberHost) {}
 }
 
+/**
+ * Inverse of the projective map that sends the unit square to the four
+ * destination points `quad` = [x0,y0, x1,y1, x2,y2, x3,y3] (top-left,
+ * top-right, bottom-right, bottom-left), returned row-major as a 3x3 matrix
+ * [m00,m01,m02, m10,m11,m12, m20,m21,m22]. Applying it to a destination pixel
+ * `(X, Y, 1)` yields the normalized source coordinate `(u, v)`. Returns `null`
+ * when the quad is degenerate (a zero-area or unbounded projective map).
+ *
+ * This is what Director does for a four-point `destinationRect`:
+ * `image.copyPixels(src, [p0, p1, p2, p3], srcRect)` paints the source rect onto
+ * the QUADRILATERAL, not into its bounding box — the hh_entry_jp 3D screen
+ * scroller folds its 2D canvas through exactly such quads. For a parallelogram
+ * the projective map is exactly affine, which is every quad the corpus builds
+ * by shearing; a true perspective quad (the four corners not forming a
+ * parallelogram) is handled by the same matrix.
+ */
+export function inverseQuadTransform(quad: readonly number[]): number[] | null {
+  const [x0, y0, x1, y1, x2, y2, x3, y3] = quad;
+  const dx1 = x1 - x2;
+  const dx2 = x3 - x2;
+  const dy1 = y1 - y2;
+  const dy2 = y3 - y2;
+  const den = dx1 * dy2 - dx2 * dy1;
+  if (Math.abs(den) < 1e-12) return null;
+  const sq = x0 - x1 + x2 - x3;
+  const sy = y0 - y1 + y2 - y3;
+  const g = (sq * dy2 - dx2 * sy) / den;
+  const h = (dx1 * sy - sq * dy1) / den;
+  const a = x1 - x0 + g * x1;
+  const b = x3 - x0 + h * x3;
+  const c = x0;
+  const d = y1 - y0 + g * y1;
+  const e = y3 - y0 + h * y3;
+  const f = y0;
+  // Invert [a b c; d e f; g h 1].
+  const det = a * (e - f * h) - b * (d - f * g) + c * (d * h - e * g);
+  if (Math.abs(det) < 1e-12) return null;
+  const inv = 1 / det;
+  return [
+    (e - f * h) * inv, (c * h - b) * inv, (b * f - c * e) * inv,
+    (f * g - d) * inv, (a - c * g) * inv, (c * d - a * f) * inv,
+    (d * h - e * g) * inv, (b * g - a * h) * inv, (a * e - b * d) * inv,
+  ];
+}
+
 export class LImage {
   data: Uint8Array | null = null;
   dirty = false;
@@ -500,6 +545,7 @@ export class LImage {
     fgExplicit = false,
     bgExplicit = false,
     orient?: { a: number; b: number; c: number; d: number; e: number; f: number },
+    quad?: readonly number[] | null,
   ): void {
     const s = src.ensure();
     const d = this.ensure();
@@ -534,19 +580,34 @@ export class LImage {
 
     const orientDet = orient ? orient.a * orient.e - orient.b * orient.d : 0;
     const orientInv = orientDet !== 0 ? 1 / orientDet : 0;
+    // A four-point destination maps the source onto the quad: sample through
+    // the inverse projective map and skip every destination pixel whose (u, v)
+    // falls outside the unit square (the quad's bounding-box corners are NOT
+    // part of a sheared quad).
+    const quadInv = quad ? inverseQuadTransform(quad) : null;
     for (let y = 0; y < destH; y++) {
       const py = dy + y;
       if (py < 0 || py >= dh) continue;
       const fy = flipV ? destH - 1 - y : y;
       const syRow = sy0 + Math.trunc((fy * srcH) / destH);
       const orientV = orient && orientInv !== 0 ? (py - dy) / destH : 0;
-      if (!orient && (syRow < 0 || syRow >= sh)) continue;
+      if (!quadInv && !orient && (syRow < 0 || syRow >= sh)) continue;
       for (let x = 0; x < destW; x++) {
         const px = dx + x;
         if (px < 0 || px >= dw) continue;
         let sx: number;
         let sy: number;
-        if (orient && orientInv !== 0) {
+        if (quadInv) {
+          const qx = px + 0.5;
+          const qy = py + 0.5;
+          const w = quadInv[6] * qx + quadInv[7] * qy + quadInv[8];
+          if (w === 0) continue;
+          const u = (quadInv[0] * qx + quadInv[1] * qy + quadInv[2]) / w;
+          const v = (quadInv[3] * qx + quadInv[4] * qy + quadInv[5]) / w;
+          if (u < 0 || u >= 1 || v < 0 || v >= 1) continue;
+          sx = sx0 + Math.trunc(u * srcW);
+          sy = sy0 + Math.trunc(v * srcH);
+        } else if (orient && orientInv !== 0) {
           const u = (px - dx) / destW;
           sx = sx0 + Math.trunc((orient.e * (u - orient.c) - orient.b * (orientV - orient.f)) * orientInv * srcW);
           sy = sy0 + Math.trunc((-orient.d * (u - orient.c) + orient.a * (orientV - orient.f)) * orientInv * srcH);

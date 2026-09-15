@@ -19,32 +19,40 @@ function alphaAt(data: Uint8ClampedArray, width: number, x: number, y: number): 
   return data[(y * width + x) * 4 + 3];
 }
 
-test('image-path bakeSurface forwards the member palette (ink 36 keys palette-0, not white)', () => {
-  // hh_entry_jp regression: the Entry Image Scroller paints the scrolled
-  // frames onto screen3d.image (copyPixels), which flips the channel from the
-  // raw bytes path to the live-image path. The image path must key the same
-  // color the bytes path does — the member's palette-0 (screen3d's is BLACK,
-  // a black backdrop with a white screen shape). Dropping the palette keyed
-  // white instead, leaving the black backdrop → black rectangle under the
-  // glass/matrix.
+test('ink 36 keys WHITE, not the member palette-0 (hh_entry_jp screen3d)', () => {
+  // hh_entry_jp regression: the Entry Image Scroller warps its 2D canvas onto
+  // `screen3d` through two parallelogram quads (see the copyPixels quad test in
+  // engine.test.ts). The quads cover exactly the pre-baked 3D screen, so the
+  // pixels the scroller leaves alone are the member's WHITE backdrop — and that
+  // backdrop is what has to disappear.
+  //
+  // screen3d is an 8-bit member whose palette-0 is BLACK (`pal 93`, 29 entries),
+  // so keying palette index 0 deleted the 3D screen the scroller had just
+  // painted and left the white rectangle standing around it. Director keys the
+  // SPRITE's background colour for ink 36 ("Makes all the pixels in the
+  // background color of the selected sprite appear transparent",
+  // adobe_director_11.5.txt:3343), white unless the movie set one — and the
+  // corpus tests exactly that colour: Room_Interface_Class::validateEvent only
+  // lets a click through an ink-36 bitmap sprite when
+  // `tSpr.member.image.getPixel(...).hexString()` is not "#FFFFFF"
+  // (hh_room/scripts/0003, ~line 801).
   const W = 6, H = 6;
   const palette = [[0, 0, 0], [255, 255, 255]]; // palette-0 black, like screen3d
   const { data, fill } = makeImage(W, H);
-  fill(0, 0, 0, 0, 0); // black backdrop
-  fill(1, 0, 0, 0, 0);
-  fill(0, 1, 0, 0, 0);
-  fill(5, 5, 0, 0, 0);
-  for (let y = 2; y <= 4; y++) for (let x = 1; x <= 4; x++) fill(x, y, 255, 255, 255); // white screen
-  // The buggy behavior (no palette): ink 36 -> 'key' defaults to WHITE.
-  const buggy = bakeSurface(data, W, H, 'key', null, undefined, 36, 0, undefined);
-  assert.equal(alphaAt(buggy.pixels, W, 0, 0), 255, 'black backdrop survives the no-palette key (bug)');
-  assert.equal(alphaAt(buggy.pixels, W, 2, 2), 0, 'white screen wrongly keyed (bug)');
-  // Fixed behavior: the member palette is forwarded, so palette-0 (black) keys.
-  const fixed = bakeSurface(data, W, H, 'key', null, undefined, 36, 0, palette);
-  assert.ok(fixed.changed);
-  assert.equal(alphaAt(fixed.pixels, W, 0, 0), 0, 'black backdrop keyed away');
-  assert.equal(alphaAt(fixed.pixels, W, 5, 5), 0, 'black corner keyed away');
-  assert.equal(alphaAt(fixed.pixels, W, 2, 2), 255, 'white screen survives');
+  fill(0, 0, 255, 255, 255); // white backdrop, keyed away
+  fill(4, 0, 255, 255, 255);
+  fill(5, 5, 255, 255, 255);
+  for (let y = 2; y <= 4; y++) for (let x = 1; x <= 4; x++) fill(x, y, 0, 0, 0); // the painted screen
+  const out = bakeSurface(data, W, H, 'key', null, undefined, 36, 0, palette);
+  assert.ok(out.changed);
+  assert.equal(alphaAt(out.pixels, W, 0, 0), 0, 'white backdrop keyed away');
+  assert.equal(alphaAt(out.pixels, W, 4, 0), 0, 'white backdrop above the screen keyed away');
+  assert.equal(alphaAt(out.pixels, W, 5, 5), 0, 'white corner keyed away');
+  assert.equal(alphaAt(out.pixels, W, 2, 3), 255, 'palette-0 BLACK screen survives');
+  // An explicit sprite background colour (`[#bgColor: ...]`, `sprite.bgColor =
+  // rgb(...)`) replaces the white default — the blob-cache key follows it too.
+  const colored = bakeSurface(data, W, H, 'key', null, 0x0000ff, 36, 0, palette);
+  assert.equal(alphaAt(colored.pixels, W, 0, 0), 255, 'white survives when the sprite bgColor is not white');
 });
 
 test('image-path bakeSurface keeps the no-palette heuristic for backgroundTransparent', () => {
@@ -402,10 +410,11 @@ test('ink 7 (Not Ghost) no-key fallback is WHITE, not art (0,0), for 32-bit art'
   assert.equal(alphaAt(data, W, 1, 1), 255, 'exact white kept');
 });
 
-test('key with a palette keys palette index 0 only (cloud body 238 survives)', () => {
+test('key is an EXACT colour match (cloud body 238 survives), palette or not', () => {
   // Real cloud_0_left palette: index 0 = 255,255,255 background, the body is
-  // 238,238,238 at a DIFFERENT index. DirPlayer get_bg_color_ref for indexed
-  // bitmaps is exactly PaletteIndex(0) — a near-white key would eat the body.
+  // 238,238,238 at a DIFFERENT index. Ink 36 keys white — for this member the
+  // palette's index 0 IS white, so the result is the same either way; what the
+  // test pins is that the key is exact, so a near-white key never eats the body.
   const palette = [[255, 255, 255], [254, 254, 254], [238, 238, 238]];
   const { data, fill } = makeImage(4, 4);
   fill(0, 0, 255, 255, 255); // bg (index 0)

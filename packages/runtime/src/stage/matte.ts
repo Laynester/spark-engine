@@ -223,9 +223,11 @@ function resolveChannelMatte(
 ): MatteSpec | null {
   const p0 = paletteIndex0Rgb(palette);
   if (p0 !== null) {
-    // backgroundTransparent/key honour the member's palette index 0. Matte paints
-    // WHITE, so when the border is overwhelmingly white and index 0 is not, the
-    // palette pick is the wrong key (see whiteBorderDominates).
+    // The matte/notGhost paths honour the member's palette index 0 (ink 8's
+    // "palette-0 background" rule; ink 36 keys the sprite bgColor instead and
+    // returns before this — see the `key` branch of bakeEdgeBackground).
+    // Matte paints WHITE, so when the border is overwhelmingly white and index 0
+    // is not, the palette pick is the wrong key (see whiteBorderDominates).
     if (paintsMatteWhite(mode) && p0 !== 0xffffff && whiteBorderDominates(rgba, width, height)) {
       return { rgb: 0xffffff, tolerance: 0 };
     }
@@ -328,10 +330,30 @@ export function bakeEdgeBackground(
   if (width <= 0 || height <= 0 || rgba.length < n * 4) return false;
 
   if (mode === 'key') {
-    const keyRgb = paletteIndex0Rgb(palette) ?? 0xffffff;
+    // Ink 36 (Background transparent) keys the SPRITE's background colour, not
+    // the member's palette entry: "Makes all the pixels in the background color
+    // of the selected sprite appear transparent" (adobe_director_11.5.txt:3343),
+    // where that colour is the swatch picked in the Tools window — the sprite's
+    // `bgColor` — and its default is white (`copyPixels`' own `#bgColor`
+    // doc, drmx2004_scripting_ref.txt:10640). `keyRgb` carries the sprite's
+    // explicit bgColor when the movie set one (`tSpr.bgColor = rgb(...)`).
+    //
+    // The corpus agrees, and says so in code: Room_Interface_Class::validateEvent
+    // (`hh_room/scripts/0003`, ~line 801) only lets a click through an ink-36
+    // bitmap sprite when `tSpr.member.image.getPixel(...).hexString()` is NOT
+    // "#FFFFFF" — white is the transparent colour for these sprites.
+    //
+    // Palette-0 is therefore deliberately NOT consulted here. It agrees with
+    // white for 21416 of the v31 bundle's 21559 bitmap members, which is why it
+    // looked right, but hh_entry_jp's `screen3d` is one of the 143 exceptions: a
+    // 29-entry palette with BLACK at index 0 under a white backdrop. Keying
+    // palette-0 there deleted the 3D screen the Entry Image Scroller paints and
+    // left the white rectangle around it standing. The matte/notGhost paths
+    // below still resolve palette-0 (and its index flood) — that is ink 8's rule.
+    const key = keyRgb ?? 0xffffff;
     let changed = false;
     for (let i = 0; i < n; i++) {
-      if (isOpaque(rgba, i) && rgbAt(rgba, i) === keyRgb) {
+      if (isOpaque(rgba, i) && rgbAt(rgba, i) === key) {
         rgba[i * 4] = 0;
         rgba[i * 4 + 1] = 0;
         rgba[i * 4 + 2] = 0;
@@ -738,14 +760,17 @@ export function blendModeForInk(ink: number): 'normal' | 'add' | 'subtract-gl' |
 
 /**
  * Bake + tint a decoded RGBA surface exactly like the image-member render path
- * (PixiStage.bakeImagePixels). Shared so the palette-forwarding rule is
- * unit-testable: key/matte/notGhost bakes key against the member's palette-0
- * (DirPlayer resolves the sprite bg color against the source bitmap's
- * palette), while the backgroundTransparent heuristic keeps its no-palette
- * path (ink-0 painted images with near-white corners). Dropping the palette
- * here made ink-36 members with a black palette-0 (hh_entry_jp's screen3d,
- * once the imagescroller paints onto its image) key white instead and render
- * as a black rectangle.
+ * (PixiStage.bakeImagePixels). Shared so the keying rules are unit-testable:
+ *
+ *  - `key` (inks 36/1) keys the sprite's background colour — `keyRgb` when the
+ *    movie set one, otherwise WHITE (see the `key` branch of
+ *    bakeEdgeBackground for the Director reference and the corpus evidence);
+ *  - `matte`/`notGhost` key against the member's palette-0 (DirPlayer resolves
+ *    the sprite bg colour against the source bitmap's palette);
+ *  - `backgroundTransparent` keeps its no-palette heuristic (ink-0 painted
+ *    images with near-white corners), which must NOT be handed a palette: the
+ *    heuristic's member may be an 8-bit art whose palette-0 is white, and
+ *    forwarding it would key the whole image instead of the mask ring.
  */
 export function bakeSurface(
   src: Uint8Array | Uint8ClampedArray,
@@ -753,7 +778,7 @@ export function bakeSurface(
   h: number,
   bake: BakeMode | null,
   tint: number | null,
-  ink7Key?: number | null,
+  keyRgb?: number | null,
   ink = 0,
   fgRgb = 0,
   palette?: number[][],
@@ -774,7 +799,7 @@ export function bakeSurface(
    // mark it: the tint pass below skips transparent pixels but must skip these too.
    const keyedBuf = bake === 'matteIdentity' ? (keyed ?? new Uint8Array(w * h)) : null;
    const changed = bake
-     ? bakeEdgeBackground(buf, w, h, bake, bake === 'backgroundTransparent' ? undefined : palette, undefined, ink7Key, keyedBuf)
+     ? bakeEdgeBackground(buf, w, h, bake, bake === 'backgroundTransparent' ? undefined : palette, undefined, keyRgb, keyedBuf)
      : false;
   const tinted = duotone
     ? tintSpriteDarken(buf, w, h, duotone.bg, duotone.fg)

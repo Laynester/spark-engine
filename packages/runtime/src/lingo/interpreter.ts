@@ -1587,7 +1587,15 @@ export class Interpreter {
       const pr = data[o];
       const pg = data[o + 1];
       const pb = data[o + 2];
+      // An indexed image's pixel IS a palette index: report the STORED one. A
+      // nearest-entry lookup answers a different index whenever the palette in
+      // hand is not the table the raster was quantised with, and that is exactly
+      // what makes a real photo fail `Photo Component Class::countCS` — the
+      // checksum is a hash over these indices, and the server stores the hash the
+      // sender computed. See engine/media.ts.
+      const stored = img.indices ? img.indices[v * w + h] : undefined;
       if (returnInteger) {
+        if (stored !== undefined) return stored;
         if (img.palette && img.palette.length > 1) {
           for (let i = 0; i < img.palette.length; i++) {
             const [r, g, b] = img.palette[i];
@@ -1597,6 +1605,10 @@ export class Interpreter {
         return (pr << 16) | (pg << 8) | pb;
       }
       const color = new LColorClass(pr, pg, pb);
+      if (stored !== undefined) {
+        color.paletteIndex = stored;
+        return color;
+      }
       if (img.palette && img.palette.length > 1) {
         let best = 0;
         let bestDist = Infinity;
@@ -1670,10 +1682,24 @@ export class Interpreter {
           const destH = maxY - minY;
           const axisAligned = pts.every((p) => (p.locH === minX || p.locH === maxX) && (p.locV === minY || p.locV === maxY));
           if (!axisAligned) {
-            this.host.warn('copyPixels: non-axis-aligned quad — bounding-box fallback');
-            destRect = new LRectClass(minX, minY, maxX, maxY);
-            flipH = pts[0].locH === maxX;
-            flipV = pts[0].locV === maxY;
+            // A sheared/perspective quad: warp the source onto the quadrilateral
+            // rather than stretching it across the bounding box. hh_entry_jp's
+            // Entry Image Scroller folds its 2D canvas onto two parallelogram
+            // halves (`pQuadLeft`/`pQuadRight`) to give the entry screen its 3D
+            // tilt; the bounding-box fallback drew it flat (and painted the
+            // box's corners with clamped edge pixels).
+            if (destW > 0 && destH > 0) {
+              destRect = new LRectClass(minX, minY, maxX, maxY);
+              const quad = [
+                pts[0].locH, pts[0].locV, pts[1].locH, pts[1].locV,
+                pts[2].locH, pts[2].locV, pts[3].locH, pts[3].locV,
+              ];
+              img.copyPixels(src, destRect, args[2], ink, blend, bgColor, mask, false, false, foreColor, fgExplicit, bgExplicit, undefined, quad);
+              this.host.imageMutated?.(img);
+              return img;
+            }
+            this.host.warn('copyPixels: degenerate quad');
+            return img;
           } else if (destW > 0 && destH > 0) {
             const c = (pts[0].locH - minX) / destW;
             const f = (pts[0].locV - minY) / destH;

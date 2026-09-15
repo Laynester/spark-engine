@@ -600,7 +600,7 @@ export class PixiStage implements StageAdapter {
       const duotone = this.duotoneForChannel(ch);
       const baked =
         bake || tint || duotone
-          ? perfTimeBake(() => this.bakeImagePixels(node, img, w, h, bake, tint, this.ink7KeyForChannel(ch), ch.ink ?? 0, ch.member?.palette, duotone))
+          ? perfTimeBake(() => this.bakeImagePixels(node, img, w, h, bake, tint, this.inkKeyForChannel(ch), ch.ink ?? 0, ch.member?.palette, duotone))
           : null;
       const pixels = baked && baked.changed ? baked.pixels : img.ensure();
       const finalBake = baked && baked.changed ? bake : null;
@@ -673,7 +673,7 @@ export class PixiStage implements StageAdapter {
     h: number,
     bake: BakeMode | null,
     tint: number | null,
-    ink7Key?: number | null,
+    inkKey?: number | null,
     ink = 0,
     palette?: number[][],
     duotone?: { fg: number; bg: number } | null,
@@ -681,7 +681,7 @@ export class PixiStage implements StageAdapter {
     const n = w * h * 4;
     if (!node.bakeBuf || node.bakeBuf.length !== n) node.bakeBuf = new Uint8ClampedArray(n);
     const keyed = bake === 'matteIdentity' ? (node.keyedBuf && node.keyedBuf.length === w * h ? node.keyedBuf : (node.keyedBuf = new Uint8Array(w * h))) : null;
-    const out = bakeSurface(img.ensure(), w, h, bake, tint, ink7Key, ink, 0, palette, keyed, duotone);
+    const out = bakeSurface(img.ensure(), w, h, bake, tint, inkKey, ink, 0, palette, keyed, duotone);
     node.bakeBuf.set(out.pixels);
     return { pixels: node.bakeBuf, changed: out.changed };
   }
@@ -701,8 +701,21 @@ export class PixiStage implements StageAdapter {
     return this.engine.duotoneForChannel(ch);
   }
 
-  private ink7KeyForChannel(ch: { ink?: number; bgColorIsRgb?: boolean; bgColor?: number } | undefined): number | null | undefined {
-    if (!ch || ch.ink !== 7) return undefined;
+  private inkKeyForChannel(ch: { ink?: number; bgColorIsRgb?: boolean; bgColor?: number } | undefined): number | null | undefined {
+    // The colour an ink that keys or preserves ONE colour should use, taken from
+    // the sprite's own background colour — which the corpus really sets
+    // (`tSpr.bgColor = rgb(pPartColors[j])` in Active_Object_Class::solveMembers,
+    // and the avatar colour effects' `human_sprite_props/[ink: 8, bgcolor: ...]`).
+    //
+    //  - ink 7 (Not ghost) keeps the keyed colour and drops everything else;
+    //  - ink 36 (Background transparent) keys the sprite's background colour,
+    //    WHITE when the movie never set one (Director's Tools-window default —
+    //    see the `key` branch of bakeEdgeBackground). Returning null ("no
+    //    explicit colour") is what selects that white default.
+    //
+    // `undefined` means "this ink does not key a single colour" so the blob
+    // cache keeps one entry per bake instead of one per channel.
+    if (!ch || (ch.ink !== 7 && ch.ink !== 36)) return undefined;
     if (ch.bgColorIsRgb && ch.bgColor !== undefined && ch.bgColor !== 0xffffff) {
       return ch.bgColor;
     }
@@ -978,7 +991,7 @@ export class PixiStage implements StageAdapter {
       const bake = this.bakeForChannel(ch, img, w, h);
       const tint = this.tintForChannel(ch);
       const duotone = this.duotoneForChannel(ch);
-      const baked = bake || tint || duotone ? this.bakeImagePixels(node, img, w, h, bake, tint, this.ink7KeyForChannel(ch), ch.ink ?? 0, ch.member?.palette, duotone) : null;
+      const baked = bake || tint || duotone ? this.bakeImagePixels(node, img, w, h, bake, tint, this.inkKeyForChannel(ch), ch.ink ?? 0, ch.member?.palette, duotone) : null;
       const pixels = baked && baked.changed ? baked.pixels : img.ensure();
       const finalBake = baked && baked.changed ? bake : null;
       // Reuse the existing texture when the same image, size, and
@@ -1079,7 +1092,7 @@ export class PixiStage implements StageAdapter {
         // single palette-0 background to matte-key, and the flood would eat the
         // frame's interior highlight bands (alternating rows touch the edges).
         const bake: BakeMode | null = ch.member?.kind === 'filmloop' ? null : bakeModeForInk(ch.ink);
-        const ink7Key = this.ink7KeyForChannel(ch);
+        const inkKey = this.inkKeyForChannel(ch);
         const tint = this.tintForChannel(ch);
         // fg→bg duotone (ink 41's `sprite.color`+backColor, and the avatar
         // colour effects' ink 8 + RGB foreColor) — see Engine.duotoneForChannel.
@@ -1099,7 +1112,7 @@ export class PixiStage implements StageAdapter {
             // out by the tint pass' alpha test and has to be masked off explicitly
             // (see matte.bakeEdgeBackground / tintSpriteBackground).
             const keyed = bake === 'matteIdentity' && width > 0 && height > 0 ? new Uint8Array(width * height) : null;
-            if (bake && width > 0 && height > 0) bakeEdgeBackground(rgba, width, height, bake, ch.member?.palette, dec.indices, ink7Key, keyed);
+            if (bake && width > 0 && height > 0) bakeEdgeBackground(rgba, width, height, bake, ch.member?.palette, dec.indices, inkKey, keyed);
             if (duotone) tintSpriteDarken(rgba, width, height, duotone.bg, duotone.fg);
             else if (tint !== null) {
               if (ch.ink === 41) tintSpriteDarken(rgba, width, height, tint, ch.colorSet ? ch.color : 0);
@@ -1134,7 +1147,7 @@ export class PixiStage implements StageAdapter {
           oldImgTexture?.destroy(true);
           node.imgTexture = undefined;
           node.imgSource = undefined;
-          const entry = this.acquireBlob(visual.bytes, bake, ch.member?.palette, visual.remapPalette, ink7Key);
+          const entry = this.acquireBlob(visual.bytes, bake, ch.member?.palette, visual.remapPalette, inkKey);
           node.blobEntry = entry;
           const sprite = new Sprite(entry.texture);
           node.baseW = entry.width;
@@ -1194,8 +1207,8 @@ export class PixiStage implements StageAdapter {
     }
   }
 
-  private acquireBlob(bytes: Uint8Array, bake: BakeMode | null, palette?: number[][], remap?: number[][], ink7Key?: number | null): BlobEntry {
-    const keyColor = ink7Key !== undefined ? 'k' + (ink7Key ?? 'auto') : 'nk';
+  private acquireBlob(bytes: Uint8Array, bake: BakeMode | null, palette?: number[][], remap?: number[][], inkKey?: number | null): BlobEntry {
+    const keyColor = inkKey !== undefined ? 'k' + (inkKey ?? 'auto') : 'nk';
     const key = (bake ?? 'none') + '|' + PixiStage.paletteKey(palette) + '|' + PixiStage.paletteKey(remap) + '|' + keyColor;
     let byBake = this.blobCache.get(bytes);
     if (!byBake) {
@@ -1216,7 +1229,7 @@ export class PixiStage implements StageAdapter {
         height = dec.height;
         rgba = new Uint8Array(dec.rgba);
         if (remap) PixiStage.remapPixels(rgba, dec.indices, palette, remap);
-        if (bake && width > 0 && height > 0) bakeEdgeBackground(rgba, width, height, bake, palette, dec.indices, ink7Key);
+        if (bake && width > 0 && height > 0) bakeEdgeBackground(rgba, width, height, bake, palette, dec.indices, inkKey);
       } catch (e) {
         this.engine.warn(`bitmap decode failed: ${e instanceof Error ? e.message : String(e)}`);
         rgba = null;
@@ -1469,9 +1482,11 @@ export class PixiStage implements StageAdapter {
       if (tx < left || tx > left + w || ty < top || ty > top + h) continue;
       hits.push({ channel, z: ch.locZ, node, w, h });
     }
+    let scriptedFallback = 0;
     hits.sort((a, b) => (b.z - a.z) || (b.channel - a.channel));
     for (const hit of hits) {
       const ch = this.engine.getChannel(hit.channel);
+      if (scriptedFallback === 0 && ch.isPointerTarget(true)) scriptedFallback = hit.channel;
       const left = ch.locH - hit.node.regX;
       const top = ch.locV - hit.node.regY;
       const sw = hit.node.imgSource?.width ?? hit.node.hitBufW ?? hit.w;
@@ -1485,7 +1500,16 @@ export class PixiStage implements StageAdapter {
       // carries a sitter no longer eats the click aimed at the avatar.
       if (spritePixelHitTest(hit.node.imgBuffer, sw, sh, px, py)) return hit.channel;
     }
-    return 0;
+    // NOTHING renders at the point (every candidate's pixel there is transparent,
+    // or the pixel could not be sampled). A scripted sprite still owns it by its
+    // rectangle: the Object Mover's ghost follows the cursor and carries its
+    // `#mouseDown` proc ON the sprite, so clicking a see-through part of the
+    // furniture art (a lamp shade, the gap in a rug) has to reach it or placing
+    // silently does nothing — and the room's ink-36 click cover expects to
+    // receive the event so `validateEvent` can hide it and re-dispatch below.
+    // A sprite with no script does NOT get this: a transparent hole in plain
+    // scenery stays click-through to the stage (0).
+    return scriptedFallback;
   }
 
   private inverseTransformPoint(ch: Channel, x: number, y: number): { tx: number; ty: number } {

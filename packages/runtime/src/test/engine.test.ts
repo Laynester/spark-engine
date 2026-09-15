@@ -9,6 +9,7 @@ import { LColor, LImage, LList, LMemberRef, LObject, LPoint, LPropList, LRect, L
 import { normalizeTextLines, parseShapeText, parsePaletteBytes, Member, CastLib } from '../engine/members.js';
 import type { PersistWorkerLike, PersistWorkerMsg } from '../worker/persist.js';
 import { decodePng } from '../engine/png.js';
+import { decodeMemberMedia, encodeMemberMedia } from '../engine/media.js';
 import { decodeGif } from '../engine/gif.js';
 import { bakeEdgeBackground, cornersAreNearWhite, tintSpriteBackground } from '../stage/matte.js';
 import { bindPointerEvents, directorTransformFlip, imageDirtyDebts, inverseDirectorTransformPoint, parseRendererPreference, releaseImageDirty } from '../stage/pixi.js';
@@ -5089,6 +5090,129 @@ function musFrameBytes(subject: string, contentStr: string): Uint8Array {
   const frame = [0x72, 0x00, (body.length >>> 24) & 0xff, (body.length >>> 16) & 0xff, (body.length >>> 8) & 0xff, body.length & 0xff, ...body];
   return new Uint8Array(frame);
 }
+/**
+ * Quackster/Havana's MUS decoder, transcribed (MusNetworkDecoder.decode +
+ * MusUtil.readEvenPaddedString/readPropList). This is the server the client
+ * really talks to, so the frames the runtime SENDS have to survive it — bodies
+ * are big-endian, strings are u32 length + bytes + even padding, and a PropList
+ * body is `count` + `[u16 Symbol, key, u16 valueType, value]` where the value
+ * type tag appears ONCE per entry. A body that repeats the container's own type
+ * tag desynchronises every following field.
+ *
+ * Throws if the body is not exactly consumed, which is what the emulator turns
+ * into `IndexOutOfBoundsException: readerIndex(n) + length(m) exceeds
+ * writerIndex`.
+ */
+function havanaMusDecode(frame: Uint8Array): {
+  subject: string;
+  receivers: string[];
+  contentType: number;
+  propList: Map<string, { dataType: number; data: Uint8Array }>;
+  contentString: string;
+} {
+  const buf = Buffer.from(frame.buffer, frame.byteOffset, frame.byteLength);
+  assert.equal(buf[0], 0x72, "header tag is 'r'");
+  assert.equal(buf[1], 0, 'header second byte is 0');
+  const size = buf.readInt32BE(2);
+  const body = buf.subarray(6, 6 + size);
+  assert.equal(body.length, size, 'body length matches the frame');
+  let off = 0;
+  const readInt = (): number => { const v = body.readInt32BE(off); off += 4; return v; };
+  const readShort = (): number => { const v = body.readInt16BE(off); off += 2; return v; };
+  const readBytes = (n: number): Uint8Array => { const v = body.subarray(off, off + n); off += n; return v; };
+  const readByte = (): number => body[off++];
+  const readString = (): string => {
+    const len = readInt();
+    if (len <= 0) return '';
+    const bytes = readBytes(len);
+    if (len % 2) readByte();
+    return Buffer.from(bytes).toString('latin1');
+  };
+  readInt(); // errorCode
+  readInt(); // timestamp
+  const subject = readString();
+  readString(); // senderId
+  const receivers: string[] = [];
+  const receiverCount = readInt();
+  for (let i = 0; i < receiverCount; i++) receivers.push(readString());
+  const contentType = readShort();
+  let contentString = '';
+  const propList = new Map<string, { dataType: number; data: Uint8Array }>();
+  if (contentType === 1) contentString = String(readInt());
+  else if (contentType === 3) contentString = readString();
+  else if (contentType === 10) {
+    const count = readInt();
+    for (let i = 0; i < count; i++) {
+      readShort(); // symbol type
+      const key = readString();
+      const dataType = readShort();
+      const dataLength = dataType === 1 ? 4 : readInt();
+      const data = readBytes(dataLength);
+      if (dataLength % 2) readByte();
+      propList.set(key, { dataType, data });
+    }
+  } else {
+    throw new Error(`unsupported MUS content type ${contentType}`);
+  }
+  assert.equal(off, body.length, 'decoder consumed the whole body (no field desync)');
+  return { subject, receivers, contentType, propList, contentString };
+}
+
+/** Havana's MusUtil.writeEvenPaddedString / writeMedia, for building the frames
+ *  the server sends back (big-endian, even padded). */
+function havanaMusString(s: string): Uint8Array {
+  const bytes = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i) & 0xff;
+  return havanaMusPadded(havanaMusConcat([havanaMusU32(bytes.length), bytes]));
+}
+function havanaMusU32(n: number): Uint8Array {
+  const o = new Uint8Array(4);
+  new DataView(o.buffer).setUint32(0, n >>> 0);
+  return o;
+}
+function havanaMusI32(n: number): Uint8Array {
+  const o = new Uint8Array(4);
+  new DataView(o.buffer).setInt32(0, n | 0);
+  return o;
+}
+function havanaMusU16(n: number): Uint8Array {
+  const o = new Uint8Array(2);
+  new DataView(o.buffer).setUint16(0, n);
+  return o;
+}
+function havanaMusConcat(parts: Uint8Array[]): Uint8Array {
+  let len = 0;
+  for (const p of parts) len += p.length;
+  const out = new Uint8Array(len);
+  let off = 0;
+  for (const p of parts) {
+    out.set(p, off);
+    off += p.length;
+  }
+  return out;
+}
+function havanaMusPadded(bytes: Uint8Array): Uint8Array {
+  return bytes.length % 2 ? havanaMusConcat([bytes, new Uint8Array([0])]) : bytes;
+}
+
+/**
+ * The MUS reply to `GETBINDATA` — the photo binary coming back from the server
+ * (MusConnectionHandler: subject BINARYDATA, PropList of image(Media) + time
+ * (String) + cs(Integer)).
+ */
+function havanaMusPhotoReply(image: Uint8Array, time: string, cs: number): Uint8Array {
+  const body = havanaMusConcat([
+    havanaMusI32(0), havanaMusI32(0),
+    havanaMusString('BINARYDATA'), havanaMusString('System'),
+    havanaMusU32(1), havanaMusString('*'),
+    havanaMusU16(10), havanaMusU32(3),
+    havanaMusConcat([havanaMusU16(2), havanaMusString('image'), havanaMusU16(20), havanaMusPadded(havanaMusConcat([havanaMusU32(image.length), image]))]),
+    havanaMusConcat([havanaMusU16(2), havanaMusString('time'), havanaMusU16(3), havanaMusString(time)]),
+    havanaMusConcat([havanaMusU16(2), havanaMusString('cs'), havanaMusU16(1), havanaMusI32(cs)]),
+  ]);
+  return havanaMusConcat([havanaMusU16(0x7200), havanaMusU32(body.length), body]);
+}
+
 /** Minimal MUS frame decode: subject + String content (for assert checks). */
 function musDecode(bytes: Uint8Array): { subject: string; content: string } {
   let off = 6; // header(2) + length(4)
@@ -5280,6 +5404,300 @@ test('MUS connection speaks the binary protocol (Logon handshake + HELLO + LOGIN
   const login = fake.sent.filter((s) => s.type === 'send' && s.url === 'ws://localhost:3004').pop()!;
   assert.ok(login.bytes, 'LOGIN frame has bytes');
   assert.deepEqual(musDecode(login.bytes), { subject: 'LOGIN', content: '123 abc' });
+});
+
+test('photo upload: the BINDATA frame survives Havana\'s MUS decoder', () => {
+  // `Photo Component Class::storePicture` (hh_photo/0003) queues
+  // `[#image: <member media>, #time: <stamp>, #cs: <checksum>]` and the Binary
+  // Manager ships it with `sendBinary(the data of tTask)` ->
+  // `sendNetMessage("*", "BINDATA", propList)`. Havana reads that frame with
+  // MusNetworkDecoder/MusUtil.readPropList and stores
+  // `getPropAsBytes("image")`; when the value tag was written a second time
+  // inside the PropList body the server died with
+  // `readerIndex(48) + length(131072) exceeds writerIndex(110)` and the photo
+  // was never saved.
+  const e = new DirectorEngine();
+  const cam = hitTestMember(e, 40, 'cam_member', 3, 2);
+  cam.image!.palette = [[0, 0, 0], [255, 255, 255]];
+  cam.image!.depth = 8;
+  paintRect(cam, 0, 0, 2, 1);
+  const fake = new FakePersistWorker();
+  e.attachPersistence(fake);
+  const mus = e.xtraInstance('Multiuser');
+  e.xtraMethod(mus, 'connecttonetserver', ['*', '*', 'localhost', 12322, '*', 0]);
+
+  const image = e.memberMediaBytes(e.interp.evalExpressionString('member(65576)'));
+  assert.ok(image, 'the camera member has media to send');
+  const photo = new LPropList(new Map<string, LVal>([
+    ['image', e.interp.evalExpressionString('member(65576)')],
+    ['time', 'Tuesday, September 15, 2026 11:32'],
+    ['cs', 42123],
+  ]));
+  e.xtraMethod(mus, 'sendnetmessage', ['*', 'BINDATA', photo]);
+  const frame = fake.sent.filter((s) => s.type === 'send').pop()!.bytes!;
+
+  const parsed = havanaMusDecode(frame);
+  assert.equal(parsed.subject, 'BINDATA');
+  assert.deepEqual(parsed.receivers, ['*']);
+  assert.equal(parsed.contentType, 10, 'content is a PropList');
+  assert.equal(parsed.propList.get('time')?.dataType, 3, 'time is a String');
+  assert.equal(parsed.propList.get('time')?.data.length, 33);
+  assert.equal(Buffer.from(parsed.propList.get('time')!.data).toString('latin1'), 'Tuesday, September 15, 2026 11:32');
+  assert.equal(parsed.propList.get('cs')?.dataType, 1, 'cs is an Integer');
+  assert.equal(Buffer.from(parsed.propList.get('cs')!.data).readInt32BE(0), 42123);
+  assert.equal(parsed.propList.get('image')?.dataType, 20, 'image is a Media payload');
+  assert.equal(parsed.propList.get('image')!.data.length, image.length, 'the member media rides along as bytes');
+  // `items_photos.photo_data` is a MySQL blob (tools/havana.sql) — 65,535 bytes.
+  // A 161x117 camera frame is 75,348 bytes of RGBA, which the insert rejects
+  // with "Data too long for column 'photo_data'"; an indexed 8-bit frame is
+  // 18,837.
+  assert.ok(image.length < 0xffff, `payload fits the 64 KiB blob column (${image.length}B)`);
+});
+
+test('photo media: the payload is Director bitmap media (DTIB chunk + PackBits, even stride)', () => {
+  // A real Shockwave client does not send pixels — it sends a bitmap cast
+  // member's own media. Decoded from the one real row in the emulator's database
+  // (`items_photos.photo_id=31`, 3273 bytes for the 161x117 camera frame): a
+  // 60-byte member header, then the chunk id `DTIB` (Director's byte-reversed
+  // `BITD`), a little-endian u32 length, then PackBits rows of 8-bit palette
+  // indices at an EVEN stride — 162 bytes for a 161-wide member, pad byte 0. The
+  // corpus's own countCS over that raster reproduces the stored photo_checksum,
+  // which is what pins the raster down as indices rather than colours.
+  const e = new DirectorEngine();
+  const table = e.resolvePaletteTable(new LSymbol('grayscale'))!;
+  const w = 161;
+  const h = 117;
+  const shot = new LImage(w, h);
+  shot.depth = 8;
+  shot.palette = table;
+  const src = shot.ensure();
+  const expected = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const v = (i * 7) % 256;
+    const o = i * 4;
+    src[o] = v;
+    src[o + 1] = v;
+    src[o + 2] = v;
+    src[o + 3] = 255;
+    expected[i] = 255 - v; // #grayscale entry matching v sits at 255 - v
+  }
+  shot.dirty = true;
+  const bytes = encodeMemberMedia({ width: w, height: h, data: src, indices: null, palette: table });
+  assert.ok(bytes, 'the encoder produced media');
+  const realHeader = [
+    0x60, 0x74, 0x67, 0x75, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xa2, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x75, 0x00, 0xa1, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0xc0, 0x08, 0xff, 0xff, 0xff, 0xfe, 0x01, 0x00, 0x00, 0x00,
+  ];
+  assert.deepEqual([...bytes.subarray(0, 60)], realHeader, "the member header is byte-identical to a real client's");
+  assert.equal(Buffer.from(bytes.subarray(60, 64)).toString('latin1'), 'DTIB', "the chunk name is Director's byte-reversed BITD");
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  assert.equal(dv.getUint32(64, true), bytes.length - 68, 'the chunk length is the RLE size, little-endian');
+  assert.ok(bytes.length < 0xffff, `fits the 64 KiB photo_data blob (${bytes.length}B)`);
+  const back = decodeMemberMedia(bytes);
+  assert.ok(back, 'the encoder output decodes again');
+  assert.equal(back.width, w);
+  assert.equal(back.height, h);
+  assert.ok(back.indices);
+  assert.equal(back.indices.length, w * h, 'the pad column is stripped back off');
+  assert.deepEqual([...back.indices], [...expected], 'indices survive the round trip exactly');
+  // An EVEN width has no pad column at all.
+  const even = encodeMemberMedia({ width: 4, height: 2, data: null, indices: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]), palette: table });
+  assert.ok(even);
+  const evenBack = decodeMemberMedia(even);
+  assert.ok(evenBack);
+  assert.equal(evenBack.width, 4);
+  assert.deepEqual([...evenBack.indices!], [1, 2, 3, 4, 5, 6, 7, 8]);
+});
+
+test('photo media: getPixel().paletteIndex is the STORED index (a real photo verifies)', () => {
+  // `Photo Component Class::countCS` hashes `image.getPixel(x, y).paletteIndex`,
+  // and a real photo's raster is indices against a palette the media does not
+  // carry. A nearest-entry lookup answers a different number whenever the palette
+  // in hand is not the table the raster was quantised with — so a real photo would
+  // fail the client's own check and paint `photo_invalid`.
+  const e = new DirectorEngine();
+  const cam = hitTestMember(e, 40, 'cam_member', 2, 2);
+  const img = cam.image!;
+  img.palette = [[0, 0, 0], [255, 255, 255], [255, 0, 0]];
+  const d = img.ensure();
+  for (let i = 0; i < 4; i++) {
+    const o = i * 4;
+    d[o] = 255;
+    d[o + 1] = 255;
+    d[o + 2] = 255;
+    d[o + 3] = 255; // white: the nearest entry is 1, the stored index is 2
+  }
+  img.indices = new Uint8Array(4).fill(2);
+  img.dirty = true;
+  assert.equal(e.interp.evalExpressionString('member(65576).image.getPixel(0, 0).paletteIndex'), 2);
+  assert.equal(e.interp.evalExpressionString('member(65576).image.getPixel(0, 0, #integer)'), 2);
+});
+
+test('photo preview: media survives the MUS round trip as indices (countCS holds)', () => {
+  // The server answers GETBINDATA with the stored bytes
+  // (`setPropAsBytes("image", MusTypes.Media, photo.getData())`), the Multiuser
+  // Instance hands the PropList to `binaryDataReceived`, and Photo Component
+  // does `pPhotoMember.media = tdata[#image]`. The member has to come back
+  // displayable, and `countCS` has to agree: it hashes
+  // `image.getPixel(x, y).paletteIndex` on BOTH ends, so the raster must arrive as
+  // the same palette indices the sender quantised to (the media carries no palette
+  // — see engine/media.ts and 'getPixel().paletteIndex is the STORED index').
+  const e = new DirectorEngine();
+  const cam = hitTestMember(e, 40, 'cam_member', 3, 2);
+  const palette = [[0, 0, 0], [255, 255, 255], [120, 40, 200]];
+  cam.image!.palette = palette;
+  cam.image!.depth = 8;
+  const data = cam.image!.ensure();
+  for (let i = 0; i < 6; i++) {
+    const c = palette[i % 3];
+    const o = i * 4;
+    data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255;
+  }
+  cam.image!.dirty = true;
+
+  const image = e.memberMediaBytes(e.interp.evalExpressionString('member(65576)'))!;
+  assert.ok(image.length > 0, 'media encoded');
+
+  // Inbound: the server's BINARYDATA reply routed to the Xtra handler.
+  const fake = new FakePersistWorker();
+  e.attachPersistence(fake);
+  const mus = e.xtraInstance('Multiuser');
+  const rec = e.addScriptMember('PHOTO_REC', 'parent', ['on h', 'end'].join('\n'));
+  const tgt = e.interp.makeInstance(rec.script!);
+  e.xtraMethod(mus, 'setnetmessagehandler', [new LSymbol('h'), tgt]);
+  e.xtraMethod(mus, 'connecttonetserver', ['*', '*', 'localhost', 12322, '*', 0]);
+  // Drain the synthetic connect message, then ingest the reply.
+  (e as unknown as { ingestNetBytes(st: unknown, bytes: Uint8Array): void }).ingestNetBytes(
+    [...(e as unknown as { multiuserState: Map<string, unknown> }).multiuserState.values()][0],
+    havanaMusPhotoReply(image, 'Tuesday, September 15, 2026 11:32', 42123),
+  );
+  const msg = e.xtraMethod(mus, 'getnetmessage', []) as LPropList;
+  const content = msg.props.get('content');
+  assert.ok(content instanceof LPropList, 'the binary reply arrives as a propList (the #string branch would forwardMsg it)');
+  const payload = content.props.get('image');
+  assert.ok(payload instanceof Uint8Array, 'image arrives as raw bytes');
+
+  // `pPhotoMember.media = tdata[#image]`
+  const photo = new Member(1, 41, 'photo_member', 'bitmap');
+  e.membersByGlobal.set((1 << 16) | 41, photo);
+  e.setMemberProp({ number: 41, castLibNumber: 1, name: 'photo_member', kind: 'bitmap' }, 'media', payload);
+  const after = photo.image;
+  assert.ok(after, 'media decoded into an image');
+  assert.equal(after.width, 3);
+  assert.equal(after.height, 2);
+  const nearest = (img: LImage, x: number, y: number): number => {
+    const o = (y * img.width + x) * 4;
+    let best = 0;
+    let bestDist = Infinity;
+    img.palette!.forEach(([r, g, b], i) => {
+      const d = (r - img.data![o]) ** 2 + (g - img.data![o + 1]) ** 2 + (b - img.data![o + 2]) ** 2;
+      if (d < bestDist) { bestDist = d; best = i; }
+    });
+    return best;
+  };
+  // Director's media carries NO palette — 60 bytes of member header and the
+  // raster — so what has to survive the trip is the INDICES. They are what
+  // `getPixel().paletteIndex` reports, i.e. exactly what `countCS` hashes, and
+  // the engine keeps the member displayable by attaching the camera's own
+  // palette (the corpus declares `#palette: #grayscale` on cam_display and
+  // photo_picture). Note the width is 3, so the raster's rows are padded to 4 and
+  // the pad column has to be stripped back off on the way in.
+  assert.deepEqual([...after.indices!], [0, 1, 2, 0, 1, 2], 'the raster survives as palette indices');
+  assert.equal(after.palette?.length, 256, 'the decoded photo is displayable through the camera palette');
+  // The checksum the server stored is computed on the SENDING side from the
+  // capture (unindexed, so a nearest-palette lookup) and re-checked on the
+  // RECEIVING side from the stored indices. Both must land on the same numbers.
+  const tL = [3, 2, 73, 28, 83, 21, 43, 90, 92, 91, 37, 4, 3, 84, 12, 102, 103, 108, 97, 43, 44, 89, 109, 65, 61, -4, 76];
+  const countCS = (indexAt: (x: number, y: number) => number, w: number, h: number): number => {
+    let a = 0;
+    for (let i = 1; i <= 100; i++) {
+      a = (a + indexAt(i % w, (i * i) % h) * tL[i % tL.length]) % 85000;
+    }
+    return a;
+  };
+  assert.equal(
+    countCS((x, y) => after.indices![y * 3 + x], 3, 2),
+    countCS((x, y) => nearest(cam.image!, x, y), 3, 2),
+    'countCS (what the server stored) is reproduced after the round trip',
+  );
+});
+
+test('photo preview: the decoded raster is materialised through #grayscale (photos were showing as negatives)', () => {
+  // A photo's media carries NO palette, so `rgbaFromIndices` has nothing to look
+  // the raster up in. It used to fall back to `grey = index` — the IDENTITY ramp
+  // — while `#grayscale` is the opposite way round: the hh_photo `.pal` sidecars
+  // (`0012_bitmap_photo_placeholder.pal`, `0020_bitmap_cam_display.pal`) all run
+  // `255 255 255` at index 0 down to `0 0 0` at 255, and LibreShockwave's
+  // Palette::grayscalePalette() is built as `255 - index`. The stage bakes from
+  // `image.data` (bakeSurface -> `img.ensure()`), so a photo previewed as a
+  // negative no matter what palette was attached next to it.
+  const e = new DirectorEngine();
+  const bytes = encodeMemberMedia({ width: 3, height: 1, indices: Uint8Array.from([0, 255, 247]) })!;
+  const photo = new Member(1, 59, 'photo_ramp', 'bitmap');
+  e.membersByGlobal.set((1 << 16) | 59, photo);
+  e.setMemberProp({ number: 59, castLibNumber: 1, name: 'photo_ramp', kind: 'bitmap' }, 'media', bytes);
+  const img = photo.image!;
+  assert.equal(img.width, 3);
+  assert.deepEqual([...img.indices!], [0, 255, 247], 'the stored indices survive (countCS hashes these)');
+  assert.deepEqual(img.palette![0], [255, 255, 255], '#grayscale index 0 is WHITE');
+  assert.deepEqual(img.palette![255], [0, 0, 0]);
+  // The baked buffer has to be the palette's colours for those indices — the
+  // identity ramp would put 0, 255, 247 here and invert the picture.
+  const px = img.ensure();
+  assert.deepEqual([...px.subarray(0, 3)], [255, 255, 255], 'index 0 paints white, not black');
+  assert.deepEqual([...px.subarray(4, 7)], [0, 0, 0], 'index 255 paints black');
+  assert.deepEqual([...px.subarray(8, 11)], [8, 8, 8], 'index 247 paints the palette entry (255 - 247)');
+});
+
+test('photo preview: member.scriptText is EMPTY for a plain bitmap (the guard that dropped the picture)', () => {
+  // The last lines of `Photo Component Class::binaryDataReceived` (hh_photo/0003)
+  // are the ONLY place the corpus reads scriptText, and they reject the photo if
+  // it answers anything but EMPTY:
+  //
+  //   pPhotoMember.media = tdata[#image]
+  //   if pPhotoMember.type <> #bitmap or pPhotoMember.scriptText <> EMPTY then
+  //     pPhotoMember.erase()
+  //     return 0
+  //   end if
+  //
+  // An unimplemented property answered VOID, and VOID <> EMPTY is true (see
+  // 'EMPTY is the empty string'), so EVERY photo erased its member and bailed
+  // before `setProperty(#buffer, pPhotoMember)` — the window kept showing
+  // photo_placeholder and nothing else, with only a warn to show for it.
+  const e = new DirectorEngine();
+  const cast = new CastLib(1, 'internal');
+  e.casts.push(cast);
+  const shot = new Member(1, 55, 'photo_shot', 'bitmap');
+  shot.image = new LImage(4, 3);
+  cast.members.set(55, shot);
+  cast.byName.set('photo_shot', shot);
+  e.membersByGlobal.set((1 << 16) | 55, shot);
+  const ref = e.getMemberByName('photo_shot')!;
+  assert.equal(e.getMemberProp(ref, 'scriptText'), '', 'a bitmap member has no script text');
+  assert.equal(e.interp.evalExpressionString('member("photo_shot").type = #bitmap'), 1);
+  assert.equal(
+    e.interp.evalExpressionString('member("photo_shot").scriptText <> EMPTY'),
+    0,
+    'the corpus guard must NOT fire for a plain bitmap (it drops the decoded photo)',
+  );
+  // A script member still hands its source over, which is what the guard is
+  // really testing for: a media blob that turned out to be a script member.
+  const scriptMember = e.addScriptMember('probe_photo_script', 'movie', ['on describe', '  return "shot"', 'end'].join('\n'));
+  assert.equal(e.getMemberProp(scriptMember, 'scriptText'), 'on describe\n  return "shot"\nend');
+  assert.ok(e.globalHandlers.has('describe'), 'a movie script registers its handlers');
+  // Assigning it replaces the source and re-registers the handlers (absent a
+  // recompile the old `describe` would linger next to the new one).
+  e.setMemberProp(scriptMember, 'scriptText', 'on photograph\n  return "frame"\nend');
+  assert.equal(e.getMemberProp(scriptMember, 'scriptText'), 'on photograph\n  return "frame"\nend');
+  assert.ok(e.globalHandlers.has('photograph'), 'recompiled handlers are live');
+  assert.equal(e.globalHandlers.has('describe'), false, 'the replaced handler is gone');
+  assert.equal(
+    e.interp.evalExpressionString('member("probe_photo_script").scriptText <> EMPTY'),
+    1,
+    'a script member does carry text, which is what the guard catches',
+  );
 });
 
 test('persistence worker drives engine.tick() at 1 Hz only while the page is hidden', () => {
@@ -7316,6 +7734,67 @@ test('a chair drawn in front of a sitter does not steal the click aimed at the a
 });
 
 /**
+ * The flip side of the chair test: a sprite that renders NOTHING at the point
+ * must still own it when nothing else renders there either.
+ *
+ * The reported bug: picking an item out of the inventory starts the Object Mover
+ * (hh_room_utils/0017), which spawns a ghost sprite that follows the cursor and
+ * carries its `#mouseDown` proc ON the sprite
+ * (`tSpr.registerProcedure(#eventProcRoom, ...)`). Clicking a see-through part of
+ * the furniture art — inside the ghost's rectangle but on a keyed/transparent
+ * pixel — made the pixel hit test reject the ghost, so the click fell through to
+ * nothing and the item was never placed. A transparent pixel may still yield to
+ * a sprite that IS drawn underneath (the chair/avatar rule), but when no
+ * candidate draws there the front-most one keeps the click by its rectangle.
+ */
+test('a SCRIPTED sprite with no pixel at the point still owns it when nothing renders underneath (mover ghost)', () => {
+  const e = new DirectorEngine();
+  e.addScriptMember('Broker', 'movie', ['on new me', '  return me', 'end'].join('\n'));
+  const ghost = hitTestMember(e, 1, 'mover_ghost', 20, 40);
+  paintRect(ghost, 0, 0, 3, 3); // a small opaque corner; the rest of the rect renders nothing
+  // The mover wires an event broker into the ghost sprite so its #mouseDown proc
+  // can fire: `setEventBroker(tSpr.spriteNum, "ObjMoverSpr" & i)`. That makes it
+  // a pointer target, which is what earns the rectangle fallback.
+  const broker = e.interp.evalExpressionString('new(script("Broker"))') as LObject;
+  e.setSpriteProp(e.getSprite(40), 'castNum', (1 << 16) | 1);
+  e.setSpriteProp(e.getSprite(40), 'scriptInstanceList', new LList([broker]));
+  e.setSpriteProp(e.getSprite(40), 'locH', 0);
+  e.setSpriteProp(e.getSprite(40), 'locV', 0);
+
+  // (15, 30) is inside the ghost's rect but on a transparent pixel; nothing else
+  // is under it, so the ghost keeps the pointer instead of it vanishing.
+  e.dispatchPointerEvent('mouseMove', 40, 15, 30);
+  assert.equal(e.interp.evalExpressionString('the rollover'), 40, 'transparent ghost keeps the rollover');
+  e.dispatchPointerEvent('mouseDown', 40, 15, 30);
+  assert.equal(e.interp.evalExpressionString('the clickOn'), 40, 'transparent ghost keeps the click');
+
+  // ...but it still yields where a sprite behind really IS drawn.
+  const floor = hitTestMember(e, 2, 'floor_tile', 64, 64);
+  paintRect(floor, 0, 0, 63, 63);
+  e.setSpriteProp(e.getSprite(41), 'castNum', (1 << 16) | 2);
+  e.setSpriteProp(e.getSprite(41), 'locH', 0);
+  e.setSpriteProp(e.getSprite(41), 'locV', 0);
+  e.setSpriteProp(e.getSprite(41), 'locZ', 1); // behind the ghost (locZ 40)
+  e.dispatchPointerEvent('mouseMove', 40, 15, 30);
+  assert.equal(e.interp.evalExpressionString('the rollover'), 41, 'an opaque sprite behind still wins');
+
+  // A point outside every rectangle is still nothing, and a transparent hole in
+  // UNScripted scenery stays click-through (no rect fallback).
+  const plain = hitTestMember(e, 3, 'plain_scenery', 20, 20);
+  paintRect(plain, 0, 0, 1, 1);
+  e.setSpriteProp(e.getSprite(42), 'castNum', (1 << 16) | 3);
+  e.setSpriteProp(e.getSprite(42), 'locZ', 99);
+  e.dispatchPointerEvent('mouseMove', 0, 500, 500);
+  assert.equal(e.interp.evalExpressionString('the rollover'), 0, 'empty stage space is 0');
+  // Hide the scripted ghost and the floor so only the unscripted scenery is left:
+  // a transparent hole in plain art gets no rectangle fallback and stays 0.
+  e.setSpriteProp(e.getSprite(40), 'visible', 0);
+  e.setSpriteProp(e.getSprite(41), 'visible', 0);
+  e.dispatchPointerEvent('mouseMove', 0, 15, 15);
+  assert.equal(e.interp.evalExpressionString('the rollover'), 0, 'unscripted transparent pixel is still click-through');
+});
+
+/**
  * `the rollover` / `the clickOn` must be the sprite the pointer event was
  * actually routed to: Room_Interface::validateEvent compares the two by id
  * before running its ink-36 white-cover click-through (hh_room/0003:798-808),
@@ -8402,6 +8881,36 @@ test('copyPixels rotation quad transposes the source (dropmenu #rotate strips)',
   // dst(2,0)=src(0,1)=10, dst(0,1)=src(1,2)=21, dst(2,1)=src(1,1)=11
   // (getPixel #integer returns 0xRRGGBB: rgb(v,0,0) = v*65536).
   assert.equal(e.interp.callHandler(s, run, [], null, new Set()), '1310720,655360,1376256,720896');
+});
+
+test('copyPixels maps a 4-point dest onto the QUAD, not its bounding box (hh_entry_jp screen scroller)', () => {
+  // The Entry Image Scroller warps its 2D canvas through two parallelogram
+  // halves — `pQuadLeft = [point(0,0), point(104,52), point(104,98), point(0,46)]`
+  // — to give the entry screen its 3D tilt. A non-axis-aligned quad used to
+  // fall back to a bounding-box stretch, so the fold never appeared.
+  const src = new LImage(2, 2);
+  src.fillRect(0, 0, 1, 1, new LColor(255, 0, 0));   // TL
+  src.fillRect(1, 0, 2, 1, new LColor(0, 255, 0));   // TR
+  src.fillRect(0, 1, 1, 2, new LColor(0, 0, 255));   // BL
+  src.fillRect(1, 1, 2, 2, new LColor(255, 255, 0)); // BR
+  const dst = new LImage(8, 6);
+  // Parallelogram TL(1,0) TR(5,0) BR(7,6) BL(3,6): the top edge runs 1..5 while the
+  // bottom runs 3..7, i.e. the whole quad leans right going down.
+  const quad = [1, 0, 5, 0, 7, 6, 3, 6];
+  dst.copyPixels(src, new LRect(1, 0, 7, 6), new LRect(0, 0, 2, 2), 0, 255, 0xffffff, null, false, false, 0, false, false, undefined, quad);
+  const d = dst.ensure();
+  const alphaAt = (x: number, y: number): number => d[(y * 8 + x) * 4 + 3];
+  const rgbAt = (x: number, y: number): number[] => { const o = (y * 8 + x) * 4; return [d[o], d[o + 1], d[o + 2]]; };
+  // Inside the quad the source's four corners land as expected.
+  assert.deepEqual(rgbAt(1, 0), [255, 0, 0], 'top-left of the quad is the source TL');
+  assert.deepEqual(rgbAt(4, 0), [0, 255, 0], 'top-right of the quad is the source TR');
+  assert.deepEqual(rgbAt(3, 5), [0, 0, 255], 'bottom-left of the quad is the source BL');
+  assert.deepEqual(rgbAt(6, 5), [255, 255, 0], 'bottom-right of the quad is the source BR');
+  // The bounding box's own corners are OUTSIDE the leaning quad: nothing is
+  // drawn there (a bbox blit would have painted them with clamped edge pixels).
+  assert.equal(alphaAt(1, 5), 0, 'bbox bottom-left corner stays empty');
+  assert.equal(alphaAt(7, 0), 0, 'bbox top-right corner stays empty');
+  assert.equal(alphaAt(1, 0), 255, 'a pixel genuinely inside the quad IS drawn');
 });
 
 test('createMatte() keys the opaque-white background (avatar part)', () => {
