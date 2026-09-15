@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@habbo/runtime": "^0.1.0"
+    "@spark/runtime": "^0.1.0"
   },
   "devDependencies": {
     "typescript": "^5.5.0",

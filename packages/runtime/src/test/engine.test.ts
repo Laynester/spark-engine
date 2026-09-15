@@ -153,7 +153,7 @@ function makeMovieCastZip(name: string, linkedCasts: { name: string; file: strin
 }
 
 test('movie.txt configures stage + casts.txt registers the full castLib registry', async () => {
-  const habbo = makeMovieCastZip('habbo', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
+  const main = makeMovieCastZip('main', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const fuse = makeCastZip('fuse_client', [], {
@@ -161,12 +161,12 @@ test('movie.txt configures stage + casts.txt registers the full castLib registry
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'fuse_client' ? fuse : null;
+      return name === 'main' ? main : name === 'fuse_client' ? fuse : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
 
   // movie.txt applied.
   assert.equal(e.stageWidth, 720);
@@ -203,7 +203,7 @@ test('script(member(...)) resolves a script-type member — initializeAndRun ver
   // initializeAndRun: member 5 of castlib 1 (the movie's Internal cast) is a
   // Parent script. The corpus addresses script members by NUMBER REF, not
   // name, so script() must resolve an LMemberRef to its member's script.
-  const habbo = makeMovieCastZip('habbo', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
+  const main = makeMovieCastZip('main', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
     '0005_script_vercode.ls':
       '-- Cast member: vercode\n-- Type: Parent\non getV me, tSec\n' +
@@ -215,12 +215,12 @@ test('script(member(...)) resolves a script-type member — initializeAndRun ver
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : null;
+      return name === 'main' ? main : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
 
   const inst = e.interp.evalExpressionString('new script(member(5, 1))');
   assert.ok(inst instanceof LObject, 'script(member(5,1)) must instantiate vercode, not VOID');
@@ -242,7 +242,7 @@ test('linked cast placeholder movie config does not clobber the movie stage colo
   // stage rect, stage_color_rgb 0xFFFFFF white) alongside its casts.txt.
   // Loading fuse_client mid-boot must NOT turn the movie's black stage
   // white — only the FIRST (boot) movie's config applies.
-  const habbo = makeMovieCastZip('habbo', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
+  const main = makeMovieCastZip('main', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const placeholderMovie = {
@@ -255,12 +255,12 @@ test('linked cast placeholder movie config does not clobber the movie stage colo
   }, placeholderMovie);
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'fuse_client' ? fuse : null;
+      return name === 'main' ? main : name === 'fuse_client' ? fuse : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
   // Boot movie applied its real stage (720x540 black).
   assert.equal(e.stageBackground, 0x000000);
   assert.equal(e.stageWidth, 720);
@@ -277,7 +277,7 @@ test('linked cast with an all-zero stage rect does not clobber the movie stage g
   // boot movie's rect with those zeros — FUSE's window `center()` computes
   // `(the stageRight - the stageLeft) / 2` and a 0/0/0/0 rect moves the
   // Loading Bar window to negative coordinates (top-left / off-screen).
-  const habbo = makeMovieCastZip('habbo', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
+  const main = makeMovieCastZip('main', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const fuse = makeCastZip('fuse_client', [], {
@@ -285,12 +285,12 @@ test('linked cast with an all-zero stage rect does not clobber the movie stage g
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'fuse_client' ? fuse : null;
+      return name === 'main' ? main : name === 'fuse_client' ? fuse : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
   // Boot movie applied its real rect (89/50/809/590).
   assert.equal(e.stageLeft, 89);
   assert.equal(e.stageTop, 50);
@@ -313,7 +313,7 @@ test('linked cast with an all-zero stage rect does not clobber the movie stage g
 });
 
 test('loadCast auto-loads linked casts in order (Director cast links)', async () => {
-  const habbo = makeCastZip('habbo', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
+  const main = makeCastZip('main', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const fuse = makeCastZip('fuse_client', [], {
@@ -321,17 +321,17 @@ test('loadCast auto-loads linked casts in order (Director cast links)', async ()
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'fuse_client' ? fuse : null;
+      return name === 'main' ? main : name === 'fuse_client' ? fuse : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  const cast = await e.loadCast(loader, 'habbo');
+  const cast = await e.loadCast(loader, 'main');
   assert.ok(cast);
   assert.equal(e.casts.length, 2, 'linked cast must be loaded as castLib 2');
-  assert.equal(e.casts[0].name, 'habbo');
+  assert.equal(e.casts[0].name, 'main');
   assert.equal(e.casts[1].name, 'fuse_client');
-  assert.equal(cast.fileName, 'habbo.cst');
+  assert.equal(cast.fileName, 'main.cst');
   // castLib(2) resolves to fuse_client (used by prepareMovie's castLib(2).preloadMode)
   const cl2 = e.getCastLib(2);
   assert.ok(cl2);
@@ -396,7 +396,7 @@ test('engine palette reads accept PALB binary palettes from the bundle', async (
 });
 
 test('loadCast reads single-stream spark bundles (bundler buildSpark format)', async () => {
-  const habbo = makeSparkBundle('habbo', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
+  const main = makeSparkBundle('main', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
     '0002_script_Init.ls': '-- Cast member: Init\n-- Type: Score\non exitFrame me\n  if netDone() then startClient() else go(the frame)\nend\n',
   });
@@ -405,14 +405,14 @@ test('loadCast reads single-stream spark bundles (bundler buildSpark format)', a
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'fuse_client' ? fuse : null;
+      return name === 'main' ? main : name === 'fuse_client' ? fuse : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  const cast = await e.loadCast(loader, 'habbo');
+  const cast = await e.loadCast(loader, 'main');
   assert.ok(cast, 'spark bundle parses, manifest resolves');
-  assert.equal(cast.name, 'habbo');
+  assert.equal(cast.name, 'main');
   assert.equal(e.casts.length, 2, 'linked cast auto-loaded from its spark bundle');
   assert.equal(e.casts[1].name, 'fuse_client');
   // member payloads read out of the sliced spark body
@@ -439,7 +439,7 @@ test('loadCast reads single-stream spark bundles (bundler buildSpark format)', a
 });
 
 test('prepareMovie runs at boot, then startClient fires after netDone completes', async () => {
-  const habbo = makeCastZip('habbo', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
+  const main = makeCastZip('main', [{ name: 'fuse_client', file: 'fuse_client.cst' }], {
     '0001_script_Movie.ls': '-- Cast member: Movie\n-- Type: Movie Script\non prepareMovie\n  preloadNetThing(castLib(2).fileName)\nend\n',
     '0002_script_Init.ls': '-- Cast member: Init\n-- Type: Score\non exitFrame me\n  if netDone() then\n    startClient()\n  else\n    go(the frame)\n  end if\nend\n',
   });
@@ -448,12 +448,12 @@ test('prepareMovie runs at boot, then startClient fires after netDone completes'
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'fuse_client' ? fuse : null;
+      return name === 'main' ? main : name === 'fuse_client' ? fuse : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
   e.boot();
   // prepareMovie ran: the linked fuse_client cast is already local, so the
   // preload has nothing to download — it completes immediately. (The
@@ -1392,7 +1392,7 @@ test('dynamic cast slot wipes members immediately on rename-to-empty', async () 
   // window — the next room's window builds referenced them mid-load and the
   // refill yanked them out from under those objects (DEPTH 25 window-recursion
   // loop + dead UI after a couple of room switches).
-  const habbo = makeMovieCastZip('habbo', [], {
+  const main = makeMovieCastZip('main', [], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const priv = makeCastZip('hh_room_private', [], {
@@ -1404,12 +1404,12 @@ test('dynamic cast slot wipes members immediately on rename-to-empty', async () 
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'hh_room_private' ? priv : name === 'hh_room_nlobby' ? nlb : null;
+      return name === 'main' ? main : name === 'hh_room_private' ? priv : name === 'hh_room_nlobby' ? nlb : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
   const slot = e.castByName.get('empty 1')!; // 'empty 1' shell from casts.txt
   const slotRef = e.getCastLib(4)!;
   assert.equal(slot.members.size, 0);
@@ -1447,7 +1447,7 @@ test('re-import into a new dynamic slot purges the superseded holder; stale numb
   // or name-based member lookups resolve against the previous room's members,
   // and stale (slot<<16)|member numbers from pAllMemNumList must re-resolve
   // to the CURRENT holder of the cast (script(720979) -> unknown script).
-  const habbo = makeMovieCastZip('habbo', [], {
+  const main = makeMovieCastZip('main', [], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const priv = makeCastZip('hh_room_private', [], {
@@ -1455,12 +1455,12 @@ test('re-import into a new dynamic slot purges the superseded holder; stale numb
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'hh_room_private' ? priv : null;
+      return name === 'main' ? main : name === 'hh_room_private' ? priv : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
   const slotA = e.castByName.get('empty 1')!; // castLib 4
   const slotB = e.castByName.get('empty 2')!; // castLib 5
   const refA = e.getCastLib(4)!;
@@ -1501,7 +1501,7 @@ test('clearCastMembers unregisters the cast from the corpus Resource Manager (no
   // numbers resolve through membersByGlobal to the new occupant's member (the
   // wrong-sprites corruption: a sound machine GUI member appearing on
   // furniture shadows after window churn).
-  const habbo = makeMovieCastZip('habbo', [], {
+  const main = makeMovieCastZip('main', [], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const privManifest = {
@@ -1526,12 +1526,12 @@ test('clearCastMembers unregisters the cast from the corpus Resource Manager (no
   const priv = zipSync(privEntries, { level: 6 });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'hh_room_private' ? priv : null;
+      return name === 'main' ? main : name === 'hh_room_private' ? priv : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
 
   // Corpus-style Resource Manager (fuse_client 0029) with the real cache
   // handlers: preIndexMembers populates pAllMemNumList, unregisterMembers
@@ -1618,7 +1618,7 @@ test('stale sprite castNum/member re-resolves to the current holder of the cast 
   // same re-resolution getMember()/resolveScriptByNumber() use — so a cleared
   // slot's number lands on the CURRENT holder of the cast instead of going
   // invisible or hitting a reused slot's unrelated member.
-  const habbo = makeMovieCastZip('habbo', [], {
+  const main = makeMovieCastZip('main', [], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const priv = makeCastZip('hh_room_private', [], {
@@ -1626,12 +1626,12 @@ test('stale sprite castNum/member re-resolves to the current holder of the cast 
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'hh_room_private' ? priv : null;
+      return name === 'main' ? main : name === 'hh_room_private' ? priv : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
   const refA = e.getCastLib(4)!;
   const refB = e.getCastLib(5)!;
 
@@ -2472,7 +2472,7 @@ test('dynamic download fills the corpus-tracked path-named shell; release clears
   // corpus later releases the shell (rename-to-empty), so an appended slot
   // would leak its members forever and name lookups would keep resolving to
   // stale art ("loaded into a slot but only replaces a few [images]").
-  const habbo = makeMovieCastZip('habbo', [], {
+  const main = makeMovieCastZip('main', [], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const sm = makeCastZip('hh_furni_xx_sound_machine', [], {
@@ -2481,12 +2481,12 @@ test('dynamic download fills the corpus-tracked path-named shell; release clears
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'hh_furni_xx_sound_machine' ? sm : null;
+      return name === 'main' ? main : name === 'hh_furni_xx_sound_machine' ? sm : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
   const shells = e.casts.length; // Internal, fuse_client, bin, empty 1, empty 2
   const shellRef = e.getCastLib(4)!; // empty 1
 
@@ -2521,7 +2521,7 @@ test('re-import supersedes a stale bare-name holder so lookups resolve to the fr
   // DIFFERENT shell via the file-path name; the rename-time purge (exact name
   // match) misses the bare-named holder, so registerCast must supersede it —
   // otherwise name lookups keep hitting the old slot's members.
-  const habbo = makeMovieCastZip('habbo', [], {
+  const main = makeMovieCastZip('main', [], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const sm = makeCastZip('hh_furni_xx_sound_machine', [], {
@@ -2530,12 +2530,12 @@ test('re-import supersedes a stale bare-name holder so lookups resolve to the fr
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : name === 'hh_furni_xx_sound_machine' ? sm : null;
+      return name === 'main' ? main : name === 'hh_furni_xx_sound_machine' ? sm : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
 
   // Leak seed: import into slot 5 with the BARE name (bundle present -> the
   // rename-time fill registers it under manifest.name).
@@ -2974,7 +2974,7 @@ test('member.height: non-wrapping #adjust (boxType-unset) text members report CO
     e.setMemberProp(ref4, 'fixedlinespace', 9);
     e.setMemberProp(ref4, 'topspacing', 1);
     e.setMemberProp(ref4, 'wordwrap', 1); // pWriterPlainNormWrap has wordWrap=1
-    e.setMemberProp(ref4, 'text', 'These are habbo public rooms like you');
+    e.setMemberProp(ref4, 'text', 'These are local public rooms like you');
     const h4 = asNum(e.getMemberProp(ref4, 'height'));
     assert.ok(h4 > 0 && h4 < 100, `wordWrap=1 #adjust height ${h4}, not0 or480`);
     assert.equal(h4, 11, 'content height for wordWrap=1 #adjust with Volter 9px');
@@ -8584,19 +8584,19 @@ test('rasterizeTextMember: chunk styles render the styled range in its own font/
 test('onCastLoaded fires when a cast registers (embed fonts hook)', async () => {
   // embed.ts hooks this to load a cast's TTF fonts once its manifest registers
   // (boot's lazy preloads happen long after the initial loadFonts call).
-  const habbo = makeCastZip('habbo', [], { '0001_script_Loop.ls': '-- Cast member: Loop\non exitFrame me\nend\n' });
+  const main = makeCastZip('main', [], { '0001_script_Loop.ls': '-- Cast member: Loop\non exitFrame me\nend\n' });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : null;
+      return name === 'main' ? main : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
   const loaded: string[] = [];
   e.onCastLoaded = (name) => loaded.push(name);
-  const cast = await e.loadCast(loader, 'habbo');
+  const cast = await e.loadCast(loader, 'main');
   assert.ok(cast);
-  assert.ok(loaded.includes('habbo'), `hook must fire for the registered cast, got ${loaded.join(',')}`);
+  assert.ok(loaded.includes('main'), `hook must fire for the registered cast, got ${loaded.join(',')}`);
 });
 
 test('near-white text flush on the member edge gets keyed by the ink-36 display bake (U51 header fix)', () => {
@@ -9229,7 +9229,7 @@ test('member.char.count chunk reads member text (U91 window title width)', () =>
       '  t.fixedLineSpace = 15',
       '  t.alignment = #center',
       '  t.rect = rect(0, 0, 60, 15)',
-      '  t.text = "Habbo Console"',
+      '  t.text = "Hello Console"',
       '  c = member(n).char.count',
       '  first = member(n).char[1]',
       '  w = member(n).charPosToLoc(member(n).char.count).locH + 16',
@@ -10190,7 +10190,7 @@ test('dynamic download rename (full CDN URL) fills the empty shell in place for 
   // must resolve through castNameFromUrl but fill THIS shell (its number is
   // what acquireAssetsFromCast reads) and keep the URL name (the corpus's
   // FindCastNumber matches on the exact name).
-  const habbo = makeMovieCastZip('habbo', [], {
+  const main = makeMovieCastZip('main', [], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
   });
   const sofa = makeCastZip('hh_furni_xx_club_sofa', [], {
@@ -10203,12 +10203,12 @@ test('dynamic download rename (full CDN URL) fills the empty shell in place for 
         _onProgress?.(sofa.length, sofa.length); // real fetch reports bytes; kills the fake ramp
         return sofa;
       }
-      return name === 'habbo' ? habbo : null;
+      return name === 'main' ? main : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
   e.boot(); // preloadNetThing ramps need tick() to advance
   const url = 'http://localhost:5173/casts/hof_furni/hh_furni_xx_club_sofa.cct';
   const slot = e.castByName.get('empty 1')!;
@@ -10719,18 +10719,18 @@ on stopMovie
   go(1)
 end
 `;
-  const habbo = makeMovieCastZip('habbo', [], {
+  const main = makeMovieCastZip('main', [], {
     '0001_script_Loop.ls': '-- Cast member: Loop\n-- Type: Score\non exitFrame me\n  go(the frame)\nend\n',
     '0003_script_Initialization.ls': src,
   });
   const source: BundleSource = {
     async fetchBundle(name: string) {
-      return name === 'habbo' ? habbo : null;
+      return name === 'main' ? main : null;
     },
   };
   const loader = new BundleLoader(source);
   const e = new DirectorEngine();
-  await e.loadCast(loader, 'habbo');
+  await e.loadCast(loader, 'main');
   e.boot();
   // The boot guards passed cleanly: no unsupported-property / unresolved-
   // handler / undeclared-identifier noise, and the movie ran through.

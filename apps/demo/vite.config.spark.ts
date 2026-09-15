@@ -13,7 +13,7 @@ const runtimeSrc = fileURLToPath(new URL('../../packages/runtime/src/index.ts', 
 export default defineConfig({
   resolve: {
     alias: {
-      '@habbo/runtime': runtimeSrc,
+      '@spark/runtime': runtimeSrc,
     },
   },
   build: {

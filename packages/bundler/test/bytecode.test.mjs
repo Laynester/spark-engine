@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildBundle, readSpark } from '../dist/index.js';
 import { unzipSync } from 'fflate';
-import { parseLingo, inferScriptType, encodeScript, decodeScript, BundleLoader, DirectorEngine, LSymbol, LList } from '@habbo/runtime';
+import { parseLingo, inferScriptType, encodeScript, decodeScript, BundleLoader, DirectorEngine, LSymbol, LList } from '@spark/runtime';
 
 function norm(v) {
   if (Array.isArray(v)) return v.map(norm);
@@ -51,7 +51,7 @@ test('every real .ls script round-trips parse -> bytecode -> decode', { skip: ex
 });
 
 test('bundle compiles scripts to bytecode and the runtime can decode them', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'habbo-bc-'));
+  const dir = mkdtempSync(join(tmpdir(), 'spark-bc-'));
   const cast = join(dir, 'hh_bc');
   mkdirSync(cast, { recursive: true });
   const lingo = `-- Cast member: BcTest
@@ -96,7 +96,7 @@ end
 });
 
 test('the engine executes a bytecode-loaded script identically to text', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'habbo-bc-engine-'));
+  const dir = mkdtempSync(join(tmpdir(), 'spark-bc-engine-'));
   const castName = 'hh_bceng';
   const cast = join(dir, castName);
   mkdirSync(cast, { recursive: true });
@@ -136,7 +136,7 @@ end
 });
 
 test('invalid lingo falls back to shipping text (no bytecode flag)', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'habbo-bc-bad-'));
+  const dir = mkdtempSync(join(tmpdir(), 'spark-bc-bad-'));
   const cast = join(dir, 'hh_bad');
   mkdirSync(cast, { recursive: true });
   writeFileSync(join(cast, '0001_script_Broken.ls'), 'on broken me\n  this is not lingo ;;;\nend\n');

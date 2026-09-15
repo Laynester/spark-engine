@@ -49,7 +49,7 @@ manual install always works.
 
 ## Naming
 
-The bundler publishes as `@spark/bundler` (bin: `spark`, with `habbo-bundle`
+The bundler publishes as `@spark/bundler` (bin: `spark`, with `spark-bundle`
 kept as an alias). If that scope/name is taken on npm, rename it in
 `packages/bundler/package.json` (and the `-w @spark/bundler` references in the
 root `package.json` + workflows) before your first publish.

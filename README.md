@@ -9,7 +9,7 @@ This repo also ships the tooling around the runtime:
 
 | Package | What it is |
 |---|---|
-| `packages/runtime` — `@habbo/runtime` | the engine: Lingo interpreter, Director movie player, PixiJS stage, and the `<spark-player>` web component |
+| `packages/runtime` — `@spark/runtime` | the engine: Lingo interpreter, Director movie player, PixiJS stage, and the `<spark-player>` web component |
 | `packages/bundler` — `@spark/bundler` | packs decompiled Director casts into `.spark`/`.zip` bundles the runtime fetches |
 | `packages/lingo-lsp` + `apps/lingo-vscode` | a Lingo language server and VS Code extension for editing decompiled scripts |
 
@@ -40,7 +40,7 @@ files the rest of this pipeline consumes.
 curl -sSL https://raw.githubusercontent.com/Laynester/spark-dumper/main/install.sh | sh
 
 # export a single cast file, or a whole tree (18 threads)
-sparkd habbo.dcr ./exported
+sparkd movie.dcr ./exported
 sparkd ./client_dir ./exported -j 18
 ```
 
@@ -68,8 +68,8 @@ chmod +x bundler.js
 `spark bundle <root> [<outDir>]` bundles every cast under `<root>` into
 `<outDir>` (one archive per cast). Useful flags: `--casts a,b,c` (subset),
 `--ext zip|spark`, `--jobs N` (parallel workers; `1` = sequential),
-`--out <file>` (single combined bundle instead of a directory). The old alias
-`habbo-bundle` still works.
+`--out <file>` (single combined bundle instead of a directory). The alias
+`spark-bundle` still works.
 
 ### 3. Run it — the runtime's `<spark-player>`
 
@@ -81,8 +81,8 @@ un-minified `.js`), drop it on a page next to your bundles, and embed:
 <!doctype html>
 <script src="lingo-runtime.iife.min.js"></script>
 
-<spark-player movie="./habbo.spark"
-  sw1="site.url=http://www.habbo.ch;url.prefix=http://www.habbo.ch"
+<spark-player movie="./movie.spark"
+  sw1="site.url=http://localhost;url.prefix=http://localhost"
   sw2="connection.info.host=localhost;connection.info.port=3000"
   sw4="connection.mus.host=localhost;connection.mus.port=3004"
   sw5="external.variables.txt=/external_vars.txt;external.texts.txt=/external_texts.txt"
@@ -120,7 +120,7 @@ see `apps/demo`.
 ### 4. Edit the scripts — the Lingo LSP
 
 `lingo-vscode.vsix` from the Releases page installs the VS Code extension
-(powered by `@habbo/lingo-lsp`): decompiled `.ls` scripts get syntax
+(powered by `@spark/lingo-lsp`): decompiled `.ls` scripts get syntax
 highlighting, outline, diagnostics, and hover/definition info.
 
 ## Third-party code and licenses

@@ -1,4 +1,4 @@
-// Bundles @habbo/runtime into a single-file browser build people can drop on
+// Bundles @spark/runtime into a single-file browser build people can drop on
 // a site: dist/lingo-runtime.iife.js (+ .min.js). Everything (pixi, fflate,
 // the Lingo engine, the <spark-player> element) is inlined; the custom element
 // registers itself on import, so a site just needs:

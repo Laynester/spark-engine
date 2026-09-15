@@ -23,9 +23,9 @@ import {
 } from 'vscode-languageserver/node.js';
 import type { ReferenceParams } from 'vscode-languageserver-protocol';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { tokenize, LingoSyntaxError, type Token } from '@habbo/runtime/dist/lingo/tokenizer.js';
-import { parseLingo } from '@habbo/runtime/dist/lingo/parser.js';
-import { createBuiltinTable } from '@habbo/runtime/dist/lingo/builtins.js';
+import { tokenize, LingoSyntaxError, type Token } from '@spark/runtime/dist/lingo/tokenizer.js';
+import { parseLingo } from '@spark/runtime/dist/lingo/parser.js';
+import { createBuiltinTable } from '@spark/runtime/dist/lingo/builtins.js';
 import { KEYWORDS, CONSTANTS, THE_PROPS, BUILTIN_DOCS, type DocEntry } from './keywords.js';
 import { semanticTokens, TOKEN_TYPES, typeIndex } from './semantic.js';
 import { WorkspaceIndex, handlerPositions } from './workspace.js';

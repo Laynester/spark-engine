@@ -9330,9 +9330,7 @@ var BINARY_PRECEDENCE = {
 var Parser = class {
   tokens;
   pos = 0;
-  // When set, `the X of Y` chains stop consuming trailing of/in.
   noOf = false;
-  // Paren nesting depth: command-syntax args stop at a comma inside parens.
   parenDepth = 0;
   constructor(tokens) {
     this.tokens = tokens;
@@ -9370,7 +9368,6 @@ var Parser = class {
       throw this.err("expected identifier");
     return t.value;
   }
-  // ---------------------------------------------------------------- script
   parseScript() {
     const handlers = [];
     const props = [];
@@ -9430,7 +9427,6 @@ var Parser = class {
     }
     return { name, params, body };
   }
-  // ---------------------------------------------------------------- blocks
   parseBlock(terminators) {
     const stmts = [];
     for (; ; ) {
@@ -9443,7 +9439,6 @@ var Parser = class {
     }
     return stmts;
   }
-  // ---------------------------------------------------------------- statements
   parseStmt() {
     const t = this.peek();
     if (t.type === "ident") {
@@ -9622,7 +9617,6 @@ var Parser = class {
     }
     return stmts;
   }
-  /** True when the rest of the current line is a case label: `expr :` at depth 0. */
   lineEndsWithLabelColon() {
     const line = this.peek().line;
     let depth = 0;
@@ -9682,7 +9676,6 @@ var Parser = class {
       this.next();
     return { kind: "repeatWith", varName, from, to, down, body };
   }
-  // ---------------------------------------------------------------- expressions
   parseExpr(minPrec = 0) {
     let left = this.parseUnary();
     for (; ; ) {
@@ -9705,7 +9698,6 @@ var Parser = class {
     }
     return left;
   }
-  /** Parse a full expression and require EOF (backs value()). */
   parseTopLevelExpr() {
     const expr = this.parseExpr(0);
     if (this.peek().type !== "eof")
@@ -9731,16 +9723,6 @@ var Parser = class {
     const expr = this.parsePrimary();
     return this.parseChainTail(expr, this.tokens[this.pos - 1].line);
   }
-  /**
-   * Consume `.prop` / `[index]` / `(args)` chain continuations onto an already
-   * parsed primary. Like the binary loop, continuation tokens are only consumed
-   * on the same line — a `(` starting a fresh line after a completed call is a
-   * NEW statement (`cursor(0)` + `(the stage).title = ...`), not more args.
-   * Shared by parseChain and parseThe. When `indexOnly` is set only `[index]`
-   * is consumed: parseThe uses it because `the count of X[i][j]` binds the
-   * index chain to the SUBJECT expression, while a `.method()` after `of`
-   * (`the ancestor of me.construct()`) binds to the `the` RESULT.
-   */
   parseChainTail(expr, startLine, indexOnly = false) {
     for (; ; ) {
       const sameLine = this.peek().line === startLine;
@@ -10102,13 +10084,25 @@ function borderIsTransparent(rgba, width, height, threshold = 0.5) {
   }
   return total > 0 && transparent / total >= threshold;
 }
+function whiteBorderDominates(rgba, width, height) {
+  let opaque = 0;
+  let white = 0;
+  for (const i of edgeIndices(width, height)) {
+    if (!isOpaque(rgba, i))
+      continue;
+    opaque++;
+    if (rgbAt(rgba, i) === 16777215)
+      white++;
+  }
+  return opaque > 0 && white * 4 >= opaque * 3;
+}
 function paletteIndex0Rgb(palette) {
   const p0 = palette && palette.length > 0 ? palette[0] : null;
   if (!p0 || p0.length < 3)
     return null;
   return p0[0] << 16 | p0[1] << 8 | p0[2];
 }
-function matteRegionMask(rgba, imgW, imgH, left, top, w, h, palette, indices) {
+function matteRegionMask(rgba, imgW, imgH, left, top, w, h, palette, indices, matteInk = false) {
   const rl = Math.max(0, left);
   const rt = Math.max(0, top);
   const rw = Math.min(imgW, left + w) - rl;
@@ -10117,7 +10111,10 @@ function matteRegionMask(rgba, imgW, imgH, left, top, w, h, palette, indices) {
     return null;
   const paletteRgb = paletteIndex0Rgb(palette);
   const indexKeyed = !!indices && indices.length >= imgW * imgH;
-  const matte = indexKeyed ? { rgb: 0, tolerance: 0 } : paletteRgb !== null ? { rgb: paletteRgb, tolerance: 0 } : resolveMatteMode(rgba, imgW, imgH);
+  let matte = indexKeyed ? { rgb: 0, tolerance: 0 } : paletteRgb !== null ? { rgb: paletteRgb, tolerance: 0 } : resolveMatteMode(rgba, imgW, imgH);
+  if (matte && matteInk && !indexKeyed && matte.rgb !== 16777215 && whiteBorderDominates(rgba, imgW, imgH)) {
+    matte = { rgb: 16777215, tolerance: 0 };
+  }
   if (!matte)
     return null;
   const full = new Uint8Array(imgW * imgH);
@@ -10205,56 +10202,137 @@ var LList = class {
   }
 };
 var PropPairs = class {
-  // Keyed lookups scan O(n) since a Map can't hold duplicate keys — fine for
-  // small proplists, but the Variable Container's pItemList (200+ entries)
-  // is read on every getVariable(), so keyed reads carry a lazy first-index
-  // cache. Structural edits that shift indices (delete/splice/clear) drop
-  // the cache; in-place replaces and appends keep it valid.
-  pairs = [];
+  ks = [];
+  vs = [];
   index = null;
+  /**
+   * lowercased key -> the first stored key with that fold, plus how many stored
+   * keys share it. This is the O(1) accelerator for [`resolvePropKey`], and every
+   * mutator below keeps it in step, so it can never go stale. Built lazily, so a
+   * small proplist never pays for it.
+   *
+   * Why it matters: without it a case-insensitive proplist WRITE is a linear scan
+   * of the whole key list, and the corpus writes huge proplists — `Resource
+   * Manager Class::preIndexMembers` keys `pAllMemNumList` by every member name in
+   * every castLib (~10k inserts at boot). Measured in isolation: 10k inserts cost
+   * 786ms linear vs 4ms indexed (and 1000 misses on the 10k map 133ms vs 0ms),
+   * which is ~800ms of the client's boot.
+   */
+  lower = null;
+  addLower(key) {
+    if (!this.lower)
+      return;
+    const fold = key.toLowerCase();
+    const entry = this.lower.get(fold);
+    if (entry)
+      entry.n++;
+    else
+      this.lower.set(fold, { key, n: 1 });
+  }
+  /** Called AFTER the key is spliced out, so the successor lookup sees the rest. */
+  removeLower(key) {
+    const lower = this.lower;
+    if (!lower)
+      return;
+    const fold = key.toLowerCase();
+    const entry = lower.get(fold);
+    if (!entry)
+      return;
+    if (--entry.n <= 0) {
+      lower.delete(fold);
+      return;
+    }
+    if (entry.key === key) {
+      const next = this.ks.find((k) => k.toLowerCase() === fold);
+      if (next !== void 0)
+        entry.key = next;
+    }
+  }
+  ensureLower() {
+    if (this.lower)
+      return this.lower;
+    const lower = /* @__PURE__ */ new Map();
+    for (const k of this.ks) {
+      const fold = k.toLowerCase();
+      const entry = lower.get(fold);
+      if (entry)
+        entry.n++;
+      else
+        lower.set(fold, { key: k, n: 1 });
+    }
+    this.lower = lower;
+    return lower;
+  }
+  /**
+   * The first stored key whose lowercase form matches `key` (the caller checks for
+   * an exact match first — see `resolvePropKey`). A miss is authoritative: every
+   * key added through `set`/`append` and removed through `delete`/`deleteAt` is
+   * counted, so no unaccounted key can be holding that fold.
+   */
+  lowerKey(key) {
+    return this.ensureLower().get(key.toLowerCase())?.key;
+  }
   constructor(entries) {
-    if (entries)
-      for (const [k, v] of entries)
-        this.pairs.push([k, v]);
+    if (entries) {
+      for (const [k, v] of entries) {
+        this.ks.push(k);
+        this.vs.push(v);
+      }
+    }
   }
   get size() {
-    return this.pairs.length;
+    return this.ks.length;
   }
   ensureIndex() {
     if (this.index)
       return;
     const idx = /* @__PURE__ */ new Map();
-    for (let i = 0; i < this.pairs.length; i++) {
-      const k = this.pairs[i][0];
+    const ks = this.ks;
+    for (let i = 0; i < ks.length; i++) {
+      const k = ks[i];
       if (!idx.has(k))
         idx.set(k, i);
     }
     this.index = idx;
   }
   firstIndex(key) {
+    const ks = this.ks;
+    const n = ks.length;
+    if (n < 12) {
+      for (let i2 = 0; i2 < n; i2++)
+        if (ks[i2] === key)
+          return i2;
+      return -1;
+    }
     this.ensureIndex();
     const i = this.index.get(key);
     return i === void 0 ? -1 : i;
   }
   clear() {
-    this.pairs = [];
+    this.ks = [];
+    this.vs = [];
     this.index = null;
+    this.lower = null;
   }
   delete(key) {
     const i = this.firstIndex(key);
     if (i < 0)
       return false;
-    this.pairs.splice(i, 1);
+    this.ks.splice(i, 1);
+    this.vs.splice(i, 1);
     this.index = null;
+    this.removeLower(key);
     return true;
   }
   forEach(callbackfn, thisArg) {
-    for (const [k, v] of this.pairs)
-      callbackfn.call(thisArg, v, k, this);
+    const ks = this.ks;
+    const vs = this.vs;
+    for (let i = 0; i < ks.length; i++)
+      callbackfn.call(thisArg, vs[i], ks[i], this);
   }
   get(key) {
     const i = this.firstIndex(key);
-    return i >= 0 ? this.pairs[i][1] : void 0;
+    return i >= 0 ? this.vs[i] : void 0;
   }
   has(key) {
     return this.firstIndex(key) >= 0;
@@ -10262,48 +10340,53 @@ var PropPairs = class {
   set(key, value) {
     const i = this.firstIndex(key);
     if (i >= 0)
-      this.pairs[i] = [key, value];
+      this.vs[i] = value;
     else {
-      this.pairs.push([key, value]);
-      this.index.set(key, this.pairs.length - 1);
+      this.ks.push(key);
+      this.vs.push(value);
+      if (this.index)
+        this.index.set(key, this.vs.length - 1);
+      this.addLower(key);
     }
     return this;
   }
-  // addProp / literal construction: ALWAYS append.
   append(key, value) {
-    this.pairs.push([key, value]);
+    this.ks.push(key);
+    this.vs.push(value);
     if (this.index && !this.index.has(key))
-      this.index.set(key, this.pairs.length - 1);
+      this.index.set(key, this.vs.length - 1);
+    this.addLower(key);
   }
-  // 1-based positional read (getAt(n) → value at position n).
   getAt(n) {
-    return this.pairs[n - 1]?.[1];
+    return this.vs[n - 1];
   }
-  // 1-based positional write — replaces the VALUE, keeps the key.
   setAt(n, value) {
-    const i = n - 1;
-    if (i >= 0 && i < this.pairs.length)
-      this.pairs[i] = [this.pairs[i][0], value];
+    if (n >= 1 && n <= this.vs.length)
+      this.vs[n - 1] = value;
   }
-  // 1-based positional delete.
   deleteAt(n) {
     const i = n - 1;
-    if (i >= 0 && i < this.pairs.length) {
-      this.pairs.splice(i, 1);
+    if (i >= 0 && i < this.vs.length) {
+      const key = this.ks[i];
+      this.ks.splice(i, 1);
+      this.vs.splice(i, 1);
       this.index = null;
+      this.removeLower(key);
     }
   }
   *keys() {
-    for (const [k] of this.pairs)
+    for (const k of this.ks)
       yield k;
   }
   *values() {
-    for (const [, v] of this.pairs)
+    for (const v of this.vs)
       yield v;
   }
   *entries() {
-    for (const p of this.pairs)
-      yield p;
+    const ks = this.ks;
+    const vs = this.vs;
+    for (let i = 0; i < ks.length; i++)
+      yield [ks[i], vs[i]];
   }
   [Symbol.iterator]() {
     return this.entries();
@@ -10313,10 +10396,6 @@ var PropPairs = class {
   }
 };
 var LPropList = class {
-  // The ordered pair backing. Engine code builds proplists with plain Maps;
-  // the constructor converts them to a PropPairs COPY (never mutate the
-  // source Map afterwards). `props` keeps the Map type so engine call sites
-  // compile unchanged.
   props;
   constructor(props = new PropPairs()) {
     if (props instanceof PropPairs)
@@ -10328,15 +10407,12 @@ var LPropList = class {
       this.props = converted;
     }
   }
-  // 1-based positional read (getAt(n)).
   getAt(n) {
     return this.props.getAt(n);
   }
-  // 1-based positional write — replaces the value, keeps the key.
   setAt(n, value) {
     this.props.setAt(n, value);
   }
-  // 1-based positional delete.
   deleteAt(n) {
     this.props.deleteAt(n);
   }
@@ -10346,9 +10422,7 @@ var LObject = class {
   handlers;
   props;
   id;
-  // Script this instance was created from (null for engine-made stubs).
   script;
-  // Stub objects (connections, managers) suppress missing-handler warnings.
   lenient = false;
   constructor(scriptName, script, handlers, props = /* @__PURE__ */ new Map(), id = "") {
     this.scriptName = scriptName;
@@ -10407,34 +10481,17 @@ var LWindowRef = class {
 var LImage = class _LImage {
   width;
   height;
-  // Lazily-allocated RGBA pixel buffer (width*height*4).
   data = null;
-  // Set by every pixel-writing method; the stage re-uploads the surface to
-  // its texture only when dirty.
   dirty = false;
-  // The bitmap's own JASC-PAL palette (index 0 = background, per DirPlayer);
-  // the ink-8 matte keys off it.
   palette;
-  // Bit depth (the depth of image). Window buffers are 8-bit with a palette;
-  // media images and Image Wrapper buffers default to 32.
   depth = 32;
-  // Raw per-pixel palette indices when decoded from an indexed PNG — lets
-  // the flood matte key palette INDEX 0 exactly (other indices whose RGB
-  // matches index 0's are art and must survive). Null for RGBA surfaces.
   indices = null;
-  // Palette member ref behind an 8-bit image (image.paletteRef) — stored so
-  // `the paletteRef of image` reads back correctly; the RGBA pipeline
-  // ignores it.
   paletteRef = VOID;
-  // Director image.useAlpha — whether the alpha channel is honored when the
-  // image is drawn (LibreShockwave's native-alpha flag). setAlpha() and
-  // `image.useAlpha = ...` flip it; `the useAlpha of image` reads it back.
   useAlpha = false;
   constructor(width = 0, height = 0) {
     this.width = width;
     this.height = height;
   }
-  // Ensure the RGBA buffer exists and return it.
   ensure() {
     const w = Math.max(0, Math.round(this.width));
     const h = Math.max(0, Math.round(this.height));
@@ -10443,18 +10500,12 @@ var LImage = class _LImage {
       this.data = new Uint8Array(need);
     return this.data;
   }
-  // Resize the surface IN PLACE (same object identity, buffer reallocated) —
-  // references captured before an image= assignment stay live.
   resize(w, h) {
     this.width = Math.max(0, Math.round(w));
     this.height = Math.max(0, Math.round(h));
     this.data = null;
     this.dirty = true;
   }
-  // Remap pixels through `target` by palette index (image.paletteRef = ...):
-  // each pixel's RGB finds its index in this.palette and takes that index's
-  // color from target. Swaps this.palette so remaps chain. No-op without
-  // palettes or a buffer.
   remapPalette(target) {
     const src = this.palette;
     if (!src || !target || src.length < 2 || target.length < 2)
@@ -10486,9 +10537,6 @@ var LImage = class _LImage {
     this.palette = target;
     this.dirty = true;
   }
-  // Indexed-PNG variant of remapPalette: recolors by TRUE palette index (from
-  // the decoder) — the RGB reverse-lookup is ambiguous when several indices
-  // share a color, so indexed art must remap by index.
   remapPaletteByIndices(indices, target) {
     if (!target || target.length < 2)
       return;
@@ -10512,7 +10560,6 @@ var LImage = class _LImage {
     this.palette = target;
     this.dirty = true;
   }
-  // Clamp a region to image bounds; null when fully outside.
   clamp(l, t, r, b) {
     const w = Math.max(0, Math.round(this.width));
     const h = Math.max(0, Math.round(this.height));
@@ -10524,7 +10571,6 @@ var LImage = class _LImage {
       return null;
     return { x1, y1, x2, y2 };
   }
-  // Director image.fill(region, color) — solid fill.
   fillRect(l, t, r, b, color) {
     const rc = this.clamp(l, t, r, b);
     if (!rc || !color)
@@ -10542,7 +10588,6 @@ var LImage = class _LImage {
       }
     }
   }
-  // Outline rectangle with `lineSize` thickness.
   drawRect(l, t, r, b, color, lineSize = 1) {
     const rc = this.clamp(l, t, r, b);
     if (!rc || !color)
@@ -10553,7 +10598,6 @@ var LImage = class _LImage {
     this.fillRect(rc.x1, rc.y1, Math.min(rc.x2, rc.x1 + ls), rc.y2, color);
     this.fillRect(Math.max(rc.x1, rc.x2 - ls), rc.y1, rc.x2, rc.y2, color);
   }
-  // Outline ellipse (scanline ring).
   drawOval(l, t, r, b, color, lineSize = 1) {
     const rc = this.clamp(l, t, r, b);
     if (!rc || !color)
@@ -10586,7 +10630,6 @@ var LImage = class _LImage {
       }
     }
   }
-  // Bresenham line.
   drawLine(x1, y1, x2, y2, color) {
     if (!color)
       return;
@@ -10624,14 +10667,6 @@ var LImage = class _LImage {
       }
     }
   }
-  // Director image.copyPixels(src, destRect, srcRect, [#ink, #blend,
-  // #bgColor, #maskImage]) — a port of LibreShockwave's opcode: nearest-
-  // neighbor sampling (so stretched 9-slice pieces stay crisp), with MATTE
-  // (8) flood-filling the source's edge-connected background to alpha 0,
-  // BACKGROUND_TRANSPARENT (36) keying bg/white, the ADD/SUBTRACT/LIGHTEST/
-  // DARKEST family compositing per channel, BLEND (32) + #blend alpha,
-  // TRANSPARENT (1) keying exact white, and NOT_* inverting. Unmatched inks
-  // copy RGBA verbatim.
   copyPixels(src, destRect, srcRect, ink = 0, blend = 255, backgroundKeyRgb = 16777215, mask = null, flipH = false, flipV = false, foreColorRgb = 0, fgExplicit = false, bgExplicit = false, orient) {
     const s = src.ensure();
     const d = this.ensure();
@@ -10658,7 +10693,7 @@ var LImage = class _LImage {
     const maskH = mask ? Math.max(0, Math.round(mask.height)) : 0;
     const srcPalette = src.palette;
     const hasPalette = srcPalette && srcPalette.length > 0;
-    const matteMask = ink === 8 || hasPalette && ink !== 36 ? matteRegionMask(s, sw, sh, sx0, sy0, srcW, srcH, srcPalette, src.indices) : null;
+    const matteMask = ink === 8 || ink === 7 ? matteRegionMask(s, sw, sh, sx0, sy0, srcW, srcH, srcPalette, src.indices, ink === 8) : null;
     const srcBgRgb = ink === 36 && hasPalette && (src.depth ?? 32) <= 8 ? srcPalette[0] : null;
     const orientDet = orient ? orient.a * orient.e - orient.b * orient.d : 0;
     const orientInv = orientDet !== 0 ? 1 / orientDet : 0;
@@ -10721,7 +10756,6 @@ var LImage = class _LImage {
       }
     }
   }
-  // Copy a region into a new image (Director image.crop(rect)).
   crop(l, t, r, b) {
     const rc = this.clamp(l, t, r, b);
     if (!rc || !this.data)
@@ -10734,6 +10768,15 @@ var LImage = class _LImage {
       const so = (y * srcW + rc.x1) * 4;
       dst.set(this.data.subarray(so, so + row), (y - rc.y1) * row);
     }
+    out.palette = this.palette;
+    const srcH = Math.max(0, Math.round(this.height));
+    if (this.indices && this.indices.length >= srcW * srcH) {
+      const oi = new Uint8Array(out.width * out.height);
+      for (let y = rc.y1; y < rc.y2; y++) {
+        oi.set(this.indices.subarray(y * srcW + rc.x1, y * srcW + rc.x2), (y - rc.y1) * out.width);
+      }
+      out.indices = oi;
+    }
     return out;
   }
 };
@@ -10741,9 +10784,6 @@ var LColor = class {
   red;
   green;
   blue;
-  // Optional palette index behind this color — getPixel() fills it from the
-  // source image's .pal so color.paletteIndex resolves without a movie-wide
-  // palette lookup.
   paletteIndex;
   constructor(red = 0, green = 0, blue = 0) {
     this.red = red;
@@ -10765,12 +10805,14 @@ function alphaBlendPixel(sr, sg, sb, sa, dr, dg, db, da) {
     return [dr, dg, db, da];
   if (sa >= 255)
     return [sr, sg, sb, 255];
-  const inv = 255 - sa;
-  const r = Math.trunc((sr * sa + dr * inv) / 255);
-  const g = Math.trunc((sg * sa + dg * inv) / 255);
-  const b = Math.trunc((sb * sa + db * inv) / 255);
-  const a = Math.trunc((sa * sa + da * inv) / 255);
-  return [r, g, b, Math.max(a, sa)];
+  const dw = da * (255 - sa) / 255;
+  const a = sa + dw;
+  if (a <= 0)
+    return [dr, dg, db, da];
+  const r = Math.round((sr * sa + dr * dw) / a);
+  const g = Math.round((sg * sa + dg * dw) / a);
+  const b = Math.round((sb * sa + db * dw) / a);
+  return [r, g, b, Math.round(a)];
 }
 function maskAlphaFromPixel(s, si) {
   return s[si + 3];
@@ -10785,7 +10827,7 @@ function applyInkPixel(s, si, d, di, ink, blend, backgroundKeyRgb, foreColorRgb 
   const db = d[di + 2];
   const da = d[di + 3];
   const srcRgb = sr << 16 | sg << 8 | sb;
-  if ((fgExplicit || bgExplicit) && (ink === 0 || ink === 8)) {
+  if (ink === 0 && (fgExplicit || bgExplicit) || ink === 8 && fgExplicit) {
     const maxC = Math.max(sr, sg, sb);
     const minC = Math.min(sr, sg, sb);
     if (maxC - minC <= 16) {
@@ -10950,6 +10992,9 @@ function lingoListCompare(x, y) {
 var INTEGER_KEY_RE = /^\d+$/;
 var IDENT_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 function propKeyToString(k) {
+  const raw = rawKeyOf(k);
+  if (raw !== k)
+    return toLingoString(raw);
   if (INTEGER_KEY_RE.test(k))
     return k;
   if (IDENT_KEY_RE.test(k))
@@ -11010,6 +11055,18 @@ function toLingoString(v) {
     return `stage(${v.width}, ${v.height})`;
   return String(v);
 }
+function resolvePropKey(props, key) {
+  if (props.has(key))
+    return key;
+  if (props.lowerKey)
+    return props.lowerKey(key);
+  const lower = key.toLowerCase();
+  for (const k of props.keys()) {
+    if (k.toLowerCase() === lower)
+      return k;
+  }
+  return void 0;
+}
 function keyOf(v) {
   if (v instanceof LSymbol)
     return v.name;
@@ -11017,7 +11074,25 @@ function keyOf(v) {
     return v;
   if (typeof v === "number")
     return String(v);
+  if (v instanceof LPoint)
+    return `\0point:${v.locH},${v.locV}`;
+  if (v instanceof LRect)
+    return `\0rect:${v.left},${v.top},${v.right},${v.bottom}`;
   return void 0;
+}
+function rawKeyOf(key) {
+  if (key.startsWith("\0point:")) {
+    const parts = key.slice(7).split(",");
+    if (parts.length === 2)
+      return new LPoint(Number(parts[0]), Number(parts[1]));
+  }
+  if (key.startsWith("\0rect:")) {
+    const parts = key.slice(6).split(",");
+    if (parts.length === 4) {
+      return new LRect(Number(parts[0]), Number(parts[1]), Number(parts[2]), Number(parts[3]));
+    }
+  }
+  return key;
 }
 function ilkOf(v) {
   if (v === null)
@@ -11078,6 +11153,8 @@ function duplicateValue(v) {
     d.palette = v.palette;
     d.paletteRef = v.paletteRef;
     d.depth = v.depth;
+    if (v.indices)
+      d.indices = v.indices.slice();
     return d;
   }
   return v;
@@ -11103,6 +11180,110 @@ function numArgs(args, i) {
 }
 function roundHalfAway(x) {
   return x < 0 ? -Math.round(-x) : Math.round(x);
+}
+function stripLingoComments(input) {
+  let out = "";
+  let inString = false;
+  let i = 0;
+  while (i < input.length) {
+    const ch = input[i];
+    if (inString) {
+      out += ch;
+      if (ch === '"')
+        inString = false;
+      i++;
+    } else if (ch === '"') {
+      out += ch;
+      inString = true;
+      i++;
+    } else if (ch === "-" && input[i + 1] === "-") {
+      while (i < input.length && input[i] !== "\n" && input[i] !== "\r")
+        i++;
+    } else {
+      out += ch;
+      i++;
+    }
+  }
+  return out;
+}
+function stripLingoContinuations(input) {
+  let out = "";
+  let inString = false;
+  let i = 0;
+  while (i < input.length) {
+    const ch = input[i];
+    if (ch === '"') {
+      inString = !inString;
+      out += ch;
+      i++;
+    } else if (ch === "\\" && !inString) {
+      if (input[i + 1] === "\r" || input[i + 1] === "\n")
+        i++;
+      i++;
+    } else {
+      out += ch;
+      i++;
+    }
+  }
+  return out;
+}
+function trimUnbalancedBrackets(input) {
+  let depthSquare = 0;
+  let depthParen = 0;
+  let inString = false;
+  let lastBalancedEnd = 0;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (inString) {
+      if (ch === '"')
+        inString = false;
+    } else {
+      switch (ch) {
+        case '"':
+          inString = true;
+          break;
+        case "[":
+          depthSquare++;
+          break;
+        case "]":
+          depthSquare--;
+          break;
+        case "(":
+          depthParen++;
+          break;
+        case ")":
+          depthParen--;
+          break;
+      }
+    }
+    if (depthSquare === 0 && depthParen === 0 && !inString)
+      lastBalancedEnd = i + 1;
+  }
+  if (depthSquare === 0 && depthParen === 0 && !inString)
+    return input;
+  return input.slice(0, lastBalancedEnd);
+}
+function truncateToFirstBalancedList(input) {
+  const trimmed = input.trimStart();
+  if (!trimmed.startsWith("["))
+    return input;
+  let depth = 0;
+  let inString = false;
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+    if (ch === '"') {
+      inString = !inString;
+    } else if (!inString) {
+      if (ch === "[")
+        depth++;
+      else if (ch === "]") {
+        depth--;
+        if (depth === 0)
+          return trimmed.slice(0, i + 1);
+      }
+    }
+  }
+  return input;
 }
 function createBuiltinTable() {
   const t = /* @__PURE__ */ new Map();
@@ -11232,18 +11413,27 @@ function createBuiltinTable() {
       return v.name;
     return toLingoString(v);
   });
+  set(["lower"], (b, a) => toLingoString(a[0]).toLowerCase());
+  set(["upper"], (b, a) => toLingoString(a[0]).toUpperCase());
+  const normalizeValueExpr = (input) => {
+    let s = stripLingoComments(input);
+    s = stripLingoContinuations(s);
+    s = trimUnbalancedBrackets(s.trim());
+    return truncateToFirstBalancedList(s);
+  };
   set(["value"], (b, a, interp) => {
     const v = a[0];
     if (typeof v === "number")
       return v;
     if (typeof v === "string") {
-      const direct = interp.evalExpressionString(v);
-      if (direct === v && v.includes(",")) {
+      const cleaned = normalizeValueExpr(v);
+      const direct = interp.evalExpressionString(cleaned);
+      if (direct === cleaned && v.includes(",")) {
         const wrapped = interp.evalExpressionString("[" + v + "]");
         if (wrapped instanceof LList)
           return wrapped;
       }
-      return direct;
+      return direct === cleaned ? v : direct;
     }
     return v ?? VOID;
   });
@@ -11331,6 +11521,26 @@ function createBuiltinTable() {
     }
     return img;
   });
+  set(["createMask"], (b, a) => {
+    const img = a[0];
+    if (!(img instanceof LImage))
+      return VOID;
+    const w = Math.max(0, Math.round(img.width));
+    const h = Math.max(0, Math.round(img.height));
+    const mask = new LImage(w, h);
+    const m = mask.ensure();
+    const s = img.ensure();
+    for (let i = 0; i < w * h; i++) {
+      const o = i * 4;
+      const luma = (s[o] * 299 + s[o + 1] * 587 + s[o + 2] * 114) / 1e3;
+      m[o] = 255;
+      m[o + 1] = 255;
+      m[o + 2] = 255;
+      m[o + 3] = luma < 128 ? 255 : 0;
+    }
+    mask.dirty = true;
+    return mask;
+  });
   set(["date"], () => (/* @__PURE__ */ new Date()).toLocaleDateString("en-US"));
   set(["time"], () => (/* @__PURE__ */ new Date()).toLocaleTimeString("en-US"));
   set(["chars"], (b, a) => {
@@ -11392,6 +11602,13 @@ function createBuiltinTable() {
     return colorFrom(a[0] ?? VOID) ?? new LColor(0, 0, 0);
   });
   set(["color"], (b, a) => {
+    const space = a[0] instanceof LSymbol ? a[0].name.toLowerCase() : null;
+    if (space === "rgb") {
+      return new LColor(Math.round(numArgs(a, 1)), Math.round(numArgs(a, 2)), Math.round(numArgs(a, 3)));
+    }
+    if (space === "paletteindex") {
+      return b.paletteColor(Math.round(asNum(a[1])));
+    }
     if (a.length >= 3) {
       return new LColor(Math.round(numArgs(a, 0)), Math.round(numArgs(a, 1)), Math.round(numArgs(a, 2)));
     }
@@ -11444,6 +11661,8 @@ function createBuiltinTable() {
     }
     if (v instanceof LMemberRef)
       return v;
+    if (v instanceof LImage)
+      return b.getMemberByImage(v) ?? VOID;
     return VOID;
   });
   set(["createmember"], (b, a) => {
@@ -11662,7 +11881,7 @@ function createBuiltinTable() {
   set(["getUniqueID", "getUniqueId"], (b) => b.getUniqueId());
   set(["executeMessage"], (b, a) => {
     const msg = a[0] instanceof LSymbol ? a[0].name : toLingoString(a[0]);
-    b.dispatchMessage(msg, a[1] ?? VOID);
+    b.dispatchMessage(msg, a.slice(1));
     return VOID;
   });
   set(["createWindow"], (b, a) => b.createWindow(toLingoString(a[0])) ?? VOID);
@@ -11731,8 +11950,10 @@ function createBuiltinTable() {
   set(["getAProp"], (b, a) => {
     const c = a[0];
     const key = keyOf(a[1]);
-    if (c instanceof LPropList && key !== void 0)
-      return c.props.get(key) ?? VOID;
+    if (c instanceof LPropList && key !== void 0) {
+      const stored = resolvePropKey(c.props, key);
+      return (stored === void 0 ? void 0 : c.props.get(stored)) ?? VOID;
+    }
     if (c instanceof LList && typeof a[1] === "number") {
       const i = Math.round(a[1]);
       return i >= 1 && i <= c.items.length ? c.items[i - 1] : VOID;
@@ -11743,7 +11964,7 @@ function createBuiltinTable() {
     const c = a[0];
     const key = keyOf(a[1]);
     if (c instanceof LPropList && key !== void 0)
-      c.props.set(key, a[2] ?? VOID);
+      c.props.set(resolvePropKey(c.props, key) ?? key, a[2] ?? VOID);
     else if (c instanceof LList && typeof a[1] === "number") {
       const i = Math.round(a[1]);
       if (i >= 1) {
@@ -11766,8 +11987,11 @@ function createBuiltinTable() {
   set(["deleteAProp"], (b, a) => {
     const c = a[0];
     const key = keyOf(a[1]);
-    if (c instanceof LPropList && key !== void 0)
-      c.props.delete(key);
+    if (c instanceof LPropList && key !== void 0) {
+      const stored = resolvePropKey(c.props, key);
+      if (stored !== void 0)
+        c.props.delete(stored);
+    }
     return VOID;
   });
   set(["countAProp"], (b, a) => {
@@ -11783,13 +12007,13 @@ function createBuiltinTable() {
     const i = Math.round(asNum(a[1]));
     if (c instanceof LPropList) {
       const keys = [...c.props.keys()];
-      return i >= 1 && i <= keys.length ? keys[i - 1] : VOID;
+      return i >= 1 && i <= keys.length ? rawKeyOf(keys[i - 1]) : VOID;
     }
     if (c instanceof LList)
       return i >= 1 && i <= c.items.length ? c.items[i - 1] : VOID;
     return VOID;
   });
-  set(["duplicate"], (b, a) => a[0] instanceof LList || a[0] instanceof LPropList ? duplicateValue(a[0]) : VOID);
+  set(["duplicate"], (b, a) => duplicateValue(a[0]));
   set(["rollover"], (b, a) => {
     if (a.length === 0)
       return b.rollover();
