@@ -615,7 +615,10 @@ export class PixiStage implements StageAdapter {
         node.hitBufH = h;
         node.baseW = w;
         node.baseH = h;
-        oldTex?.destroy();
+        // Pass true so the BufferImageSource is destroyed along with the
+        // texture — destroy(false) only deregisters the source, it does not
+        // free the GPU upload.
+        oldTex?.destroy(true);
       } else {
         node.imgSource.update();
       }
@@ -783,8 +786,12 @@ export class PixiStage implements StageAdapter {
         format: 'rgba8unorm',
         scaleMode: 'nearest',
       });
+      // Destroy the old texture before replacing it; stageSprite.destroy() with
+      // no options does not free the texture source.
+      const oldStageTex = this.stageTexture;
       this.stageTexture = new Texture({ source });
       if (this.stageSprite) this.stageSprite.destroy();
+      oldStageTex?.destroy(true);
       this.stageSprite = new Sprite(this.stageTexture);
       this.stageSprite.eventMode = 'none';
       this.app.stage.addChildAt(this.stageSprite, 1);
@@ -834,7 +841,9 @@ export class PixiStage implements StageAdapter {
       this.nodes.set(channel, node);
     }
     if (node.visual) {
-      node.visual.destroy();
+      // Destroy the visual and all its children (text groups contain Text +
+      // Graphics objects that would otherwise survive as orphans).
+      node.visual.destroy({ children: true });
       node.visual = null;
     }
     this.releaseBlob(node.blobEntry);
@@ -844,6 +853,10 @@ export class PixiStage implements StageAdapter {
     node.imgBuffer = undefined;
     node.hitBufW = undefined;
     node.hitBufH = undefined;
+    // Destroy the texture explicitly: Sprite.destroy() with no options keeps
+    // the texture alive, so without this every setChannel call leaked one
+    // Texture + BufferImageSource into pixi's managed-texture list.
+    node.imgTexture?.destroy(true);
     node.imgTexture = undefined;
     node.bakeMode = undefined;
     node.bakeBuf = undefined;

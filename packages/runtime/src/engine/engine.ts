@@ -3134,6 +3134,23 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         }
       }
     }
+    // Prune completed entries to keep the map from accumulating large response
+    // bodies (external_texts.txt is 227KB; cast files are larger) indefinitely.
+    // The corpus polls netDone/netTextResult within a handful of frames of
+    // completion, so entries older than ~120 frames are safe to drop.  Keep the
+    // most recent 64 done entries as a safety margin.
+    if (this.net.size > 128) {
+      const toDelete: number[] = [];
+      for (const [id, req] of this.net) {
+        if (req.done) toDelete.push(id);
+        if (this.net.size - toDelete.length <= 64) break;
+      }
+      for (const id of toDelete) {
+        const req = this.net.get(id);
+        if (req) { req.text = ''; req.bytes = undefined; }
+        this.net.delete(id);
+      }
+    }
   }
 
 
