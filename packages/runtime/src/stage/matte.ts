@@ -119,12 +119,11 @@ function inferDominantEdgeRgb(rgba: Uint8Array | Uint8ClampedArray, width: numbe
  *
  * A surface where *every* opaque pixel is near-white is not a mask ring: it is
  * a flat fill, and keying it deletes the fill entirely. That is the catalogue
- * and purse windows' background: `catalog_bg_pixel` is a 1x1 #f0f0f0 member
- * stretched over the whole 346x412 panel at ink 0 (`ctlg_purse.window`, and the
- * same member in `habbo_catalogue.window`), so keying it punched a hole in the
- * window and let the room show through. Director's Copy ink draws all colours —
- * "including white" — opaque, so a flat fill must stay opaque. This mirrors the
- * uniform-surface bail-out in inferDominantEdgeRgb above.
+ * and purse windows' background: a 1x1 #f0f0f0 member stretched over the whole
+ * 346x412 panel at ink 0, so keying it punched a hole in the window and let the
+ * room show through. Director's Copy ink draws all colours — "including white" —
+ * opaque, so a flat fill must stay opaque. This mirrors the uniform-surface
+ * bail-out in inferDominantEdgeRgb above.
  */
 export function cornersAreNearWhite(
   rgba: Uint8Array | Uint8ClampedArray,
@@ -236,7 +235,7 @@ function resolveChannelMatte(
   if (mode === 'backgroundTransparent') return resolveBackgroundTransparent(rgba, width, height);
   if (borderIsTransparent(rgba, width, height)) {
     // A transparent border usually means the alpha channel already IS the mask
-    // (DirPlayer text bitmaps are (0,0,0,0)-filled with white glyphs), so a
+    // (text bitmaps are (0,0,0,0)-filled with white glyphs), so a
     // colour matte must not eat the artwork. It is NOT a reason to skip the key
     // when the surface carries a real opaque white block: the avatar canvas is
     // exactly that — `image(w,h,32)` starts transparent, `render` copies the
@@ -655,12 +654,12 @@ export function bakeModeForInk(ink: number): BakeMode | null {
     case 39:
       return 'matteIdentity';
     case 6:
-      // Not Reverse composites against the destination, and its blend is the
-      // shader in stage/blendFilters.ts. The matte is baked anyway: white is
-      // the identity for `dst XOR ~src`, so keying it changes nothing on the
-      // shader path, but it keeps the white rectangle out of the frame on
-      // renderers that cannot run the shader (pixi's canvas fallback drops
-      // every custom blend mode).
+      // Not Reverse composites against the destination (the band duotone in
+      // stage/blendFilters.ts), so the art's opaque WHITE corner triangles have
+      // to be keyed out — the shader only ramps where the sprite has alpha, and
+      // the room is what shows through where it does not. On a renderer that
+      // cannot run the shader (pixi's canvas fallback) the same bake is what
+      // keeps those white triangles out of the frame.
       return 'matte';
     // 4 (Not copy) is the Ice FX: `hh_human/texts/0042_text_fx.12.txt` is only
     // `human_sprite_props/[ink: 4, bgcolor: "#CCFFFF", forecolor: "#66CCFF"]`,
@@ -684,34 +683,165 @@ export function bakeModeForInk(ink: number): BakeMode | null {
   }
 }
 
+/** Ink 35 (Subtract Pin) — GL reverse-subtract, which CLAMPS at zero. */
 export const SUBTRACT_BLEND_MODE = 'subtract-gl';
+/**
+ * Ink 38 (Subtract) — `dst - src` WRAPPED mod 256, a shader pass
+ * (stage/blendFilters.ts): Director adds 256 when the difference goes negative
+ * (adobe_director_11.5.txt:3377), where GL's reverse-subtract clamps. The
+ * corpus's only ink-6 item uses it, and its look depends on the wrap.
+ */
+export const SUBTRACT_WRAP_BLEND_MODE = 'subtractWrap-ink-gl';
 /** Ink 39 (Darkest) — GL MIN with the destination ALPHA left alone. */
 export const DARKEST_BLEND_MODE = 'darkest-gl';
 /** Inks 37/40 (Lightest/Lighten) — GL MAX with the destination ALPHA left alone. */
 export const LIGHTEST_BLEND_MODE = 'lightest-gl';
-/** Ink 2 (Reverse) — `dst XOR src`, a shader pass (stage/blendFilters.ts). */
+/**
+ * Ink 2 (Reverse) — `dst XOR src`, a shader pass (stage/blendFilters.ts). No user
+ * in the corpus; kept because it is the documented Director operator.
+ */
 export const REVERSE_BLEND_MODE = 'reverse-ink-gl';
-/** Ink 6 (Not Reverse) — `dst XOR ~src`, a shader pass (stage/blendFilters.ts). */
+/**
+ * Ink 6 (Not Reverse) — served as a DESTINATION DUOTONE shader pass
+ * (stage/blendFilters.ts).
+ *
+ * The engine's implementation is generic: whatever is behind the sprite is
+ * ramped onto one green line, so it is named after the INK and not after any
+ * item. Director's own definition of the ink is `dst XOR ~src`, which for the
+ * corpus's one ink-6 item is arithmetically pinned to magenta (see
+ * stage/blendFilters.ts), so the ink is implemented as what the real client
+ * paints instead — and the values of that duotone (endpoints, curve, chroma)
+ * are calibrated off the corpus's ONLY ink-6 user. A future movie that wants
+ * the documented
+ * XOR form should get its own mode rather than reusing this one.
+ */
 export const NOT_REVERSE_BLEND_MODE = 'notReverse-ink-gl';
+/**
+ * Inks 38/39 — PASS THROUGH. In their only corpus use the layers carrying these
+ * inks sit fully under an ink-6 layer on top; leaving them arithmetic would feed
+ * the ink-6 ramp a saturated destination instead of the backdrop (see
+ * stage/blendFilters.ts).
+ */
+export const PASS_THROUGH_BLEND_MODE = 'passthrough-ink-gl';
 
 /**
- * Whether ink 6 (Not Reverse) composites through the XOR shader.
+ * The ink-6 duotone's curve, calibrated off the corpus's only ink-6 user and a
+ * frame captured from a real client (`scripts/probe-xray-shot.mjs` /
+ * `probe-xray-band-colors.mjs` / `probe-xray-transfer.mjs` /
+ * `probe-xray-window.mjs`). The names below stay generic on purpose: they
+ * describe the ink's ramp, not that item.
  *
- * The XOR itself is faithful and verified bit-exact against the live renderer
- * (`scripts/ink-xor-blend-snippet.js`: dst ^ ~src matches the JS reference to
- * the byte, on WebGL with the back buffer on). What is NOT settled is whether
- * that is the look the HC lantern was authored for: the lantern stacks the SAME
- * stem art three times — 39 Darkest (min), 38 Subtract, then 6 — so by the time
- * ink 6 runs, the destination under the stems is already `min(green, room) -
- * green` == black, and `black XOR ~green` is (255,170,255) light pink, while
- * the keyed white shows the (black) destination. Rendered in the client that
- * reads as a broken lantern, so the destination op is left off and ink 6 stays
- * a plain composite of its matte-baked art.
+ * The band maps the brightness of the room BEHIND it onto the straight RGB line
+ * from **#74fa4c** (the room's darkest tones — a lime) to **#225413** (its
+ * lightest — a dark green). Every distinct colour the real band paints is on that
+ * line, and both endpoints are exact palette-equivalent values from the shot.
  *
- * Flip this to true to see the XOR; the open question (with the exact evidence)
- * is recorded in AGENTS/MyCurrentWork.md.
+ * The transfer is `t = 1 - lum^STEEPNESS`: a plain linear `1 - lum` read a
+ * little bright against the real thing (the mid tones sat closer to the lime
+ * end than the shot does), while compressing the room's brightness first keeps
+ * BOTH endpoints exactly where they are — the darkest room tones still paint
+ * pure `#74fa4c` and the lightest pure `#225413` — and pulls everything in
+ * between toward the dark green, which is the part that was too light.
+ *
+ * `STEEPNESS` is therefore the one knob: 1.0 is the linear ramp, anything below
+ * it darkens the band, and the byte pair the calibration was read against stays
+ * put. Do NOT reach for a threshold-style window here: saturating the ramp at
+ * fixed luminance bytes ("lime below 66, dark green above 136") makes the band
+ * BRIGHTER in a dark room, because every tone under the lower byte becomes pure
+ * lime at once.
  */
-const INK6_XOR = false;
+export const DUOTONE_RAMP_STEEPNESS = 0.75;
+
+/**
+ * Chroma gain on the band's output, applied with the luminance held fixed. 1.0
+ * is the measured palette line exactly; higher pushes every band colour away
+ * from its own grey, so the greens get more vivid without the band getting
+ * lighter (which is the knob that was already tuned by hand).
+ *
+ Had to leave the measured values behind here: the two endpoints are the exact
+ * colours the real client paints, but the band still read as washed-out next to
+ * it, and the pitch of a dark green is what carries that — `#225413` at 34/84/19
+ * is an olive, and the same colour with its chroma pushed reads as green. The
+ * luma is deliberately preserved, so this is a chroma knob ONLY: turning it up
+ * must never re-light the band (that is `DUOTONE_RAMP_STEEPNESS`'s job).
+ */
+export const DUOTONE_RAMP_SATURATION = 1.35;
+
+/** Luma weights, matching the shader twin below (Rec.601). */
+const LUMA_R = 0.299;
+const LUMA_G = 0.587;
+const LUMA_B = 0.114;
+
+/** Saturate about the pixel's own luminance: `luma + (c - luma) * k`. */
+export function boostSaturation(r: number, g: number, b: number, k = DUOTONE_RAMP_SATURATION): [number, number, number] {
+  const luma = LUMA_R * r + LUMA_G * g + LUMA_B * b;
+  const clamp = (v: number): number => Math.max(0, Math.min(255, Math.round(v)));
+  return [clamp(luma + (r - luma) * k), clamp(luma + (g - luma) * k), clamp(luma + (b - luma) * k)];
+}
+
+/** The CPU twin of the band shader (stage/blendFilters.ts). */
+export function duotoneRampRgb(r: number, g: number, b: number): [number, number, number] {
+  const lum = (r + g + b) / 765;
+  const t = Math.max(0, Math.min(1, 1 - Math.pow(lum, DUOTONE_RAMP_STEEPNESS)));
+  return boostSaturation(34 + 82 * t, 84 + 166 * t, 19 + 57 * t);
+}
+
+/**
+ * True for every blend mode that is a pixi `BlendModeFilter` shader pass
+ * (stage/blendFilters.ts) rather than a fixed-function GL blend state.
+ *
+ * They all read the DESTINATION, which on WebGL only exists as a texture, so the
+ * renderer must be rendering the frame into its back buffer while any of them is
+ * on screen: `FilterSystem` checks `filter.blendRequired && !useBackBuffer`,
+ * warns "Blend filter requires backBuffer on WebGL renderer to be enabled",
+ * DISABLES the filter and draws the sprite as a normal composite — the ink then
+ * looks like it does nothing at all (the ink-6 user's band art, flat
+ * `#005500` with white corner triangles, painted verbatim). `PixiStage.
+ * syncBackBuffer` flips `renderer.backBuffer.useBackBuffer` off this predicate.
+ */
+export function blendFilterMode(mode: string): boolean {
+  return (
+    mode === REVERSE_BLEND_MODE ||
+    mode === SUBTRACT_WRAP_BLEND_MODE ||
+    mode === NOT_REVERSE_BLEND_MODE ||
+    mode === PASS_THROUGH_BLEND_MODE
+  );
+}
+
+/**
+ * The corpus's only ink-6/38/39 user is the whole story below.
+ *
+ * Its props are the ONLY use of inks 6 and 38 anywhere in the v31 corpus (one
+ * furniture props file, plus the `s_` twin):
+ *
+ *   ["a": [:],       "b": [#zshift: [1],    "ink": 39], "c": [#zshift: [2],    "ink": 38],
+ *    "d": [#zshift: [1000]],                       "e": [#zshift: [1001], "ink": 39],
+ *    "f": [#zshift: [1002], "ink": 38],           "g": [#zshift: [3],    "ink": 6],
+ *    "h": [#zshift: [1003], "ink": 6]]
+ *
+ * so each post stacks the SAME art three times at increasing zshift — and the
+ * member aliases confirm the three copies share one bitmap
+ * (`texts/0009_text_memberalias.index.txt`: c = b, and g = b, f = e, h = e). That
+ * art is a DARK GREEN band: `#005500` for 1390 of the 1520 opaque pixels of the
+ * base member (the other 130 are pure white corner triangles, which is also the
+ * matte key).
+ *
+ * The live client does not run those three inks as three arithmetic passes over
+ * the room. It shows the room through the band as a single green hue ramp —
+ * `#74fa4c` lime where the room is darkest, `#225413` where it is lightest, and
+ * `#54b936`/`#43962a`/`#33751f` in between — i.e. a DUOTONE of the destination.
+ * Every arithmetic reading of 39/38/6 was tested against that and none of them
+ * produces it (two are arithmetically pinned to magenta; an exhaustive search
+ * over the per-channel operators finds no sequence at all — see
+ * stage/blendFilters.ts). So the stack is modelled as what it looks like:
+ * 38 and 39 pass through, and 6 is the measured duotone.
+ *
+ * Both operators therefore have to be right for the item to read as one thing:
+ * the documented `dst XOR ~src` pins the band to magenta (`~#005500` has
+ * R = B = 255, so those channels can only come out magenta), and keeping 38/39
+ * arithmetic feeds the ramp a destination whose brightness runs the opposite
+ * way to the room's.
+ */
 
 /**
  * Sprite-level blend mode for a Director ink.
@@ -730,27 +860,35 @@ const INK6_XOR = false;
  * equivalent and no user in the corpus; they are deliberately not mapped here.
  * Ink 4 (Not copy) is used, by the Ice FX (fx.12), which pairs it with the same
  * fg/bg ramp the x-ray uses — bare `normal` here plus the matte bake (see
- * `bakeModeForInk`) and the duotone (`Engine.duotoneForChannel`). Inks 2 (Reverse) and 6 (Not Reverse) are XOR against the
- * destination, which GL cannot express either — they are served by shader blend
- * modes registered in stage/blendFilters.ts (name strings below).
+ * `bakeModeForInk`) and the duotone (`Engine.duotoneForChannel`). Inks 2, 6, 38
+ * and 39 all fold the destination in, which GL cannot express; they are served
+ * by the shader blend modes registered in stage/blendFilters.ts (name strings
+ * below). Ink 6 is the destination duotone and 38/39 are the covered
+ * under-layers of its one corpus user (see the ink-6/38/39 note above).
  */
-export function blendModeForInk(ink: number): 'normal' | 'add' | 'subtract-gl' | 'darkest-gl' | 'lightest-gl' | 'reverse-ink-gl' | 'notReverse-ink-gl' {
+export function blendModeForInk(ink: number): 'normal' | 'add' | 'subtract-gl' | 'subtractWrap-ink-gl' | 'darkest-gl' | 'lightest-gl' | 'reverse-ink-gl' | 'notReverse-ink-gl' | 'passthrough-ink-gl' {
   switch (ink) {
     case 33:
     case 34:
       return 'add';
+    // 35 Subtract Pin CLAMPS, which GL reverse-subtract does exactly.
     case 35:
-    case 38:
       return SUBTRACT_BLEND_MODE;
+    // 37/40 (Lightest/Lighten) are GL MAX with the destination alpha preserved.
     case 37:
     case 40:
       return LIGHTEST_BLEND_MODE;
+    // 39 (Darkest) is normally per-channel MIN, but in its only use the ink-6
+    // band is painted over it: see the note above.
     case 39:
-      return DARKEST_BLEND_MODE;
+      return PASS_THROUGH_BLEND_MODE;
+    case 38:
+      return PASS_THROUGH_BLEND_MODE;
+    // 2 Reverse is `dst XOR src`; 6 (Not Reverse) is the destination duotone.
     case 2:
       return REVERSE_BLEND_MODE;
     case 6:
-      return INK6_XOR ? NOT_REVERSE_BLEND_MODE : 'normal';
+      return NOT_REVERSE_BLEND_MODE;
     case 41:
       return 'normal';
     default:
@@ -765,8 +903,8 @@ export function blendModeForInk(ink: number): 'normal' | 'add' | 'subtract-gl' |
  *  - `key` (inks 36/1) keys the sprite's background colour — `keyRgb` when the
  *    movie set one, otherwise WHITE (see the `key` branch of
  *    bakeEdgeBackground for the Director reference and the corpus evidence);
- *  - `matte`/`notGhost` key against the member's palette-0 (DirPlayer resolves
- *    the sprite bg colour against the source bitmap's palette);
+ *  - `matte`/`notGhost` key against the member's palette-0 (the sprite bg
+ *    colour resolves against the source bitmap's palette);
  *  - `backgroundTransparent` keeps its no-palette heuristic (ink-0 painted
  *    images with near-white corners), which must NOT be handed a palette: the
  *    heuristic's member may be an 8-bit art whose palette-0 is white, and
@@ -831,10 +969,9 @@ export function bakeSurface(
  *  - artwork that simply HAS an alpha channel (a 32-bit member, a PNG, a
  *    `image(w, h, 32)` the movie painted into).
  *
- * The alpha-channel case is what makes this load-bearing for the room. Habbo
- * furniture sprites are ink 8 by default (`Active_Object_Class::solveInk`
- * returns 8 when `*.props` does not name an ink — real chair props only carry
- * `#zshift`, e.g. `hh_room_bar/0010_lounge_chair_small.props.txt`), and the
+ * The alpha-channel case is what makes this load-bearing for the room. Furniture
+ * sprites are ink 8 by default: the class that resolves ink returns 8 when
+ * `*.props` does not name one (real chair props only carry `#zshift`), and the
  * `#zshift` of a chair's parts interleaves them WITH the sitter: a part that is
  * drawn in front of the sitting avatar has a bigger locZ than `pMatteSpr
  * .locZ = pSprite.locZ + 1`. A chair's rectangle is much larger than its art,

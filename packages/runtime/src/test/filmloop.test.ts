@@ -4,8 +4,8 @@ import { strToU8, zipSync } from 'fflate';
 import { DirectorEngine, type StageAdapter, type ChannelVisual } from '../engine/engine.js';
 import { BundleLoader } from '../bundle/loader.js';
 
-// Regression: room water is a film loop. The original Shockwave client built
-// the "waterloop" member natively at room load; the bundler now emits it as a
+// Regression: room water is a film loop. The original client built the
+// "waterloop" member natively at room load; the bundler now emits it as a
 // real `filmloop` cast member (kind filmloop + `frames` member numbers) from
 // the room data. The engine must resolve the frames, render the CURRENT frame
 // through the ordinary bitmap path (live-copied raw/palette/regpoint), and
@@ -118,10 +118,9 @@ test('film loop member type reports #filmloop', async () => {
 // Sprite-composed film loops (SCVW mini-score): each frame draws its cast
 // members at mini-stage positions with per-tile ink. The engine must compose
 // the frame (matte-baked, scaled, blitted) into a loop-sized RGBA image and
-// swap it each tick. Regression: hh_room_gold's waterloop — 8 matte tiles of
-// gold_water2a..l scrolling across the pool. DirPlayer renders the SCVW
-// composition; the old engine showed a single stretched strip (black or white
-// lines).
+// swap it each tick. Regression: a pool's waterloop — 8 matte tiles scrolling
+// across the pool. The reference renderer composes the SCVW; the old engine
+// showed a single stretched strip (black or white lines).
 // ---------------------------------------------------------------------------
 
 /** Minimal stored-block RGBA PNG (same builder as engine.test.ts). */
@@ -297,10 +296,10 @@ test('sprite-composed film loops: matte tiles composed into a loop-sized frame, 
   // maxX 30, maxY 6 → 25×4.
   assert.equal(loop.filmW, 25, 'loop canvas width is the placement bounding box');
   assert.equal(loop.filmH, 4, 'loop canvas height is the placement bounding box');
-  // Film loops use center registration (DirPlayer get_concrete_sprite_rect:
-  // reg = display size / 2) — the composed image's center sits on the sprite
-  // loc, not its top-left. Regression: hh_room_gold's water rendered shifted
-  // right/down because the composed channel anchored at regX=regY=0.
+  // Film loops use center registration (reg = display size / 2) — the composed
+  // image's center sits on the sprite loc, not its top-left. Regression: a
+  // pool's water rendered shifted right/down because the composed channel
+  // anchored at regX=regY=0.
   assert.equal(loop.regX, 12, 'composed loop centers on the canvas width');
   assert.equal(loop.regY, 2, 'composed loop centers on the canvas height');
   assert.ok(loop.filmImage, 'frame 0 composed at load');
@@ -337,7 +336,7 @@ test('full-content loops render tiles at NATURAL bitmap size (not the sprite dis
   // The sprite record's display size (5×2) differs from the member bitmap
   // (10×4), but the authored loop rect equals the natural bounding box — the
   // waterloop shape: the score's 250×12 display size is ignored in favor of
-  // the 250×22 members. DirPlayer prefer_bitmap_dims.
+  // the 250×22 members. The reference renderer prefers bitmap dims.
   const loader = new BundleLoader();
   const members = [
     { number: 7, kind: 'bitmap' as const, name: 'gold_water2a', file: 'hh_room_gold/0007_bitmap_gold_water2a.png' },

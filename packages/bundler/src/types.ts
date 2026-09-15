@@ -22,7 +22,7 @@ export interface MemberEntry {
   regY?: number;
   /** Path of the bitmap's own .pal companion (JASC-PAL), if the export shipped
    *  one next to the PNG. The runtime parses it for palette-index matte/key
-   *  background removal (DirPlayer get_bg_color_ref = palette index 0). */
+   *  background removal (the background colour reference is palette index 0). */
   palRel?: string;
   /** True for small text payloads that we can cache inline. */
   inlineText?: string;
@@ -40,8 +40,8 @@ export interface MemberEntry {
   sprites?: FilmLoopSprite[][];
   /** Film-loop members: the authored loop rect (the CASt initialRect) — the
    *  mini-stage viewport the loop composes into. The runtime renders tiles at
-   *  natural bitmap size when this matches the sprites' natural bounding box
-   *  (DirPlayer prefer_bitmap_dims), else at the sprite display size. */
+   *  natural bitmap size when this matches the sprites' natural bounding box,
+   *  else at the sprite display size. */
   loopX?: number;
   loopY?: number;
   loopW?: number;
@@ -88,7 +88,7 @@ export interface MovieConfig {
   backgroundColor: number;
   /** Palette-encoded stage color. */
   stageColor: number;
-  /** Resolved RGB of the stage — what Shockwave actually renders (e.g. black). */
+  /** Resolved RGB of the stage — what a client actually renders (e.g. black). */
   stageColorRgb?: number;
   tempo: number;
   minMember: number;
@@ -123,7 +123,7 @@ export interface CastManifest {
   fontFiles: string[];
   /** Linked external casts from linked_casts.txt (Director cast links). */
   linkedCasts: LinkedCast[];
-  /** Original cast file name, e.g. "fuse_client.cst" or "habbo.dir". */
+  /** Original cast file name, e.g. "fuse_client.cst" or "movie.dir". */
   fileName?: string;
   /** Parsed movie.txt — stage/size/tempo (present on the movie's own cast). */
   movie?: MovieConfig;

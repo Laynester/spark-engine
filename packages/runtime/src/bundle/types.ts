@@ -33,8 +33,8 @@ export interface MemberEntry {
   sprites?: FilmLoopSprite[][];
   /** Film-loop members: the authored loop rect (the CASt initialRect) — the
    *  mini-stage viewport the loop composes into. The runtime renders tiles at
-   *  natural bitmap size when this matches the sprites' natural bounding box
-   *  (DirPlayer prefer_bitmap_dims), else at the sprite display size. */
+   *  natural bitmap size when this matches the sprites' natural bounding box,
+   *  else at the sprite display size. */
   loopX?: number;
   loopY?: number;
   loopW?: number;

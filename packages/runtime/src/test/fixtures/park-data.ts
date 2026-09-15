@@ -1,4 +1,4 @@
-// Shared fixture: the exact park_a ACTIVE_OBJECTS payload Havana sends
+// Shared fixture: the exact park_a ACTIVE_OBJECTS wire payload
 // (subj=32 content, after the 2-byte subject header and before the chr(1)
 // terminator) plus the exported v31 Lingo that parses it. Used by both the
 // tree-walker test (park-vl64) and the VM equivalence test (vm.test.ts).

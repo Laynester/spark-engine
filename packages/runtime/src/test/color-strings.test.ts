@@ -41,13 +41,13 @@ test('rgb()/color() read a colour string from its leading hex digits', () => {
 /**
  * The stickie note window's paper colour.
  *
- * Havana/R39's `IDATA` composer writes the post-it as
+ * The `IDATA` wire composer writes the post-it as
  *   `response.writeString(id); response.write(colour, ' '); response.writeString(text);`
  * so the client's second field is `"FFFF33 hello world"` — the colour, a space,
- * then the note text. `Room Handler Class::handle_idata` takes
- * `tdata.line[1].item[1]` and `PostIt Manager Class::setItemData` feeds that
- * straight into `rgb(ttype)`; with a strict six-character parse every note that
- * had text painted black (an empty note is the colour alone, so it looked fine).
+ * then the note text. The corpus's Room Handler / PostIt Manager classes feed
+ * `tdata.line[1].item[1]` straight into `rgb(ttype)`; with a strict
+ * six-character parse every note that had text painted black (an empty note is
+ * the colour alone, so it looked fine).
  */
 test('corpus post-it parse: rgb(ttype) keeps the colour when the data carries text', () => {
   const e = new DirectorEngine();

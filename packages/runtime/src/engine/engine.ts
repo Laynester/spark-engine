@@ -246,10 +246,9 @@ function musPad(bytes: Uint8Array): Uint8Array {
 
 /**
  * A MUS value as {type tag, body}. The tag is written ONCE by the enclosing
- * frame or container — Havana's decoder reads the tag and then the body
- * (MusNetworkDecoder: `setContentType(body.readShort())` then, for a PropList,
- * `MusUtil.readPropList(body)` = count + [Symbol tag + key + value tag +
- * value]). Emitting the tag a second time inside the body shifted every
+ * frame or container — the receiving decoder reads the tag and then the body
+ * (for a PropList: count + [symbol tag + key + value tag + value]). Emitting
+ * the tag a second time inside the body shifted every
  * following field by two bytes, which is what made the photo upload die in the
  * server with `readEvenPaddedString` reading a bogus 131072-byte string.
  *
@@ -3104,8 +3103,8 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
           const plan = planFilmLoopComposition(resolved, authored);
           if (plan) {
             this.filmPlans.set(loop, plan);
-            // Film loops always use center registration (DirPlayer
-            // get_concrete_sprite_rect: reg = display size / 2) — the composed
+            // Film loops always use center registration (reg = display size /
+            // 2) — the composed
             // image's center sits on the sprite's loc, not its top-left.
             loop.regX = Math.floor(plan.width / 2);
             loop.regY = Math.floor(plan.height / 2);
@@ -3961,8 +3960,8 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         // `rgbaFromIndices` had nothing to look the raster up in and fell back
         // to `grey = index` — the identity ramp. That is the opposite of
         // `#grayscale`, whose index 0 is WHITE (the hh_photo `.pal` sidecars
-        // 0x0012/0x0020 all start `255 255 255 ... 0 0 0`, and LibreShockwave's
-        // Palette::grayscalePalette is `255 - index`), so every photo previewed
+        // 0x0012/0x0020 all start `255 255 255 ... 0 0 0`, i.e. the table is
+        // `255 - index`), so every photo previewed
         // as a negative while the palette attached next to it said otherwise.
         // The stage bakes from `image.data` (bakeSurface -> img.ensure()), so
         // the RGBA and the table have to be built through the SAME ramp.
@@ -4253,7 +4252,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       case 'backcolor': {
         // A JS number is a Director palette index (0-255): stored unresolved
         // and resolved against the sprite member's own bitmap palette at tint
-        // time (DirPlayer sprite.rs/bitmap.rs parity). rgb()/strings tint
+        // time. rgb()/strings tint
         // directly, as before.
         const raw = Math.round(asNum(value));
         if (typeof value === 'number' && raw >= 0 && raw <= 255) {
@@ -4342,8 +4341,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   }
 
   /**
-   * Resolve a channel's bg tint for the render path. DirPlayer parity
-   * (bitmap.rs resolve_color_ref via src.palette_ref): an indexed backColor
+   * Resolve a channel's bg tint for the render path: an indexed backColor
    * resolves against the sprite member's OWN bitmap palette; white (or no
    * palette) means no filtering.
    */
@@ -4392,12 +4390,11 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
    *
    * Both users of this are authoured as "remap every pixel through a
    * foreground→background ramp" (`mix(src, fg, bg)` per channel, black→fg and
-   * white→bg — the same maths `tintSpriteDarken` runs, and the same direction
-   * LibreShockwave's indexed matte remap uses):
+   * white→bg — the same maths `tintSpriteDarken` runs):
    *
-   *  - ink 41 (Darken) with `sprite.color` (foreColor) and backColor. Director
-   *    and both reference players use the Director defaults fg=black/bg=white,
-   *    which are the identity. The respect flash sets ONLY `sprite.color`
+   *  - ink 41 (Darken) with `sprite.color` (foreColor) and backColor. The
+   *    Director defaults are fg=black/bg=white, which are the identity. The
+   *    respect flash sets ONLY `sprite.color`
    *    (`tsprite.color = color(#rgb, 247,204,59)`) and leaves backColor at
    *    `paletteIndex(0)` (white), so gating this on a non-white backColor
    *    suppressed the whole flash. A set fg therefore has to run the duotone
@@ -4541,8 +4538,8 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         wordWrap: asNum(m.wordWrap ?? 0) === 1,
         // boxType present (any value incl. #limit/#fixed/#adjust) = a FIXED
         // box: live text must clip at the rect like the rasterizer does
-        // (autoSize is boxType-unset only). DirPlayer cuts #limit fields
-        // (chat input, tooltips) off at the box edge.
+        // (autoSize is boxType-unset only). #limit fields (chat input,
+        // tooltips) are cut off at the box edge.
         clipToBox: !!m.textProps?.has('boxtype'),
         width: r ? Math.max(1, Math.round(r.width)) : undefined,
         height: r ? Math.max(1, Math.round(r.height)) : undefined,

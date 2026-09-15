@@ -1,5 +1,5 @@
 import type { Handler, Script } from './ast.js';
-import { matteRegionMask } from '../stage/matte.js';
+import { matteRegionMask, duotoneRampRgb } from '../stage/matte.js';
 
 export type LVal =
   | number
@@ -691,9 +691,9 @@ function alphaBlendPixel(sr: number, sg: number, sb: number, sa: number, dr: num
   // (`(sa * sa + da * inv) / 255`) and clamped with max(., sa), which silently
   // DROPPED the destination alpha on every blended draw: an ink-36 element at
   // blend 50 over a solid panel left the panel at alpha 191, so the room showed
-  // through it. That is the catalogue purse/credits row (`habbo_catalogue.window`
-  // blends 20/30) and the kiosk roommatic input veils (`whitepixel`, blends 70
-  // and 20); measuring the element buffers showed exactly the broken outputs,
+  // through it. That is the catalogue purse/credits row (blends 20/30) and the
+  // kiosk roommatic input veils (`whitepixel`, blends 70 and 20); measuring the
+  // element buffers showed exactly the broken outputs,
   // alpha 201/214 where a 21%-transparent hole sat over the panel.
   //
   // The destination weight also has to carry da, not 255, or the colour is
@@ -777,7 +777,15 @@ function applyInkPixel(
     return srcRgb === 0 ? [dr, dg, db, da] : [255 - sr, 255 - sg, 255 - sb, 255];
   }
   if (ink === 6) {
-    return [dr ^ (255 - sr), dg ^ (255 - sg), db ^ (255 - sb), 255];
+    // Not Reverse is NOT a bitwise op here: the corpus's only ink-6 item has a
+    // band art whose R and B are 0, and the
+    // documented `dst ^ ~src` pins that band to magenta in every room while the
+    // live client paints the DESTINATION's brightness as a green duotone. Full
+    // derivation + the screenshot calibration in stage/blendFilters.ts and
+    // stage/matte.ts (`duotoneRampRgb` is the shared CPU/GPU twin).
+    if (sa === 0) return [dr, dg, db, da];
+    const [xr, xg, xb] = duotoneRampRgb(dr, dg, db);
+    return sa === 255 ? [xr, xg, xb, 255] : alphaBlendPixel(xr, xg, xb, sa, dr, dg, db, da);
   }
   if (ink === 7) {
     return [
@@ -823,6 +831,10 @@ function applyInkPixel(
     return [Math.max(sr, dr), Math.max(sg, dg), Math.max(sb, db), 255];
   }
   if (ink === 38) {
+    // Subtract WRAPS: "If the color value of the new color is less than 0,
+    // Director adds 256" (adobe_director_11.5.txt:3377). The raw difference is
+    // returned here and masked on store into the byte buffer; ink 35 above is
+    // the clamping Subtract Pin.
     return [dr - sr, dg - sg, db - sb, 255];
   }
   if (ink === 39) {
@@ -873,8 +885,8 @@ export function hexColor(s: string): LColor | null {
   // follows them, so `rgb("FFFF33 Hello")` is the same yellow as `rgb("FFFF33")`.
   // The corpus depends on that: the stickie note window takes its paper colour
   // from `rgb(ttype)` where `ttype` is the first word of the item-data string the
-  // server sends (Havana/R39 `IDATA` writes the colour, a SPACE, then the note
-  // text into one field). A strict six-character test made every note with text
+  // server sends (its item-data field carries the colour, a SPACE, then the note
+  // text in one string). A strict six-character test made every note with text
   // black while an empty one (colour alone) rendered fine.
   const leading = /^[0-9a-fA-F]{6}/.exec(h);
   if (leading) return intColor(parseInt(leading[0], 16));

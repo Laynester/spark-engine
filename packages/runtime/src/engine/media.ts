@@ -3,11 +3,10 @@
  * puts in a propList (`[#image: tmember.media, ...]`), ships over MUS
  * (`sendBinary`), and the server stores verbatim in `items_photos.photo_data`.
  *
- * THE FORMAT IS DIRECTOR'S, NOT OURS. A real Shockwave client sends the member's
- * own media, so anything else is unreadable by a real client and a real photo is
- * unreadable by us. Decoded from the one real row in the emulator's own database
- * (`items_photos.photo_id=31`, written by a real client — 3273 bytes for the
- * 161x117 camera frame):
+ * THE FORMAT IS DIRECTOR'S, NOT OURS. A real client sends the member's own
+ * media, so anything else is unreadable by a real client and a real photo is
+ * unreadable by us. Decoded from the one real row in the server's database
+ * (written by a real client — 3273 bytes for the 161x117 camera frame):
  *
  *   offset  size  contents
  *   0x00    60    member header — magic `60 74 67 75`, and the raster geometry:

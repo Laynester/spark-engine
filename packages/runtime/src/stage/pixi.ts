@@ -8,7 +8,7 @@ import { alignmentName, type ChannelVisual, type DirectorEngine, type StageAdapt
 import type { Channel } from '../engine/sprites.js';
 import { LImage, LList, LObject, LPoint, LPropList, LSpriteRef, LSymbol } from '../lingo/values.js';
 import type { ShapeDef } from '../engine/members.js';
-import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, bakeSurface, blendModeForInk, cornersAreNearWhite, spritePixelHitTest, setMatteIdentityFill, tintSpriteBackground, tintSpriteDarken, DARKEST_BLEND_MODE, LIGHTEST_BLEND_MODE, NOT_REVERSE_BLEND_MODE, REVERSE_BLEND_MODE, SUBTRACT_BLEND_MODE, type BakeMode } from './matte.js';
+import { applyMaskAlpha, bakeEdgeBackground, bakeModeForInk, bakeSurface, blendFilterMode, blendModeForInk, cornersAreNearWhite, spritePixelHitTest, setMatteIdentityFill, tintSpriteBackground, tintSpriteDarken, DARKEST_BLEND_MODE, LIGHTEST_BLEND_MODE, REVERSE_BLEND_MODE, SUBTRACT_BLEND_MODE, SUBTRACT_WRAP_BLEND_MODE, type BakeMode } from './matte.js';
 import { caretBlinkOn, caretBox, caretX } from './caret.js';
 import { textMemberLineMetrics } from './text.js';
 import { registerInkBlendFilters } from './blendFilters.js';
@@ -306,8 +306,10 @@ export class PixiStage implements StageAdapter {
   private stageTexture: Texture | null = null;
   private frameAcc = 0;
   private lastFrameT = 0;
-  /** Channels whose visual currently uses a blend-filter mode (REVERSE/NOT_REVERSE).
-   *  Maintained by `refreshChannel`/`setChannel`; `syncBackBuffer` just checks this. */
+  /** Channels whose visual currently uses a blend-FILTER mode (any mode
+   *  `blendFilterMode` knows: XOR (ink 2) / wrap subtract (38) / the Not Reverse
+   *  duotone (6) / pass through (38, 39)). Maintained by
+   *  `refreshChannel`/`setChannel`; `syncBackBuffer` just checks this. */
   private _blendFilterChannels = new Set<number>();
   /** Unbinds the pointer events wired in `init()` (see `bindPointerEvents`). */
   private pointerCleanup: (() => void) | null = null;
@@ -384,7 +386,8 @@ export class PixiStage implements StageAdapter {
 
   /**
    * Enable the renderer's back buffer while — and only while — a sprite uses an
-   * ink whose blend mode is a pixi blend FILTER (inks 2/6, stage/blendFilters.ts).
+   * ink whose blend mode is a pixi blend FILTER (2/6 XOR and 38 wrap subtract,
+   * stage/blendFilters.ts).
    *
    * A blend filter samples the destination, which WebGL can only do from a
    * texture, so pixi renders the frame into an offscreen texture and blits it
@@ -1327,10 +1330,9 @@ export class PixiStage implements StageAdapter {
     if (!node.visual) return;
     node.visual.visible = ch.visible === 1;
     node.visual.alpha = Math.max(0, Math.min(1, ch.blend / 100));
-    node.visual.blendMode = blendModeForInk(ch.ink) as unknown as (typeof node.visual)['blendMode'];
-    const needsFilter =
-      blendModeForInk(ch.ink) === REVERSE_BLEND_MODE || blendModeForInk(ch.ink) === NOT_REVERSE_BLEND_MODE;
-    if (needsFilter) this._blendFilterChannels.add(channel); else this._blendFilterChannels.delete(channel);
+    const mode = blendModeForInk(ch.ink);
+    node.visual.blendMode = mode as unknown as (typeof node.visual)['blendMode'];
+    if (blendFilterMode(mode)) this._blendFilterChannels.add(channel); else this._blendFilterChannels.delete(channel);
     node.container.zIndex = ch.locZ;
     if (node.shape && node.visual instanceof Graphics) {
       node.visual.clear();

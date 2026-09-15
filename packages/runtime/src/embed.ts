@@ -62,7 +62,7 @@ export class SparkElement extends SparkBase {
   private async init(): Promise<void> {
     const movie = this.getAttribute('movie');
     if (!movie) {
-      this.showError('missing "movie" attribute — e.g. <spark movie="./habbo.spark">');
+      this.showError('missing "movie" attribute — e.g. <spark movie="./movie.spark">');
       return;
     }
     // Decide the dev panel here rather than after the boot, so the counters are
@@ -202,7 +202,7 @@ export class SparkElement extends SparkBase {
    * milestones and the browser's own long-task entries (what a "rooms hang for a second now" report looks like from inside
    * the page).
    *
-   * Opt-in only, and enabled from three places so it works on a real hotel page
+   * Opt-in only, and enabled from three places so it works on a real host page
    * without editing it: `?dev=1` (or `?dev`) in the URL, a `dev` attribute on
    * `<spark-player>`, or `window.__sparkDev.show()` from the console. F9 toggles.
    * The perf counters it reads are behind `enablePerf()` so an ordinary boot

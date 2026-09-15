@@ -1,11 +1,11 @@
 /**
  * Legacy-page global reclaim.
  *
- * `<spark-player>` is meant to be dropped into hotel pages, and those pages
- * routinely still ship a 2008-era script bundle: Habbo's own
- * `web-gallery/static/js/visual.js` is Prototype 1.6.0.2 plus the old page
- * chrome (HabboView / Rounder / Ajax). Prototype predates ES5 and extends the
- * shared realm destructively, which breaks PixiJS before the movie can boot:
+ * `<spark-player>` is meant to be dropped into third-party pages, and those
+ * pages routinely still ship a 2008-era script bundle: a legacy `visual.js` that
+ * is Prototype 1.6.0.2 plus the old page chrome (a view helper / rounder / ajax
+ * layer). Prototype predates ES5 and extends the shared realm destructively,
+ * which breaks PixiJS before the movie can boot:
  *
  *   - it REPLACES native Array.prototype.reduce/map/filter/some/every/find/
  *     entries and Array.from with its own versions. Pixi builds its uniform-type
@@ -28,8 +28,8 @@
  *     node (the native one is a no-op). Pixi calls element.remove() during
  *     postrender, so that threw once per frame.
  *
- * None of that is fixable from inside Pixi, and requiring every hotel to patch
- * their page is not an option, so the runtime repairs the realm itself: see
+ * None of that is fixable from inside Pixi, and requiring every host page to be
+ * patched is not an option, so the runtime repairs the realm itself: see
  * reclaimLegacyGlobals(), called from the module graph before pixi.js is
  * evaluated (index.ts / stage/pixi.ts import order) and again at element boot.
  *
