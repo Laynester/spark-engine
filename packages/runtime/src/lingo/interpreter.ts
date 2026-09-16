@@ -1500,21 +1500,17 @@ export class Interpreter {
         return this.propGet(pl, key, sym) ?? VOID;
       case 'getpropat': {
         const i = Math.round(asNum(args[0]));
-        const keys = [...pl.props.keys()];
-        return i >= 1 && i <= keys.length ? rawKeyOf(keys[i - 1]) : VOID;
+        const k = pl.props.keyAt(i);
+        return k !== undefined ? rawKeyOf(k) : VOID;
       }
       case 'deleteprop':
         if (key !== undefined) this.propDelete(pl, key, sym);
         return VOID;
       case 'getat': {
-        const i = Math.round(asNum(args[0]));
-        const values = [...pl.props.values()];
-        return values[i - 1] ?? VOID;
+        return pl.props.getAt(Math.round(asNum(args[0]))) ?? VOID;
       }
-      case 'getlast': {
-        const values = [...pl.props.values()];
-        return values.length > 0 ? values[values.length - 1] : VOID;
-      }
+      case 'getlast':
+        return pl.props.lastValue() ?? VOID;
       case 'setat': {
         const i = Math.round(asNum(args[0]));
         if (i >= 1 && i <= pl.props.size) pl.setAt(i, args[1] ?? VOID);
@@ -1536,20 +1532,22 @@ export class Interpreter {
         return 0;
       }
       case 'getpos': {
-        const values = [...pl.props.values()];
         const target = args[0] ?? VOID;
-        for (let i = 0; i < values.length; i++) {
-          if (lingoEquals(values[i], target)) return i + 1;
+        let i = 0;
+        for (const v of pl.props.values()) {
+          i++;
+          if (lingoEquals(v, target)) return i;
         }
         return 0;
       }
       case 'findpos': {
         const k = keyOf(args[0]);
-        const keys = [...pl.props.keys()];
         const stored = k === undefined ? undefined : resolvePropKey(pl.props, k, args[0] instanceof LSymbol);
-        for (let i = 0; i < keys.length; i++) {
-          if (stored !== undefined && keys[i] === stored) return i + 1;
-          if (lingoEquals(keys[i], args[0] ?? VOID)) return i + 1;
+        let i = 0;
+        for (const storedKey of pl.props.keys()) {
+          i++;
+          if (stored !== undefined && storedKey === stored) return i;
+          if (lingoEquals(storedKey, args[0] ?? VOID)) return i;
         }
         return VOID;
       }

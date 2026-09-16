@@ -203,6 +203,14 @@ export class PropPairs implements Map<string, LVal> {
     return this.vs[n - 1];
   }
 
+  keyAt(n: number): string | undefined {
+    return this.ks[n - 1];
+  }
+
+  lastValue(): LVal | undefined {
+    return this.vs.length > 0 ? this.vs[this.vs.length - 1] : undefined;
+  }
+
   setAt(n: number, value: LVal): void {
     if (n >= 1 && n <= this.vs.length) this.vs[n - 1] = value;
   }

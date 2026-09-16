@@ -3479,6 +3479,28 @@ test('proplist getOne returns the key (raw) and 0 when missing; findPos returns 
   assert.equal(e.interp.callHandler(script, run, [], null, new Set()), 'b/3/0/1');
 });
 
+test('proplist positional reads: getAt/getLast/getPos on a large list (no whole-list copies)', () => {
+  const e = new DirectorEngine();
+  e.addScriptMember(
+    'Pos',
+    'movie',
+    [
+      'on run',
+      '  t = [:]',
+      '  repeat with i = 1 to 500',
+      '    t.addProp(#k & i, i * 2)',
+      '  end repeat',
+      '  t.deleteAt(250)',
+      '  return t.getAt(249) & "/" & t.getAt(250) & "/" & t.getLast() & "/" & t.getPos(998) & "/" & t.getPropAt(1)',
+      'end',
+    ].join('\n'),
+  );
+  const script = e.resolveScript('Pos')!;
+  const run = script.handlers.find((h) => h.name.toLowerCase() === 'run')!;
+  const out = e.interp.callHandler(script, run, [], null, new Set());
+  assert.equal(out, '498/502/1000/498/k1');
+});
+
 test('proplist getPos matches the VALUE 1-based and getPropAt returns the key (String Services convertSpecialChars reverse)', () => {
   // FUSE String Services 0036: pConvList maps chars -> replacements; the
   // reverse direction does `tPos = pConvList.getPos(tChar); ...

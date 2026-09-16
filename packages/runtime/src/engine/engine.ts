@@ -2614,14 +2614,6 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   setThe(head: string, chain: TheSegment[], value: LVal): void {
     void chain;
     const h = head.toLowerCase();
-    const cacheableKeys = new Set([
-      'frame', 'frametempo', 'stage', 'stageleft', 'stageright', 'stagetop', 'stagebottom',
-      'tracescript', 'tracelogfile', 'title', 'runmode', 'platform', 'exitlock', 'debugplaybackenabled',
-      'itemdelimiter', 'moviepath', 'lastchannel', 'alerthook', 'clickon', 'doubleclick',
-      'mousedown', 'mouseup', 'mouseh', 'mousev', 'keyboardfocussprite', 'key', 'keypressed',
-      'keycode', 'keydown', 'keyup', 'lastkey', 'floatprecision', 'maxinteger', 'shiftdown',
-      'optiondown', 'commanddown', 'controldown', 'colordepth', 'castlibs', 'members',
-    ]);
     switch (h) {
       case 'frame':
         this.frame = Math.round(asNum(value));
