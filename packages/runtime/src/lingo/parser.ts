@@ -9,6 +9,9 @@ const COMMAND_FUNCS = new Set([
   'field', 'member', 'sprite', 'castlib', 'window', 'go', 'call', 'new', 'symbol', 'value',
   'string', 'integer', 'float', 'abs', 'sqrt', 'length', 'random', 'min', 'max', 'list', 'point', 'rect',
   'getnettext', 'preloadnetthing', 'netdone', 'neterror', 'nettextresult', 'netabort', 'getmemnum',
+  // Director's external links, command form: `gotoNetPage "URL", "_new"`
+  // (drmx2004_scripting_ref.txt:13909) / `getURL "URL"`.
+  'gotonetpage', 'geturl',
   'getobject', 'removeobject', 'objectexists', 'getvariable', 'getvariablevalue', 'setvariable',
   'variableexists', 'dumpvariablefield', 'dumptextfield', 'gettext', 'getuniqueid',
   'executemessage', 'createwindow', 'removewindow', 'windowexists', 'getconnection', 'connectionexists',

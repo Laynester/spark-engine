@@ -101,10 +101,10 @@ export class SparkElement extends SparkBase {
       const reclaimed = reclaimIfLegacyPage();
       phase('realm reclaim checked');
       if (reclaimed && reclaimed.changed) {
-        const sample = [...reclaimed.restored, ...reclaimed.unshadowed, ...reclaimed.dropped].slice(0, 5).join(', ');
+        const sample = [...reclaimed.restored, ...reclaimed.unshadowed, ...reclaimed.bridged].slice(0, 5).join(', ');
         engine.log(
           `legacy page realm reclaimed: ${reclaimed.restored.length} standard members restored, ` +
-          `${reclaimed.unshadowed.length} DOM shadows removed, ${reclaimed.dropped.length} toJSON hooks dropped, ` +
+          `${reclaimed.unshadowed.length} DOM shadows removed, ${reclaimed.bridged.length} toJSON hooks kept JSON-safe, ` +
           `${reclaimed.hidden.length} legacy additions hidden from for..in (${sample}${reclaimed.changed > 5 ? ', …' : ''})`,
         );
       }

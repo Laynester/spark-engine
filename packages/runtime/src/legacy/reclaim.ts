@@ -22,7 +22,9 @@
  *     'each' / 'collect' / ... and called `new undefined()`:
  *     "ClassRef is not a constructor".
  *   - it also adds Array/String/Number `toJSON`, which hijacks JSON.stringify
- *     (JSON.stringify([1, 2]) becomes the string "[1, 2]").
+ *     (JSON.stringify([1, 2]) becomes the string "[1, 2]"). Those hooks cannot
+ *     be deleted, though: Prototype's own `Object.toJSON` calls `value.toJSON()`
+ *     and the page's Ajax layer goes through it -- see jsonTransparentToJSON().
  *   - it methodizes Element.Methods onto HTMLElement.prototype, where its
  *     `remove()` shadows the native Element.remove() and throws on a detached
  *     node (the native one is a no-op). Pixi calls element.remove() during
@@ -69,8 +71,12 @@ export interface ReclaimReport {
   unshadowed: string[];
   /** Added members hidden from for..in, e.g. "Array.prototype.each". */
   hidden: string[];
-  /** Added `toJSON` hooks removed, e.g. "Array.prototype.toJSON". */
-  dropped: string[];
+  /**
+   * Added `toJSON` hooks KEPT (deleting them breaks the page's own
+   * `Object.toJSON`/Ajax), but made non-enumerable and JSON-transparent, e.g.
+   * "Array.prototype.toJSON".
+   */
+  bridged: string[];
 }
 
 const DOM_CTORS: Array<[keyof Realm, string]> = [
@@ -127,6 +133,29 @@ function reinstallable(desc: PropertyDescriptor): PropertyDescriptor {
 const nativeSource = (fn: unknown): string => Function.prototype.toString.call(fn);
 
 /**
+ * Prototype 1.6 adds `toJSON` to Array/String/Number, and the same hook has two
+ * callers with opposite contracts:
+ *
+ *   Prototype:  `Object.toJSON(value)` -> `if (value.toJSON) return value.toJSON()`
+ *               -- called with NO argument, and the result IS the JSON text.
+ *   JSON:       `JSON.stringify(value)` -> `value.toJSON(key)` -- called WITH a
+ *               key, and the result is the VALUE to serialize.
+ *
+ * So with the hook in place `JSON.stringify([1, 2])` returns the string
+ * "[1, 2]" (the hook's JSON text), and deleting the hook to protect JSON breaks
+ * every page-side `Object.toJSON` / `Ajax.Request(..., postBody: Object.toJSON(x))`
+ * with `E.toJSON is not a function` (measured on the real web-gallery page).
+ * The two contracts are distinguishable -- JSON.stringify always passes a key --
+ * so keep the hook and answer whichever caller is asking.
+ */
+function jsonTransparentToJSON(original: (...args: unknown[]) => unknown): (...args: unknown[]) => unknown {
+  return function (this: unknown, ...args: unknown[]): unknown {
+    if (args.length > 0) return this;
+    return original.apply(this, args);
+  };
+}
+
+/**
  * Are these two properties the same implementation? Values from a second realm
  * are never the same object, so natives are recognised by their name/length and
  * by `toString()` reading "[native code]" -- Prototype's replacements print their
@@ -169,11 +198,21 @@ function reclaimProto(target: object, pristine: object, label: string, report: R
     if (!desc) continue;
     if (Object.prototype.hasOwnProperty.call(pristine, key)) continue;
     const bag = target as Record<string, unknown>;
-    if (key === 'toJSON') {
-      // No standard realm has a prototype toJSON; this hook only hijacks
-      // JSON.stringify (arrays/strings/numbers would serialize as their source).
-      delete bag[key];
-      report.dropped.push(`${label}.${key}`);
+    if (key === 'toJSON' && typeof desc.value === 'function') {
+      // No standard realm has an Array/String/Number toJSON -- Date's is
+      // standard and was handled above -- so this is the Prototype hook. Keep
+      // it callable (the page needs it), hide it from for..in like every other
+      // legacy addition, and make it transparent to JSON.stringify.
+      try {
+        Object.defineProperty(target, key, {
+          ...desc,
+          value: jsonTransparentToJSON(desc.value as (...args: unknown[]) => unknown),
+          enumerable: false,
+        });
+        report.bridged.push(`${label}.${key}`);
+      } catch {
+        // ignore
+      }
       continue;
     }
     if (key in pristine) {
@@ -197,7 +236,7 @@ function reclaimProto(target: object, pristine: object, label: string, report: R
 
 /** Repair `target` using `pristine` as the source of truth for standard members. */
 export function reclaimRealm(target: Realm, pristine: Realm): ReclaimReport {
-  const report: ReclaimReport = { changed: 0, restored: [], unshadowed: [], hidden: [], dropped: [] };
+  const report: ReclaimReport = { changed: 0, restored: [], unshadowed: [], hidden: [], bridged: [] };
   for (const [key, label] of PROTO_PAIRS) {
     const t = target[key];
     const p = pristine[key];
@@ -209,7 +248,7 @@ export function reclaimRealm(target: Realm, pristine: Realm): ReclaimReport {
     target.array.from = from;
     report.restored.push('Array.from');
   }
-  report.changed = report.restored.length + report.unshadowed.length + report.hidden.length + report.dropped.length;
+  report.changed = report.restored.length + report.unshadowed.length + report.hidden.length + report.bridged.length;
   return report;
 }
 

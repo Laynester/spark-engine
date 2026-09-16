@@ -22,6 +22,62 @@ function alphaAt(data: Uint8ClampedArray, width: number, x: number, y: number): 
   return data[(y * width + x) * 4 + 3];
 }
 
+test('bakeSurface reuses a destination with identical pixels and changed flags', () => {
+  const { data, fill } = makeImage(6, 6);
+  fill(2, 2, 64, 96, 128);
+  fill(3, 3, 0, 0, 0);
+  fill(4, 4, 128, 128, 128, 100);
+  const original = data.slice();
+  const destination = new Uint8ClampedArray(data.length);
+  const modes = [null, 'matte', 'matteIdentity', 'backgroundTransparent', 'key', 'notGhost'] as const;
+  const palette = [[255, 255, 255], [64, 96, 128]];
+  const indices = new Uint8Array(36);
+  indices[14] = 1;
+  for (const mode of modes) {
+    for (const ink of [0, 8, 36, 39, 41]) {
+      for (const tint of [null, 0, 0xff8800]) {
+        for (const duotone of [null, { fg: 0x003300, bg: 0x88ff88 }]) {
+          const args = [data, 6, 6, mode, tint, undefined, ink, 0, palette, null, duotone, indices] as const;
+          const expected = bakeSurface(...args);
+          destination.fill(123);
+          const actual = bakeSurface(...args, destination);
+          assert.strictEqual(actual.pixels, destination);
+          assert.deepEqual(actual, expected, `${mode}/${ink}/${tint}/${duotone !== null}`);
+          assert.deepEqual(data, original);
+        }
+      }
+    }
+  }
+});
+
+test('bakeSurface reused destinations reset short input tails and preserve source views', () => {
+  const destination = new Uint8ClampedArray(16).fill(255);
+  for (const src of [new Uint8Array([1, 2, 3, 4]), new Uint8ClampedArray([5, 6, 7, 8]), new Uint8Array(0)]) {
+    const expected = bakeSurface(src, 2, 2, null, null);
+    const actual = bakeSurface(src, 2, 2, null, null, undefined, 0, 0, undefined, null, null, null, destination);
+    assert.strictEqual(actual.pixels, destination);
+    assert.deepEqual(actual, expected);
+  }
+  const oversized = new Uint8Array(24).fill(71);
+  assert.deepEqual(
+    bakeSurface(oversized, 2, 2, null, null, undefined, 0, 0, undefined, null, null, null, destination),
+    bakeSurface(oversized, 2, 2, null, null),
+  );
+});
+
+test('bakeSurface does not reuse mismatched or source-aliasing destinations', () => {
+  const backing = new Uint8ClampedArray(32).fill(255);
+  const src = backing.subarray(0, 16);
+  for (const destination of [src, backing.subarray(4, 20), new Uint8ClampedArray(8), new Uint8ClampedArray(20)]) {
+    const original = backing.slice();
+    const expected = bakeSurface(src, 2, 2, 'key', null);
+    const actual = bakeSurface(src, 2, 2, 'key', null, undefined, 36, 0, undefined, null, null, null, destination);
+    assert.notStrictEqual(actual.pixels, destination);
+    assert.deepEqual(actual, expected);
+    assert.deepEqual(backing, original);
+  }
+});
+
 test('ink 36 keys WHITE, not the member palette-0 (hh_entry_jp screen3d)', () => {
   // hh_entry_jp regression: the Entry Image Scroller warps its 2D canvas onto
   // `screen3d` through two parallelogram quads (see the copyPixels quad test in

@@ -757,9 +757,9 @@ export class PixiStage implements StageAdapter {
     // Which palette/indices this surface is allowed to be keyed by, and why a
     // composed window part is trusted with neither — see bakeInputsForImage.
     const { palette: bakePalette, indices: bakeIndices } = bakeInputsForImage(img, palette);
-    const out = bakeSurface(img.ensure(), w, h, bake, tint, inkKey, ink, 0, bakePalette, keyed, duotone, bakeIndices);
-    node.bakeBuf.set(out.pixels);
-    return { pixels: node.bakeBuf, changed: out.changed };
+    const out = bakeSurface(img.ensure(), w, h, bake, tint, inkKey, ink, 0, bakePalette, keyed, duotone, bakeIndices, node.bakeBuf);
+    node.bakeBuf = out.pixels;
+    return out;
   }
 
   private tintForChannel(ch: Channel | undefined): number | null {

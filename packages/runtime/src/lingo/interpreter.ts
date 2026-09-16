@@ -55,6 +55,8 @@ export interface InterpreterHost extends MemberHost {
   globalGet(name: string): LVal | undefined;
   globalGetLower?(key: string, name: string): LVal | undefined;
   globalSet(name: string, value: LVal): void;
+  /** Lingo's JavaScript Proxy: hand a page-side call to the host page. */
+  callJavaScript(call: string, data: string): void;
   go(frame: LVal): void;
   builtin(name: string, args: LVal[], interp: Interpreter): LVal | undefined;
   memberMethod(m: LMemberRef, name: string, args: LVal[]): LVal;
@@ -88,6 +90,19 @@ const SPRITE_EVENT_NAMES = new Set([
 ]);
 
 export const NO_GLOBALS: ReadonlySet<string> = new Set();
+
+/**
+ * Is this the corpus's JavaScript Proxy — a Director JAVASCRIPT cast member
+ * whose source the exporter could only keep as a `-- @js` comment, leaving its
+ * `callJavaScript` handler with an empty body? A cast that actually carries
+ * Lingo in that handler (a patched hotel cast) is called as Lingo instead; the
+ * empty body is what makes the member the lost-JavaScript one.
+ */
+function isLostJavaScriptMember(script: Script): boolean {
+  if (!/^javascript\s*proxy$/i.test(script.name)) return false;
+  const handler = script.handlers.find((h) => h.name.toLowerCase() === 'calljavascript');
+  return !!handler && handler.body.length === 0;
+}
 
 const scriptPropsLowerCache = new WeakMap<Script, Set<string>>();
 export function scriptPropsLower(script: Script): Set<string> {
@@ -1295,6 +1310,22 @@ export class Interpreter {
       const lower = name.toLowerCase();
       if (lower === 'new' || lower === 'construct') return this.newInstance(obj.script, args);
       if (lower === 'newjavascriptproxy') return this.host.xtraInstance('JavaScriptProxy');
+      // The corpus's movie -> page bridge: `script("JavaScript Proxy")
+      // .callJavaScript(quotedCall, quotedData)` from Special Services
+      // ::callJavaScriptFunction. That member is a Director JAVASCRIPT cast --
+      // its source lived in the cast's CallJavaScript literal and only a
+      // `-- @js` comment survives the export -- so the handler arrives EMPTY and
+      // the call has to reach the page (see DirectorEngine::callJavaScript).
+      if (lower === 'calljavascript' && isLostJavaScriptMember(obj.script)) {
+        this.host.callJavaScript(toLingoString(args[0] ?? VOID), toLingoString(args[1] ?? VOID));
+        return VOID;
+      }
+      // Director also lets a script object be called in place:
+      // `script("CIntVector").round(...)`, `script("JavaScript Proxy")
+      // .callJavaScript(...)` when the member really carries Lingo. Called with
+      // no instance, like the bare global-handler call it is.
+      const handler = obj.script.handlers.find((h) => h.name.toLowerCase() === lower);
+      if (handler) return this.callHandler(obj.script, handler, args, null, NO_GLOBALS);
       this.host.warn(`script(${obj.script.name}).${name}(): unsupported`);
       return VOID;
     }

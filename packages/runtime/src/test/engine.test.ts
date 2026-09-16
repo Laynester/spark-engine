@@ -4888,6 +4888,33 @@ test('shape members emit kind:shape visuals with parsed dims (entry sky/box)', (
   assert.equal(hit!.shape!.height, 54);
 });
 
+test('tick flushes removed sprites before rendering an overshot entry shutter', () => {
+  const visible = new Map<number, string | null>();
+  const e = new DirectorEngine({
+    setBackground() {},
+    resize() {},
+    refreshChannel() {},
+    setChannel(ch, visual) { visible.set(ch, visual?.kind ?? null); },
+  });
+  const member = e.addScriptMember('Shutter', 'unknown', '');
+  member.kind = 'shape';
+  e.addScriptMember('Close entry', 'score', `on exitFrame
+  sprite(9).locV = 7
+  sprite(9).member = member(0)
+  sprite(10).member = member(0)
+end`);
+  for (const n of [9, 10, 11]) {
+    e.setSpriteProp(e.getSprite(n), 'castNum', (member.castLibNumber << 16) | member.number);
+  }
+  e.boot();
+  e.flushChannelVisuals();
+  assert.equal(visible.get(9), 'shape');
+  e.tick();
+  assert.equal(visible.get(9), null, 'the overshot shutter is removed before the renderer runs');
+  assert.equal(visible.get(10), null, 'the corner is removed in the same frame');
+  assert.equal(visible.get(11), 'shape', 'unrelated sprites survive');
+});
+
 test('a burst of sprite prop sets coalesces into ONE visual build per sprite', () => {
   // Visualizer buildVisual sets ~12 props per sprite in one synchronous block.
   // Each prop used to trigger a full setChannel -> blob URL + PNG decode that
@@ -11686,4 +11713,156 @@ test('dev overlay does not count a hidden tab as a frame gap', () => {
   // Hidden: throttled rAF makes the delta wall-clock noise, so it is discarded.
   assert.equal(frameGap(5000, 16, true), 0);
   assert.equal(frameGap(90000, 3000, true), 0);
+});
+
+/**
+ * The corpus's one route from the movie into the page. Special Services
+ * ::callJavaScriptFunction does
+ *
+ *   script("JavaScript Proxy").callJavaScript(QUOTE & tCallString & QUOTE, QUOTE & tdata & QUOTE)
+ *
+ * and "JavaScript Proxy" (fuse_client 0082) is a Director JAVASCRIPT cast
+ * member: its source lived in the cast's CallJavaScript literal, which the
+ * exporter can only record as a `-- @js` comment, so the handler arrives with an
+ * EMPTY body here. The lost JS body was a browser handoff
+ * (`getURL("javascript:ClientMessageHandler.call(...)")`) -- the page's own
+ * dispatcher -- so the call has to reach the page instead of warning
+ * "unsupported" and vanishing.
+ */
+test('script("JavaScript Proxy").callJavaScript hands the call to the page dispatcher', async () => {
+  const main = makeMovieCastZip('main', [], {
+    // The real caller shape (Special Services::callJavaScriptFunction), including
+    // the QUOTE wrapping: the two arguments are JavaScript SOURCE FRAGMENTS, the
+    // form the lost JS body spliced into `ClientMessageHandler.call(call,data)`.
+    '0001_script_JS Proxy Caller.ls':
+      '-- Cast member: JS Proxy Caller\n-- Type: Movie Script\n' +
+      'on callJs tCallString, tdata\n' +
+      `  script("JavaScript Proxy").callJavaScript(QUOTE & tCallString & QUOTE, QUOTE & tdata & QUOTE)\n` +
+      'end\n' +
+      'on clientReady\n  callJs("clientReady", VOID)\nend\n' +
+      'on helloWithData\n  callJs("hello,google", "JS Test")\nend\n' +
+      'on oddFragment\n  script("JavaScript Proxy").callJavaScript("\'x\'", "1 + 1")\nend\n',
+    '0082_script_JavaScript Proxy.ls':
+      '-- Cast member: JavaScript Proxy\n-- Type: Parent\n\n-- Script\non callJavaScript\n  -- @js\n\n\nend\n',
+  });
+  const source: BundleSource = {
+    async fetchBundle(name: string) {
+      return name === 'main' ? main : null;
+    },
+  };
+  const loader = new BundleLoader(source);
+  const e = new DirectorEngine();
+  await e.loadCast(loader, 'main');
+
+  const seen: [string, string][] = [];
+  e.javascriptProxy = (call, data) => {
+    seen.push([call, data]);
+  };
+  e.interp.evalExpressionString('clientReady()');
+  // The fragments decode to the values the page's dispatcher wants: the
+  // comma-list split is ClientMessageHandler's own, and a VOID data argument
+  // concatenates to the empty fragment `""`.
+  e.interp.evalExpressionString('helloWithData()');
+  assert.deepEqual(seen, [['clientReady', ''], ['hello,google', 'JS Test']]);
+  // The handoff is logged once per distinct call, so a page that pipes the
+  // runtime log (the demo's <pre id="log">) can see the movie talking to it.
+  assert.deepEqual(
+    e.logs.filter((l) => l.startsWith('page: ClientMessageHandler.call')),
+    [
+      'page: ClientMessageHandler.call("clientReady", "")',
+      'page: ClientMessageHandler.call("hello,google", "JS Test")',
+    ],
+  );
+
+  // A fragment that is not a plain literal takes the historical path: splice it
+  // into the same expression the browser used to run and evaluate it.
+  const g = globalThis as { ClientMessageHandler?: { call?: (n: string, d: unknown) => void } };
+  const raw: [unknown, unknown][] = [];
+  g.ClientMessageHandler = { call: (n, d) => { raw.push([n, d]); } };
+  try {
+    e.interp.evalExpressionString('oddFragment()');
+    assert.deepEqual(raw, [['x', 2]], 'the spliced expression ran against the page dispatcher');
+    assert.equal(seen.length, 2, 'and it did not go through the decoded path');
+  } finally {
+    delete g.ClientMessageHandler;
+  }
+
+  // A cast whose JavaScript Proxy carries REAL Lingo is called as Lingo, not
+  // handed to the page (only the empty-body member is the lost JS one).
+  const withBody = makeMovieCastZip('main', [], {
+    '0001_script_JS Proxy Caller.ls':
+      '-- Cast member: JS Proxy Caller\n-- Type: Movie Script\n' +
+      'on clientReady\n' +
+      '  return script("JavaScript Proxy").callJavaScript("x", "y")\n' +
+      'end\n',
+    '0082_script_JavaScript Proxy.ls':
+      '-- Cast member: JavaScript Proxy\n-- Type: Parent\n\n-- Script\non callJavaScript tCall, tData\n  return tCall & "|" & tData\nend\n',
+  });
+  const loader2 = new BundleLoader({ async fetchBundle(name: string) { return name === 'main' ? withBody : null; } });
+  const e2 = new DirectorEngine();
+  await e2.loadCast(loader2, 'main');
+  let handed = 0;
+  e2.javascriptProxy = () => {
+    handed++;
+  };
+  assert.equal(e2.interp.evalExpressionString('clientReady()'), 'x|y');
+  assert.equal(handed, 0, 'a real Lingo body is not the page bridge');
+
+  // A repeat of a call already reported stays out of the log: the corpus sends
+  // `google` on a 10-minute keepalive and `clientReady` on every room enter, and
+  // the demo pipes this log straight into the page.
+  e.interp.evalExpressionString('clientReady()');
+  assert.equal(e.logs.filter((l) => l.startsWith('page: ClientMessageHandler.call')).length, 2);
+});
+
+/**
+ * External links. `gotoNetPage URL, target` (drmx2004_scripting_ref.txt:13906):
+ * an omitted/"self" target REPLACES the page the movie is playing in, a name
+ * ("_new") opens that window. The corpus depends on both -- openNetPage resolves
+ * "self" to VOID for logout / session-timeout links (hh_entry 0008:345-349), and
+ * every ordinary link goes out as "_new" (no `default.url.open.target` variable
+ * is defined in a v31 hotel). `getURL` is the older spelling of the same
+ * handoff, plus the browser idiom `getURL("javascript:...")`
+ * (adobe_director_11.5.txt:7667).
+ */
+test('external links: a named target opens a window, a void/"self" target replaces the page', async () => {
+  const main = makeMovieCastZip('main', [], {
+    '0001_script_Links.ls':
+      '-- Cast member: Links\n-- Type: Movie Script\n' +
+      'on openIt u, t\n  gotoNetPage(u, t)\nend\n' +
+      'on openPlain u\n  gotoNetPage(u)\nend\n' +
+      'on webIt u, t\n  getURL(u, t)\nend\n',
+  });
+  const loader = new BundleLoader({ async fetchBundle(name: string) { return name === 'main' ? main : null; } });
+  const e = new DirectorEngine();
+  await e.loadCast(loader, 'main');
+  const opened: [string, string][] = [];
+  const navigated: string[] = [];
+  e.pageHost = {
+    open: (url, target) => { opened.push([url, target]); },
+    navigate: (url) => { navigated.push(url); },
+  };
+
+  const script = e.resolveScript('Links')!;
+  const call = (handler: string, args: LVal[]): LVal => {
+    const h = script.handlers.find((x) => x.name.toLowerCase() === handler)!;
+    return e.interp.callHandler(script, h, args, null, new Set());
+  };
+  call('openit', ['http://h/x', '_new']);
+  call('openit', ['http://h/self', 'self']);
+  call('openit', ['http://h/parent', '_parent']);
+  call('openit', ['http://h/void', VOID]);
+  call('openplain', ['http://h/bare']);
+  assert.deepEqual(opened, [['http://h/x', '_blank'], ['http://h/parent', '_parent']]);
+  assert.deepEqual(navigated, ['http://h/self', 'http://h/void', 'http://h/bare']);
+
+  // getURL takes the same path -- and its `javascript:` form runs page code
+  // (this is the mechanism the JavaScript Proxy's lost body used).
+  const g = globalThis as { __sparkPageProbe?: number };
+  call('webit', ['javascript:globalThis.__sparkPageProbe = 7', VOID]);
+  assert.equal(g.__sparkPageProbe, 7);
+  assert.equal(opened.length, 2, 'a javascript: URL is not a page open');
+  call('webit', ['http://h/via-geturl', '_new']);
+  assert.deepEqual(opened[2], ['http://h/via-geturl', '_blank']);
+  delete g.__sparkPageProbe;
 });

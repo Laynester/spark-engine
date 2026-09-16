@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { reclaimRealm, looksLikeLegacyPage, type Realm } from '../legacy/reclaim.js';
+import { captureRealm, reclaimRealm, looksLikeLegacyPage, type Realm } from '../legacy/reclaim.js';
 
 /**
  * The reclaim logic normally runs against the *global* realm in a browser, so
@@ -117,23 +117,104 @@ test('legacy additions are hidden from for..in instead of deleted, so the page k
   assert.deepEqual(seen, ['0', '1']);
 });
 
-test('drops added toJSON hooks because they hijack JSON.stringify', () => {
+/**
+ * Prototype 1.6 adds Array/String/Number/Date `toJSON` (and hash), and the two
+ * callers of a `toJSON` are the reason the reclaim cannot simply delete them:
+ *
+ *   Prototype:  Object.toJSON(value) -> `if (value.toJSON) return value.toJSON()`
+ *               -- NO argument, and the result IS the JSON text.
+ *   JSON:       JSON.stringify(v)    -> `v.toJSON(key)`, and the result is the
+ *               VALUE to serialize.
+ *
+ * Deleting the hooks (the first attempt at this) left every page-side
+ * `Object.toJSON`/`Ajax.Request(..., postBody: Object.toJSON({...}))` throwing
+ * `E.toJSON is not a function` -- measured on the real client page. Keeping them
+ * as-is hands JSON.stringify a JSON *string* instead of the array. Distinguishing
+ * the two contracts by the argument JSON.stringify always passes satisfies both.
+ */
+test('an added toJSON keeps Prototype working AND stops hijacking JSON.stringify', () => {
   const pristine = makeRealm();
   const poisoned = makeRealm();
-  protoOf(poisoned, 'array').toJSON = function prototypToJSON(): string {
-    return "'[1, 2]'";
+  protoOf(poisoned, 'array').toJSON = function prototypArrayToJSON(this: unknown[]): string {
+    return "'[" + this.length + "]'";
   };
-  protoOf(poisoned, 'string').toJSON = function prototypToJSON(): string {
-    return "'x'";
+  protoOf(poisoned, 'string').toJSON = function prototypStringToJSON(this: string): string {
+    return "'" + this + "'";
   };
 
   const report = reclaimRealm(poisoned, pristine);
 
-  assert.ok(!('toJSON' in poisoned.array.prototype));
-  assert.ok(!('toJSON' in poisoned.string.prototype));
-  assert.ok(report.dropped.includes('Array.prototype.toJSON'));
-  assert.ok(report.dropped.includes('String.prototype.toJSON'));
-  assert.equal(JSON.stringify([1, 2]), '[1,2]');
+  const arrayHook = protoOf(poisoned, 'array').toJSON as (key?: unknown) => unknown;
+  const stringHook = protoOf(poisoned, 'string').toJSON as (key?: unknown) => unknown;
+  // Prototype's contract: no argument -> the JSON text.
+  assert.equal(arrayHook.call([1, 2]), "'[2]'");
+  assert.equal(stringHook.call('ab'), "'ab'");
+  // JSON.stringify's contract: it passed a key -> hand back the VALUE.
+  const arr = [1, 2];
+  assert.equal(arrayHook.call(arr, '0'), arr);
+  assert.equal(stringHook.call('ab', 0), 'ab');
+  assert.ok(report.bridged.includes('Array.prototype.toJSON'));
+  assert.ok(report.bridged.includes('String.prototype.toJSON'));
+  // Hidden from for..in like every other legacy addition (Prototype's own 1.7
+  // behaviour), so an aliasing `for (i in systems)` sees only the indices.
+  assert.equal(Object.getOwnPropertyDescriptor(poisoned.array.prototype, 'toJSON')?.enumerable, false);
+});
+
+/**
+ * The same fix against the REAL realm: poison the prototypes the way Prototype
+ * does, snapshot a pristine reference realm BEFORE that, reclaim, then run the
+ * two callers for real (@see the note above). Only the real Array.prototype can
+ * make `JSON.stringify([1, 2])` observable.
+ */
+/**
+ * A reference realm whose prototypes are COPIES of the real ones (as they were
+ * before the poisoning). The reclaim compares descriptors member by member, so a
+ * descriptor copy behaves exactly like the throwaway same-origin iframe the
+ * browser path snapshots -- while still pointing at the same function objects.
+ */
+function cloneRealm(realm: Realm): Realm {
+  const out: Record<string, unknown> = {};
+  for (const [key, ctor] of Object.entries(realm)) {
+    if (!ctor) {
+      out[key] = undefined;
+      continue;
+    }
+    const prototype = Object.defineProperties(
+      {},
+      Object.getOwnPropertyDescriptors((ctor as { prototype: object }).prototype),
+    );
+    out[key] = { prototype, from: (ctor as { from?: unknown }).from };
+  }
+  return out as unknown as Realm;
+}
+
+test('the real JSON.stringify survives a reclaimed Prototype toJSON hook', () => {
+  const pristine = cloneRealm(captureRealm(globalThis as unknown as Window & typeof globalThis));
+  const target = captureRealm(globalThis as unknown as Window & typeof globalThis);
+  const proto = Array.prototype as unknown as Record<string, unknown>;
+  const before = Object.getOwnPropertyDescriptor(proto, 'toJSON');
+  try {
+    Object.defineProperty(proto, 'toJSON', {
+      value: function prototypArrayToJSON(this: unknown[]): string {
+        return "'[" + this.length + "]'";
+      },
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    });
+    const report = reclaimRealm(target, pristine);
+    assert.ok(report.bridged.includes('Array.prototype.toJSON'), 'the hook was recognised and bridged');
+    assert.equal(JSON.stringify([1, 2]), '[1,2]', 'JSON.stringify sees the array, not the hook');
+    assert.equal(JSON.stringify([[1, 2], 'ab']), '[[1,2],"ab"]');
+    assert.equal(
+      (Array.prototype as unknown as { toJSON: () => string }).toJSON.call([1, 2]),
+      "'[2]'",
+      'and the page-side 0-argument contract still answers',
+    );
+  } finally {
+    if (before) Object.defineProperty(proto, 'toJSON', before);
+    else delete proto.toJSON;
+  }
 });
 
 test('a replaced native (Date.prototype.toJSON) is restored, not dropped', () => {
@@ -146,7 +227,7 @@ test('a replaced native (Date.prototype.toJSON) is restored, not dropped', () =>
   const report = reclaimRealm(poisoned, pristine);
 
   assert.equal(protoOf(poisoned, 'date').toJSON, protoOf(pristine, 'date').toJSON);
-  assert.equal(report.dropped.length, 0);
+  assert.equal(report.bridged.length, 0);
 });
 
 test('unshadows Prototype Element.Methods on the DOM prototypes (HTMLElement.prototype.remove)', () => {

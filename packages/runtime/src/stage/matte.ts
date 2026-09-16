@@ -1180,10 +1180,14 @@ export function bakeSurface(
     * gets away with while nothing has recoloured the art.
     */
    indices?: Uint8Array | null,
+   destination?: Uint8ClampedArray,
 ): { pixels: Uint8ClampedArray; changed: boolean } {
    const n = w * h * 4;
-   const buf = new Uint8ClampedArray(n);
-   buf.set(src.subarray(0, n));
+   const buf = destination?.length === n && destination.buffer !== src.buffer
+     ? destination
+     : new Uint8ClampedArray(n);
+   buf.set(src.length > n ? src.subarray(0, n) : src);
+   if (src.length < n) buf.fill(0, src.length);
    // The ink-39 identity rectangle is the one keyed region that stays OPAQUE, so
    // mark it: the tint pass below skips transparent pixels but must skip these too.
    const keyedBuf = bake === 'matteIdentity' ? (keyed ?? new Uint8Array(w * h)) : null;

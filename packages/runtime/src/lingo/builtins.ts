@@ -40,6 +40,11 @@ export interface BuiltinBackend {
   setObjectById(id: string, obj: LObject): void;
   removeObjectById(id: string): void;
   getUniqueId(): string;
+  /** Director's browser handoff (gotoNetPage / getURL): replace the page the
+   *  movie is playing in, or open a named window. */
+  openNetPage(url: string, target?: LVal): void;
+  /** The browser idiom `getURL("javascript:...")` — run the code on the page. */
+  runPageJavaScript(code: string): void;
   netGetNetText(url: string): number;
   getStreamStatus(id: number): LVal;
   importFileInto(member: LVal, url: string): number;
@@ -245,18 +250,25 @@ export function createBuiltinTable(): Map<string, BuiltinFn> {
     b.resetTimer();
     return VOID;
   });
+  // Director's external links. `gotoNetPage URL, target` (drmx2004_scripting_ref
+  // .txt:13906) and its older spelling `getURL` both hand a URL to the browser:
+  // a NAME ("_new", a frame/window) opens that window, while an omitted or
+  // "self" target REPLACES the page the movie is playing in (:13926). The corpus
+  // depends on both — its Special Services::openNetPage resolves "self" to VOID
+  // precisely so logout and session-timeout links take the browser to the
+  // hotel's page instead of a popup (hh_entry 0008:345-349), and every ordinary
+  // link goes out as "_new" (no `default.url.open.target` in a v31 hotel).
   set(['gotonetpage'], (b, a) => {
+    b.openNetPage(toLingoString(a[0] ?? VOID), a[1]);
+    return VOID;
+  });
+  set(['geturl'], (b, a) => {
+    // `getURL("javascript:...")` is the browser idiom a movie uses to call a
+    // function on its own page (adobe_director_11.5.txt:7667) — the mechanism
+    // the corpus's JavaScript Proxy cast member was written with.
     const url = toLingoString(a[0] ?? VOID);
-    const target =
-      a[1] === undefined ? '_blank' :
-        a[1] instanceof LSymbol ? a[1].name :
-          toLingoString(a[1]);
-    const g = globalThis as { open?: (u: string, t: string) => unknown };
-    if (url !== '' && typeof g.open === 'function') {
-      try { g.open(url, target); } catch {  }
-    } else {
-      b.log(`gotoNetPage(${url}, ${target})`);
-    }
+    if (/^javascript:/i.test(url)) b.runPageJavaScript(url.slice('javascript:'.length));
+    else b.openNetPage(url, a[1]);
     return VOID;
   });
   set(['callancestor'], (b, a, interp) => {

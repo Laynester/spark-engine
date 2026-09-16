@@ -441,6 +441,77 @@ const NET_RAMP_FRAMES = 24;
 
 const CAST_MEMBER_RE = /^--\s*Cast member:\s*(.*)$/m;
 
+interface WebPageGlobal {
+  open?: (url: string, target?: string) => unknown;
+  location?: { assign?: (url: string) => void; href?: string };
+}
+
+/**
+ * The corpus's JavaScript Proxy arguments are JavaScript SOURCE fragments, not
+ * values: Special Services wraps both in QUOTE —
+ *
+ *   script("JavaScript Proxy").callJavaScript(QUOTE & tCallString & QUOTE, QUOTE & tdata & QUOTE)
+ *
+ * — because they were spliced into `getURL("javascript:ClientMessageHandler.call("
+ * + call + "," + data + ")")`. A fragment that is one complete string literal
+ * (every form the corpus produces: `"clientReady"`, `""`) decodes to the value
+ * the page's dispatcher wants; anything else is spliced and run the way the
+ * browser would have run it. Returns null when the fragment is not one literal
+ * (an escaped quote or a backslash would need real JS unescaping).
+ */
+function jsStringLiteralValue(fragment: string): string | null {
+  const m = /^\s*(["'])([^\\]*?)\1\s*$/.exec(fragment);
+  return m ? m[2] : null;
+}
+
+/** Director target -> a window name, or null for "replace the current page". */
+function netTargetName(target: LVal | undefined): string | null {
+  if (target === undefined || target === null) return null;
+  const name = target instanceof LSymbol ? target.name : toLingoString(target);
+  if (name === '' || name === 'self' || name === '_self') return null;
+  if (name === 'new' || name === '_new') return '_blank';
+  return name;
+}
+
+/** The page's own dispatcher, when it has one (`ClientMessageHandler.call`). */
+function defaultJavaScriptDispatcher(): ((call: string, data: string) => void) | null {
+  const g = globalThis as { ClientMessageHandler?: { call?: unknown } };
+  const handler = g.ClientMessageHandler?.call;
+  if (typeof handler !== 'function') return null;
+  return (call, data) => {
+    (handler as (n: string, d: string) => void).call(g.ClientMessageHandler, call, data);
+  };
+}
+
+/** `location.assign` / `window.open`, when the runtime is not embedded in a page. */
+function defaultPageHost(): PageHost | null {
+  const g = globalThis as WebPageGlobal;
+  const canOpen = typeof g.open === 'function';
+  if (!canOpen && !g.location) return null;
+  return {
+    navigate: (url) => {
+      if (typeof g.location?.assign === 'function') g.location.assign(url);
+      else if (g.location) g.location.href = url;
+      else g.open!(url, '_self');
+    },
+    open: (url, target) => {
+      g.open?.(url, target);
+    },
+  };
+}
+
+/**
+ * Where a movie's external links are handed off. Director's `gotoNetPage`/
+ * `getURL` ask the BROWSER to open the URL, never the player: `navigate`
+ * replaces the page the movie is playing in (a void/"self" target) and `open`
+ * opens a named window (the corpus's "_new"). Defaults to the DOM and can be
+ * taken over by a host page, or a test.
+ */
+export interface PageHost {
+  navigate(url: string): void;
+  open(url: string, target: string): void;
+}
+
 export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHostApi {
   casts: CastLib[] = [];
   castByName = new Map<string, CastLib>();
@@ -560,6 +631,13 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   clickOnChannel = 0;
   interp: Interpreter;
   adapter: StageAdapter | null;
+  /** Overrides Director's external-link handoff; see PageHost. */
+  pageHost: PageHost | null = null;
+  /** Overrides the movie -> page bridge; see callJavaScript(). */
+  javascriptProxy: ((call: string, data: string) => void) | null = null;
+  private jsProxyWarned = false;
+  /** Movie -> page calls already written to the log; the bridge should not spam it. */
+  private jsCallsLogged = new Set<string>();
   private builtins = createBuiltinTable();
   private visualDirty = new Set<number>();
   /** Film-loop members (room water) advanced each tick. */
@@ -911,6 +989,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       this.interp.callHandler(fs.script, exit, [], fs.instance, NO_GLOBALS);
       if (!this.goIssued) fs.passed = true;
     }
+    this.flushChannelVisuals();
   }
 
   timeout(name: string): LObject {
@@ -3831,6 +3910,82 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     const i = Math.round(n);
     if (i >= 1 && i <= this.externalParamList.length) return this.externalParamList[i - 1].name;
     return VOID;
+  }
+
+  /**
+   * Director's external-link handoff (`gotoNetPage` / `getURL`). A target of
+   * VOID, EMPTY, "self" or "_self" means REPLACE the page the movie is playing
+   * in; anything else is a window name, with "new"/"_new" mapped to a fresh one
+   * (that is the name Shockwave's own plugin handed to the browser).
+   */
+  openNetPage(url: string, target?: LVal): void {
+    if (!url) return;
+    const name = netTargetName(target);
+    const host = this.pageHost ?? defaultPageHost();
+    if (!host) {
+      this.log(`gotoNetPage(${url}, ${name ?? 'self'})`);
+      return;
+    }
+    if (name === null) host.navigate(url);
+    else host.open(url, name);
+  }
+
+  /**
+   * `getURL("javascript:...")` — Director hands the code to the browser, which
+   * is how a movie calls a function on its own page. Runs in global scope; a
+   * page CSP that forbids eval is reported rather than thrown.
+   */
+  runPageJavaScript(code: string): void {
+    try {
+      (0, eval)(code);
+    } catch (e) {
+      this.warn(`getURL("javascript:${code}") failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /**
+   * Lingo's JavaScript Proxy: the movie calling into the page.
+   *
+   * `Special Services::callJavaScriptFunction` (the corpus's only JS bridge, gated
+   * on the hotel's `do.javascript.calls` variable) does
+   * `script("JavaScript Proxy").callJavaScript(QUOTE & tCallString & QUOTE, QUOTE & tdata & QUOTE)`,
+   * so both arguments arrive as JavaScript source fragments (@see
+   * jsStringLiteralValue). The proxy member itself is a Director JAVASCRIPT cast
+   * whose body the exporter could only keep as a `-- @js` comment; its one job
+   * was `getURL("javascript:ClientMessageHandler.call(call,data)")`, i.e. the
+   * page's own dispatcher — `ClientMessageHandler.call("clientReady,google", "")`,
+   * comma-list split included (`web-gallery/static/js/habboclient.js`).
+   */
+  callJavaScript(call: string, data: string): void {
+    const callValue = jsStringLiteralValue(call);
+    const dataValue = jsStringLiteralValue(data);
+    const dispatcher = this.javascriptProxy ?? defaultJavaScriptDispatcher();
+    if (dispatcher && callValue !== null && dataValue !== null) {
+      dispatcher(callValue, dataValue);
+      // The bridge is invisible otherwise: the page's own handlers return
+      // nothing and its dispatcher swallows their errors. Log each DISTINCT
+      // call (the corpus sends `google` on a keepalive, so a raw log would
+      // drown the panel).
+      const key = `${callValue}\u0000${dataValue}`;
+      if (!this.jsCallsLogged.has(key)) {
+        this.jsCallsLogged.add(key);
+        this.log(`page: ClientMessageHandler.call(${JSON.stringify(callValue)}, ${JSON.stringify(dataValue)})`);
+      }
+      return;
+    }
+    if (dispatcher) {
+      // Not one literal each: restore the historical composition and let the
+      // page's own scope evaluate it.
+      this.runPageJavaScript(`ClientMessageHandler.call(${call},${data})`);
+      return;
+    }
+    if (!this.jsProxyWarned) {
+      this.jsProxyWarned = true;
+      this.warn(
+        `callJavaScript(${call}) ignored: the page defines no ClientMessageHandler ` +
+        '(set engine.javascriptProxy to route the movie->page calls elsewhere)',
+      );
+    }
   }
 
   setPuppet(channel: number, flag: number): void {
