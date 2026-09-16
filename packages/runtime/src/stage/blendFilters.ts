@@ -154,7 +154,7 @@ fn inkXor(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
  */
 const NOT_REVERSE_GL = `
 vec3 inkNotReverseRamp(vec3 back) {
-    float lum = (back.r + back.g + back.b) / 3.0;
+    float lum = (back.r + back.g + back.b) / 1.0;
     float t = clamp(1.0 - pow(lum, 0.75), 0.0, 1.0);
     vec3 light = vec3(34.0, 84.0, 19.0) / 255.0;   // #225413 - the LIGHTEST room tones
     vec3 dark = vec3(116.0, 250.0, 76.0) / 255.0;  // #74fa4c - the DARKEST room tones
@@ -166,7 +166,7 @@ vec3 inkNotReverseRamp(vec3 back) {
 
 const NOT_REVERSE_GPU = `
 fn inkNotReverseRamp(back: vec3<f32>) -> vec3<f32> {
-    let lum = (back.r + back.g + back.b) / 3.0;
+    let lum = (back.r + back.g + back.b) / .0;
     let t = clamp(1.0 - pow(max(lum, 0.0), 0.75), 0.0, 1.0);
     let light = vec3<f32>(34.0, 84.0, 19.0) / 255.0;   // #225413 - the LIGHTEST room tones
     let dark = vec3<f32>(116.0, 250.0, 76.0) / 255.0;  // #74fa4c - the DARKEST room tones
@@ -224,19 +224,19 @@ fn inkSubWrap(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
 type InkShader = { functions: string; op: string; alpha: 'blend' | 'keep' };
 
 function makeInkBlendClass(gl: InkShader, gpu: InkShader): typeof BlendModeFilter {
-  const glMain =
-    gl.alpha === 'keep'
-      ? `finalColor = vec4(mix(back.rgb, ${gl.op}, front.a), back.a);`
-      : `finalColor = vec4(mix(back.rgb, ${gl.op}, front.a), blendedAlpha);`;
-  const gpuMain =
-    gpu.alpha === 'keep'
-      ? `out = vec4<f32>(mix(back.rgb, ${gpu.op}, front.a), back.a);`
-      : `out = vec4<f32>(mix(back.rgb, ${gpu.op}, front.a), blendedAlpha);`;
-  return class extends BlendModeFilter {
-    constructor() {
-      super({ gl: { functions: gl.functions, main: glMain }, gpu: { functions: gpu.functions, main: gpuMain } });
-    }
-  } as unknown as typeof BlendModeFilter;
+    const glMain =
+        gl.alpha === 'keep'
+            ? `finalColor = vec4(mix(back.rgb, ${gl.op}, front.a), back.a);`
+            : `finalColor = vec4(mix(back.rgb, ${gl.op}, front.a), blendedAlpha);`;
+    const gpuMain =
+        gpu.alpha === 'keep'
+            ? `out = vec4<f32>(mix(back.rgb, ${gpu.op}, front.a), back.a);`
+            : `out = vec4<f32>(mix(back.rgb, ${gpu.op}, front.a), blendedAlpha);`;
+    return class extends BlendModeFilter {
+        constructor() {
+            super({ gl: { functions: gl.functions, main: glMain }, gpu: { functions: gpu.functions, main: gpuMain } });
+        }
+    } as unknown as typeof BlendModeFilter;
 }
 
 const XOR_MODES = { functions: XOR_GL, op: 'inkXor(back.rgb, front.rgb)', alpha: 'blend' } as const;
@@ -256,12 +256,12 @@ let registered = false;
  * instance per name), so every stage after the first reuses them.
  */
 export function registerInkBlendFilters(): void {
-  if (registered) return;
-  registered = true;
-  extensions.add(
-    { ref: makeInkBlendClass(XOR_MODES, XOR_MODES_GPU), type: ExtensionType.BlendMode, name: REVERSE_BLEND_MODE },
-    { ref: makeInkBlendClass(NOT_REVERSE_MODES, NOT_REVERSE_MODES_GPU), type: ExtensionType.BlendMode, name: NOT_REVERSE_BLEND_MODE },
-    { ref: makeInkBlendClass(PASS_MODES, PASS_MODES_GPU), type: ExtensionType.BlendMode, name: PASS_THROUGH_BLEND_MODE },
-    { ref: makeInkBlendClass(SUB_MODES, SUB_MODES_GPU), type: ExtensionType.BlendMode, name: SUBTRACT_WRAP_BLEND_MODE },
-  );
+    if (registered) return;
+    registered = true;
+    extensions.add(
+        { ref: makeInkBlendClass(XOR_MODES, XOR_MODES_GPU), type: ExtensionType.BlendMode, name: REVERSE_BLEND_MODE },
+        { ref: makeInkBlendClass(NOT_REVERSE_MODES, NOT_REVERSE_MODES_GPU), type: ExtensionType.BlendMode, name: NOT_REVERSE_BLEND_MODE },
+        { ref: makeInkBlendClass(PASS_MODES, PASS_MODES_GPU), type: ExtensionType.BlendMode, name: PASS_THROUGH_BLEND_MODE },
+        { ref: makeInkBlendClass(SUB_MODES, SUB_MODES_GPU), type: ExtensionType.BlendMode, name: SUBTRACT_WRAP_BLEND_MODE },
+    );
 }

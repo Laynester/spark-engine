@@ -9055,7 +9055,111 @@ test('sin/cos take degrees; startTimer resets the timer (C++ MathBuiltins parity
   assert.ok(typeof t0 === 'number' && t0 >= 0);
   ev('startTimer()');
   const t1 = ev('the timer') as number;
-  assert.ok(t1 < 50, 'after startTimer, the timer restarts near 0');
+  assert.ok(t1 < 5, 'after startTimer, the timer restarts at 0 ticks');
+});
+
+test('the lastKey / the timer are TICKS — the Wobble Squabble key gate (hh_paalu)', async () => {
+  // `Paalu_Interface_Class::update` consumes a key only while
+  //   if the lastKey < the timer then …sendAction… startTimer()
+  // so BOTH have to be the same clock in ticks (1/60 s): `_player.lastKey` is
+  // "the time in ticks since the last key was pressed" (drmx2004:33058) and
+  // `the timer` is the stopwatch `startTimer` resets — the orient room's light
+  // switch proves its units by converting seconds with `* 60`. Returning the key
+  // CHARACTER for `the lastKey` (as this used to) made the gate read
+  // `"q" < 97` -> FALSE, so every key the player pressed was ignored.
+  const e = new DirectorEngine();
+  const ev = (s: string) => e.interp.evalExpressionString(s);
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  await sleep(80); // ~5 ticks
+  assert.equal(typeof ev('the lastKey'), 'number', 'the lastKey is a number, not the key');
+  assert.ok((ev('the lastKey') as number) >= 3, 'with no press yet the stopwatch runs on (ticks since boot)');
+  assert.equal(ev('the lastKey < the timer'), 0, 'and the gate is shut');
+
+  e.dispatchKeyEvent('keyDown', 'q', 81);
+  assert.equal(ev('the key'), 'q');
+  assert.equal(ev('the lastKey'), 0, 'a press restarts the stopwatch at 0 ticks');
+  assert.equal(ev('the lastKey < the timer'), 1, 'which is what OPENS the game gate');
+
+  // The game restarts its cycle after acting; the same press must not look fresh
+  // again (that is the whole point of the gate).
+  ev('startTimer()');
+  assert.equal(ev('the timer'), 0, 'startTimer resets the stopwatch (the builtin must not be a no-op)');
+  assert.equal(ev('the lastKey < the timer'), 0, 'the consumed press is not fresh again');
+
+  // Releasing a key must NOT refresh it either, or the corpus would re-fire the
+  // action it just consumed on the release.
+  e.dispatchKeyEvent('keyUp', 'q', 81);
+  assert.equal(ev('the lastKey'), 0, 'keyUp leaves the press stopwatch alone');
+  await sleep(80);
+  assert.ok((ev('the lastKey') as number) >= 3, '...and it keeps running with the key released');
+  assert.equal(ev('the lastKey < the timer'), 0, 'the consumed press stays consumed — both hands tick together');
+
+  // A NEW press, after the game restarted its cycle, is what acts next. The gate
+  // is a one-shot debounce, not a repeat rate: `lastKey` resets to 0 on the press
+  // and `timer` is already ahead, so it opens for exactly one action.
+  e.dispatchKeyEvent('keyDown', 'w', 87);
+  assert.equal(ev('the key'), 'w');
+  assert.equal(ev('the lastKey'), 0, 'a fresh press restarts the stopwatch');
+  assert.equal(ev('the lastKey < the timer'), 1, 'and reopens the gate for one action');
+});
+
+test('Wobble Squabble consumes a real key press (hh_paalu gate + shipped keymap)', async () => {
+  // The gate and keymap lookup verbatim from `Paalu_Interface_Class::update`, with
+  // the two tables the client actually ships: external_vars_31 line 129
+  // `paalu.key.list=[#bal1:"Q", …]` (UPPERCASE) and hh_paalu/texts/
+  // 0002_text_variable.index `paalu.key.res.list=["A","D","W","E","X","S",0]`.
+  // The game polls this every frame, so this is the whole input path: with the
+  // old `the lastKey` (the key CHARACTER) the gate read `"q" < 4` -> 0 and no
+  // press was ever consumed; the list lookup then still has to match 'q' to
+  // "Q", which Director's case-insensitive `=` gives us.
+  const e = new DirectorEngine();
+  e.addScriptMember(
+    'PaaluProbe',
+    'movie',
+    [
+      'on PaaluProbeAction',
+      '  tKeyList = [#bal1: "Q", #bal2: "E", #push1: "A", #push2: "D", #move1: "N", #move2: "M", #stabilise: "SPACE"]',
+      '  tKeyResList = ["A", "D", "W", "E", "X", "S", 0]',
+      '  tKey = the key',
+      '  if the lastKey < the timer then',
+      '    if tKey = SPACE then',
+      '      tKey = "SPACE"',
+      '    end if',
+      '    tKeyNr = 0',
+      '    repeat with i = 1 to tKeyList.count',
+      '      if tKeyList[i] = tKey then',
+      '        tKeyNr = i',
+      '        exit repeat',
+      '      end if',
+      '    end repeat',
+      '    startTimer()',
+      '    if tKeyNr > 0 then',
+      '      return tKeyResList[tKeyNr]',
+      '    end if',
+      '    return "none"',
+      '  end if',
+      '  return "-"',
+      'end',
+    ].join('\n'),
+  );
+  const act = () => e.interp.evalExpressionString('PaaluProbeAction()');
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  await sleep(70); // >= 4 ticks — the press has to be NEWER than the last startTimer
+  assert.equal(act(), '-', 'no press yet: the gate is shut, nothing is consumed');
+
+  e.dispatchKeyEvent('keyDown', 'q', 81);
+  assert.equal(act(), 'A', "Q is consumed as #bal1 — the balance action 'A' reaches sendAction");
+  assert.equal(act(), '-', 'the startTimer the action ran closed the gate again (same press cannot re-fire)');
+
+  await sleep(70);
+  e.dispatchKeyEvent('keyUp', 'q', 81);
+  e.dispatchKeyEvent('keyDown', 'x', 88);
+  assert.equal(act(), 'none', 'a key outside the map is consumed, but maps to no action');
+
+  await sleep(70);
+  e.dispatchKeyEvent('keyDown', ' ', 32);
+  assert.equal(act(), 0, 'SPACE maps to the 7th entry — the stabilise action index 0');
 });
 
 test('callAncestor(#handler, [me]) runs the ancestor handler with me bound (furni construct)', () => {

@@ -884,8 +884,17 @@ export function createBuiltinTable(): Map<string, BuiltinFn> {
     return VOID;
   });
 
+  // Director commands this runtime does not act on. LAST registration wins, so
+  // this batch must NOT name anything implemented above it: it used to list
+  // `startTimer` and silently replaced the real `b.resetTimer()` with a no-op,
+  // which left `the timer` running for the rest of the session. Wobble Squabble
+  // is the only corpus user and it is load-bearing there —
+  // `Paalu_Interface_Class::update` consumes a key only while
+  // `the lastKey < the timer`, then calls `startTimer()` to restart that cycle,
+  // so a timer that never resets turns the gate into "always open" and the same
+  // held key re-fires every frame.
   set(
-    ['noop', 'setCallback', 'updateStage', 'unloadCast', 'loadCast', 'startTimer', 'stopTimer', 'cursor', 'setCursor', 'pauseUpdate', 'nothing', 'beep', 'delay', 'alert', 'quit', 'halt', 'restart'],
+    ['noop', 'setCallback', 'updateStage', 'unloadCast', 'loadCast', 'stopTimer', 'cursor', 'setCursor', 'pauseUpdate', 'nothing', 'beep', 'delay', 'alert', 'quit', 'halt', 'restart'],
     () => VOID,
   );
 

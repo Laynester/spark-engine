@@ -1091,19 +1091,18 @@ export function bakeSurface(
  * Is the sprite's rendered pixel at (px, py) part of its ACTIVE AREA, i.e. can a
  * click land on it? `false` means the click belongs to the sprite underneath.
  *
- * Director defines the active area of a mouse message as "the portion of the
- * image that is displayed" (drmx2004_scripting_ref.txt:6979, 7027; the `cursor`
- * property doc says the same at 28823: the pointer only "changes when the cursor
- * is over the matte portion of the sprite"). The pixels a sprite renders as
- * nothing are therefore click-through: they belong to whatever is drawn behind
- * them.
+ * Director names ONE ink for this: "If the sprite is a bitmap cast member with
+ * matte ink applied, the active area is the portion of the image that is
+ * displayed; otherwise, the active area is the sprite's bounding rectangle"
+ * (drmx2004_scripting_ref.txt:6979 for `on mouseEnter`, 7027 for `on
+ * mouseLeave`; the `cursor` doc at 28823 says the same — the pointer only
+ * "changes when the cursor is over the matte portion of the sprite").
  *
  * `pixels` is the RENDERED buffer (`ChannelNode.imgBuffer`) — the buffer the
- * stage actually uploads — so this single alpha test covers every way a sprite
- * can end up with invisible pixels at once:
+ * stage actually uploads — so a single alpha test covers every way a MATTE
+ * sprite can end up with invisible pixels:
  *
- *  - the ink's keying bake (matte 8, Background Transparent 36, Not-copy 4,
- *    Not-ghost 7, the additive/subtractive family),
+ *  - the ink's keying bake (matte 8, Not-copy 4, Not-ghost 7),
  *  - the ink-0 near-white-backdrop heuristic (`bakeForChannel`'s
  *    `backgroundTransparent`),
  *  - artwork that simply HAS an alpha channel (a 32-bit member, a PNG, a
@@ -1119,31 +1118,49 @@ export function bakeSurface(
  * avatar sitting on it — the reported "clicking a sitting avatar selects the
  * chair". Testing the displayed pixels lets the click fall to the avatar.
  *
- * The test is INK-AWARE, so BOTH of Director's behaviours coexist — the pixel
- * rule applies only where the ink (or the artwork itself) can actually key
- * pixels away:
+ * INK 36 IS *NOT* A MATTE CASE, and treating it as one breaks the corpus's
+ * click overlays. `nav_roomlistBackLinks`, both minigame `game_area`s
+ * (`habbo_ttt.window`, `habbo_battleships.window`, `habbo_chess.window`) and
+ * every other window hotspot are declared as a STRETCHED 1x1 image element:
  *
- *  - Inks that key pixels (`8` matte, `36` background transparent, `4` not-copy,
- *    `7` not-ghost) use the pixel test. This is the room case above.
- *  - Artwork that carries a real alpha channel of its own (a 32-bit member, a
- *    truecolor PNG, an `image(w, h, 32)` the movie painted into) uses the pixel
- *    test too, whatever its ink.
- *  - Every OTHER ink (Copy and the arithmetic / ghost family) keeps Director's
- *    rectangle rule: the sprite owns its whole rectangle, so a composited
- *    window panel or a flat fill whose bake left it with a transparent margin
- *    cannot open a click hole in the chrome.
+ *   [#member: "shadow.pixel", #media: #bitmap, #ink: 36, #width: 248,
+ *    #height: 229, #type: "image", #id: "game_area"]
+ *
+ * Their buffer is a `image(w, h, 32)` the movie feeds/draws into, and the
+ * Layout Parser gives every element `#bgColor: rgb(255,255,255)`, so a blank one
+ * (battleships clears it on every turn — `battleShipMyTurn` calls
+ * `clearBuffer()` + `clearImage()`) is a white fill that ink 36 then keys to
+ * nothing: the element displays NOTHING and is used purely as an invisible click
+ * area. Under the rectangle rule the click reaches it and the game works; under
+ * the pixel rule the click fell through to `game_bg` and the player could not
+ * fire a single shot (measured live: BS/CH `game_area` buffer 100% transparent,
+ * hit test returned `BS_game_bg` / `CH_chess_bg`).
+ *
+ * The corpus agrees that ink 36 is a rectangle case — it does the per-pixel
+ * work itself, which is only reachable if Director already handed the sprite the
+ * click. `Room_Interface_Class::validateEvent` (hh_room/0003:798) reads
+ * `sprite(the rollover)`, and when that sprite is a bitmap with ink 36 it samples
+ * `tSpr.member.image.getPixel(...)`: a `#FFFFFF` pixel makes it hide the sprite and
+ * re-dispatch the event on the sprite BELOW, anything else keeps the click. Our
+ * pixel rule pre-empted that branch entirely, so the movie's own matte logic
+ * never ran.
+ *
+ * Matte ink (8) and its keying cousins (4 not-copy, 7 not-ghost) keep the
+ * displayed-pixel test — that is the chair/sitter case above — and artwork with a
+ * real alpha channel of its own is honoured for those inks too.
  *
  * Missing surface and out-of-bounds coordinates still fall back to the
  * rectangle, so a drifted pixel mapping can never make a sprite unclickable.
  */
-const PIXEL_TEST_INKS = new Set([4, 7, 8, 36]);
+const PIXEL_TEST_INKS = new Set([4, 7, 8]);
 
 /**
  * Does this sprite's click area follow its DISPLAYED pixels (true) or its whole
  * rectangle (false)? See the note above: `alphaArt` is the artwork's own alpha
- * channel, which is honoured for any ink.
- */
+ * channel, honoured for the matte ink family. Ink 36 answers `false` whatever
+ * the artwork's depth — it is Director's rectangle case. */
 export function inkUsesPixelHitTest(ink: number, alphaArt = false): boolean {
+  if (ink === 36) return false;
   return alphaArt || PIXEL_TEST_INKS.has(ink);
 }
 
@@ -1161,19 +1178,12 @@ export function spritePixelHitTest(
   if (px < 0 || py < 0 || px >= w || py >= h) return true;
   // A hole in the DISPLAYED pixels settles it: the click belongs to the sprite
   // underneath. Asking the sprite's own source image ("is the art opaque here?")
-  // as well would keep pixels the ink keyed away — and those pixels are exactly
-  // the ones the player can see through. The navigator's breadcrumb strip is the
-  // case that pinned it: `nav_roomlistBackLinks` is an ink-36 element whose
-  // runtime image is the rendered history text, so ink 36 keys its background to
-  // nothing while the source image stays opaque white there; granting it the
-  // whole rectangle made it swallow the clicks aimed at `nav_tb_guestRooms` and
-  // `nav_tb_publicRooms` — tabs that ARE drawn right there and ARE clickable in
-  // the reference client. The same grant stole the room list's own surface for
-  // `nav_roomlist_hd` and `nav_hidefull`, whose keyed-away text images sit on
-  // top of the list.
+  // would instead keep pixels the ink keyed away — and those pixels are exactly
+  // the ones the player can see through.
   //
-  // The inks that cannot key at all still own their rectangle (see
-  // `inkUsesPixelHitTest`), and MISSING pixels still fall back to the rectangle
+  // Only the matte ink family (8, and the keying cousins 4/7, plus artwork with
+  // its own alpha) reaches this line at all: ink 36 answers the rectangle rule in
+  // `inkUsesPixelHitTest`, and MISSING pixels still fall back to the rectangle
   // above, so a surface that has not been baked yet can never make a sprite
   // unclickable.
   return pixels[(py * w + px) * 4 + 3] !== 0;

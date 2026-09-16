@@ -883,11 +883,17 @@ test('spritePixelHitTest: keyed/alpha art uses its displayed pixels, other inks 
   assert.equal(spritePixelHitTest(8, data, 4, 4, 0, 0), false, 'ink 8: unpainted (zero-filled) pixel falls through');
   fill(3, 3, 0, 0, 0, 0); // a second explicit hole, away from the edges
   assert.equal(spritePixelHitTest(8, data, 4, 4, 3, 3), false, 'ink 8: every transparent pixel falls through, not only a corner');
-  // Ink 36 (background transparent), 4 and 7 key pixels too, so they use the
+  // Inks 4 (not-copy) and 7 (not-ghost) key pixels too, so they use the
   // displayed-pixel rule as well.
-  assert.equal(spritePixelHitTest(36, data, 4, 4, 2, 2), false, 'ink 36: transparent pixel falls through');
   assert.equal(spritePixelHitTest(4, data, 4, 4, 2, 2), false, 'ink 4: transparent pixel falls through');
   assert.equal(spritePixelHitTest(7, data, 4, 4, 2, 2), false, 'ink 7: transparent pixel falls through');
+  // Ink 36 (Background Transparent) is NOT one of them, even when the buffer is
+  // 32-bit: Director names matte as the only ink whose active area is the
+  // displayed image, and the corpus relies on the rectangle for its invisible
+  // `shadow.pixel` hotspots — the minigame `game_area`s above all, where a blank
+  // element has to swallow the shot (see the minigame hotspot test below).
+  assert.equal(spritePixelHitTest(36, data, 4, 4, 2, 2), true, 'ink 36: rectangle rule, transparent pixel still ours');
+  assert.equal(spritePixelHitTest(36, data, 4, 4, 2, 2, true), true, 'ink 36 + alpha art: still the rectangle');
   // Every OTHER ink keeps Director's rectangle rule: the sprite owns the whole
   // rectangle even where the buffer is transparent, so a composited window
   // panel / flat fill cannot open a click hole in the chrome (the navigator's
@@ -900,7 +906,8 @@ test('spritePixelHitTest: keyed/alpha art uses its displayed pixels, other inks 
   assert.equal(spritePixelHitTest(0, data, 4, 4, 2, 2, true), false, 'ink 0 + alpha art: transparent pixel falls through');
   assert.equal(spritePixelHitTest(0, data, 4, 4, 1, 1, true), true, 'ink 0 + alpha art: opaque pixel hits');
   assert.equal(inkUsesPixelHitTest(8), true, 'ink 8 uses the pixel rule');
-  assert.equal(inkUsesPixelHitTest(36), true, 'ink 36 uses the pixel rule');
+  assert.equal(inkUsesPixelHitTest(36), false, 'ink 36 uses the rectangle rule (Director names matte only)');
+  assert.equal(inkUsesPixelHitTest(36, true), false, 'ink 36 stays a rectangle case even for 32-bit art');
   assert.equal(inkUsesPixelHitTest(0), false, 'ink 0 uses the rectangle rule');
   assert.equal(inkUsesPixelHitTest(0, true), true, 'alpha art uses the pixel rule whatever the ink');
   // Missing surface / out-of-bounds must stay a HIT: the rectangle is the
@@ -912,22 +919,18 @@ test('spritePixelHitTest: keyed/alpha art uses its displayed pixels, other inks 
   assert.equal(spritePixelHitTest(8, data, 4, 4, -1, 2), true, 'negative coord -> rect hit');
 });
 
-test('spritePixelHitTest: a keyed-away pixel belongs to what is DRAWN behind it (navigator back links)', () => {
-  // The navigator's breadcrumb strip is `nav_roomlistBackLinks`: an ink-36
+test('spritePixelHitTest: an ink-36 element owns its rectangle (navigator back links)', () => {
+  // `nav_roomlistBackLinks` is the navigator's breadcrumb strip: an ink-36
   // element whose buffer is a runtime `image(w,h,32)` the movie feeds the
   // rendered history text into. Ink 36 keys that feed's background colour away,
-  // so BETWEEN the glyphs the RENDERED buffer is empty — and those empty pixels
-  // are the ones the player sees THROUGH to the element behind, so they have to
-  // behave like a hole.
-  //
-  // Granting the element its source image instead ("the art is opaque there")
-  // kept the whole 296x136 rect for it, and that rect covers the top of
-  // `nav_tb_guestRooms` / `nav_tb_publicRooms`: both tabs ARE drawn in that band
-  // and ARE clickable in the reference client, yet every click on them was
-  // routed to the invisible part of the strip (measured live: 498 + 18 pixels of
-  // visible-but-unclickable tab). The same grant stole the room list's surface
-  // for `nav_roomlist_hd` / `nav_hidefull`, whose keyed-away text images sit on
-  // top of the list panel.
+  // so BETWEEN the glyphs the rendered buffer is empty — but the element is still
+  // the sprite Director gives the click to, because matte is the only ink with
+  // an image-shaped active area. The movie then decides for itself:
+  // `Room_Interface_Class::validateEvent` (hh_room/0003:798) samples
+  // `tSpr.member.image.getPixel(...)` on the ink-36 sprite the rollover
+  // returned, hides it and re-dispatches the event BELOW when that pixel is
+  // `#FFFFFF`. That branch is unreachable if the engine has already done the
+  // pixel test for it.
   const { data: rendered, fill: fillRendered } = makeImage(6, 3);
   // Ink 36 keys the feed's background off, so the rendered buffer keeps only the
   // glyph pixels (columns 1 and 4) and is empty everywhere else.
@@ -936,13 +939,37 @@ test('spritePixelHitTest: a keyed-away pixel belongs to what is DRAWN behind it 
   assert.equal(alphaAt(rendered, 6, 0, 0), 0, 'sanity: the keyed background renders nothing');
   assert.equal(alphaAt(rendered, 6, 1, 0), 255, 'sanity: a glyph pixel is drawn');
   assert.equal(spritePixelHitTest(36, rendered, 6, 3, 1, 0, false), true, 'a glyph pixel hits');
-  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 0, 0, false), false, 'a keyed background pixel falls through to the tab behind');
-  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 3, 2, false), false, 'a hole between glyphs falls through too');
-  // 32-bit artwork still opts into the pixel rule whatever its ink (an alpha
-  // channel IS the displayed area), and an out-of-frame sample still falls back
-  // to the rectangle so a drifted mapping cannot make a sprite unclickable.
-  assert.equal(spritePixelHitTest(0, rendered, 6, 3, 0, 0, true), false, '32-bit art + no keying ink: the alpha is the active area');
+  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 0, 0, false), true, 'a keyed background pixel is still the element`s (rectangle rule)');
+  assert.equal(spritePixelHitTest(36, rendered, 6, 3, 3, 2, false), true, 'a hole between glyphs is ours too');
+  // 32-bit artwork with a MATTE ink still opts into the pixel rule (an alpha
+  // channel IS the displayed area there), and an out-of-frame sample still falls
+  // back to the rectangle so a drifted mapping cannot make a sprite unclickable.
+  assert.equal(spritePixelHitTest(0, rendered, 6, 3, 0, 0, true), false, '32-bit art + matte ink: the alpha is the active area');
   assert.equal(spritePixelHitTest(36, rendered, 6, 3, 99, 99, false), true, 'out-of-frame -> rect hit');
+});
+
+test('spritePixelHitTest: the minigame click overlays own their blank rectangle (battleships / chess / tic tac toe)', () => {
+  // Every minigame declares its board as a stretched 1x1 `shadow.pixel` image
+  // element, `#ink: 36` for battleships + chess and `#ink: 8` for tic tac toe,
+  // and the board art is drawn INTO that element's buffer.
+  //
+  // Battleships clears it on each of the player's turns (`battleShipMyTurn`
+  // calls `clearBuffer()` + `clearImage()`, which fill with the Layout Parser's
+  // default `#bgColor: rgb(255,255,255)`) and then expects the player to click a
+  // block to fire: the element displays NOTHING and the click has to reach it
+  // anyway. Measured live, the ink-36 pixel rule sent every one of those clicks
+  // to `BS_game_bg` and no shot could be fired at all.
+  const { data: blank, fill } = makeImage(9, 9);
+  for (let y = 0; y < 9; y++) for (let x = 0; x < 9; x++) fill(x, y, 0, 0, 0, 0);
+  assert.equal(alphaAt(blank, 9, 4, 4), 0, 'sanity: the cleared overlay renders nothing');
+  assert.equal(spritePixelHitTest(36, blank, 9, 9, 4, 4, true), true, 'battleships/chess blank game_area: the click is ours (ink 36 = rectangle)');
+  assert.equal(spritePixelHitTest(36, blank, 9, 9, 0, 0, true), true, '...at every block, corner included');
+  // Tic tac toe is matte, so it only owns the pixels it actually draws. Its
+  // board is fed in immediately on open, which is why it works there — and the
+  // blank state must stay click-through, or the window beneath loses its clicks.
+  assert.equal(spritePixelHitTest(8, blank, 9, 9, 4, 4, true), false, 'tic tac toe before the board is drawn: matte pixel rule, falls through');
+  const { data: board } = makeImage(9, 9);
+  assert.equal(spritePixelHitTest(8, board, 9, 9, 4, 4, true), true, 'tic tac toe with the board drawn: the element owns it');
 });
 
 test('matte keys the opaque white block on a transparent-bordered avatar canvas (respect flash / x-ray)', () => {

@@ -468,6 +468,18 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   keyboardFocusSprite = 0;
   lastKey = '';
   lastKeyCode = 0;
+  /** When the last key was PRESSED, for `the lastKey`. Director defines that
+   *  player property as "the time in ticks (1 tick = 1/60 of a second) since the
+   *  last key was pressed" (drmx2004_scripting_ref.txt:33058), i.e. a STOPWATCH
+   *  that restarts on every keyDown — never the key itself. Wobble Squabble
+   *  (`Paalu_Interface_Class::update`) is the corpus's only reader and gates its
+   *  whole input on it: `if the lastKey < the timer then …consume the key…
+   *  startTimer()`, with `the timer` reset by `startTimer()` after each action.
+   *  Returning a character instead made that gate read `"q" < 4` — a string
+   *  compared with a number, which is false — so the game ignored every key.
+   *  Initialised to boot time so the "nothing pressed yet" value behaves like
+   *  Director's. The character stays on `lastKey` for `the key`. */
+  lastKeyAt = Date.now();
   keyDownActive = false;
   keyPressed = '';
   private heldKeys: string[] = [];
@@ -1625,6 +1637,10 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     this._stopEventPending = false;
     const dKey = this.directorKeyChar(key, keyCode);
     this.lastKey = dKey;
+    // `the lastKey` is the stopwatch behind the last PRESS (see lastKeyAt), so a
+    // keyUp must not refresh it: the corpus uses the gate as a one-shot debounce
+    // and would otherwise act again on the release of the key it just consumed.
+    if (down) this.lastKeyAt = Date.now();
     this.lastKeyCode = WEB_TO_DIRECTOR_KEYCODE[keyCode] ?? keyCode;
     this.keyDownActive = down;
     if (down) {
@@ -2046,7 +2062,10 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         case 'keycode': result = this.lastKeyCode; break;
         case 'keydown': result = this.keyDownActive ? 1 : 0; break;
         case 'keyup': result = this.keyDownActive ? 0 : 1; break;
-        case 'lastkey': result = this.lastKey; break;
+        // Player property, not an alias of `the key`: ticks (1/60 s) SINCE the
+        // last key press (drmx2004_scripting_ref.txt:33058). Its siblings
+        // (`the lastClick`, `the lastRoll`) are the same shape and unused here.
+        case 'lastkey': result = Math.floor((Date.now() - this.lastKeyAt) / (1000 / 60)); break;
         case 'floatprecision': result = this.floatPrecision; cacheable = true; break;
         case 'maxinteger': result = 2147483647; cacheable = true; break;
         // Live input state, like the pointer values above: a DOM key event can
@@ -2088,7 +2107,11 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         case 'seconds': result = Math.floor(Date.now() / 1000); break;
         case 'ticks': result = Math.floor(Date.now() / 60); break;
         case 'milliseconds': result = Date.now(); break;
-        case 'timer': result = Date.now() - this.timerStart; break;
+        // TICKS (1/60 s), not milliseconds: `timer` is the Director stopwatch and
+        // the corpus converts seconds to it with `* 60` (hh_room_orient/0122
+        // `if the timer < pLightSwitchTimer + tTime * 60`) and compares it with
+        // `the lastKey`, also ticks. `the milliSeconds` is the ms clock.
+        case 'timer': result = Math.floor((Date.now() - this.timerStart) / (1000 / 60)); break;
         default:
           this.warn(`the ${head}: unsupported property`);
           result = VOID;
