@@ -8169,6 +8169,228 @@ test('typing goes into the focused editable field member (Director native editin
   assert.equal(e.getMemberProp(ref, 'text'), 'h');
 });
 
+test('the selStart/selEnd field selection is a caret, not the keyboard focus', () => {
+  // Login Interface (hh_entry 0006:202) and Room Kiosk Interface (0003:412)
+  // park the insertion point after an autofilled password with
+  //   set the selStart to tCount
+  //   set the selEnd to tCount
+  // Director: an EMPTY selection reports the caret OFFSET, so a 7-char field
+  // reads 7 at the end — PostIt Manager (0022:179) gates its "only add" rule on
+  // `if the selStart < length(pText)`, which is only false with the caret at the
+  // end. A real selection is reported 1-based inclusive (`selStart = 3`,
+  // `selEnd = 5` selects "cde" of "abcdefg", drmx2004:39400) and `the
+  // selection` is the highlighted substring. The engine used to lump
+  // selStart/selEnd in with `the keyboardFocusSprite = ...`, so the corpus's
+  // own autofill moved the FOCUS to channel tCount and typing went nowhere.
+  const e = new DirectorEngine();
+  e.addScriptMember('Setup', 'score', 'on exitFrame\nend');
+  const m = e.addScriptMember('Fld', 'unknown', '');
+  m.kind = 'text';
+  const ref = e.getMember(m.number, m.castLibNumber)!;
+  e.setMemberProp(ref, 'editable', 1);
+  e.setMemberProp(ref, 'text', 'abcdefg');
+  e.setSpriteProp(e.getSprite(12), 'member', ref);
+  e.setThe('keyboardfocussprite', [], 12);
+  // through the parser, exactly as the corpus writes it
+  e.addScriptMember(
+    'Park',
+    'movie',
+    ['on park me, tPos', '  set the selStart to tPos', '  set the selEnd to tPos', '  return tPos', 'end'].join('\n'),
+  );
+  const parkScript = e.resolveScript('Park')!;
+  const park = parkScript.handlers.find((x) => x.name.toLowerCase() === 'park')!;
+  const parkCaret = (pos: number): void => {
+    e.interp.callHandler(parkScript, park, [pos], null, new Set());
+  };
+  parkCaret(7);
+  assert.equal(e.interp.evalExpressionString('the keyboardFocusSprite'), 12, 'selStart must not move the focus');
+  assert.equal(e.interp.evalExpressionString('the selStart'), 7);
+  assert.equal(e.interp.evalExpressionString('the selEnd'), 7);
+  assert.equal(e.interp.evalExpressionString('the selection'), '');
+  // the caret is where typing goes: mid-field, not appended
+  parkCaret(3);
+  assert.equal(e.interp.evalExpressionString('the selStart'), 3);
+  e.dispatchKeyEvent('keyDown', 'X', 88, {});
+  assert.equal(e.getMemberProp(ref, 'text'), 'abcXdefg', 'typed at the caret');
+  // With a selection standing, the two properties address its EDGES, 1-based
+  // inclusive like the scripting reference's "cde" example.
+  assert.equal(e.selectAllFocusedField(), true);
+  e.setThe('selstart', [], 2);
+  e.setThe('selend', [], 5);
+  assert.equal(e.interp.evalExpressionString('member("Fld").selStart'), 2, 'the member property reads too');
+  assert.equal(e.interp.evalExpressionString('the selection'), 'bcXd');
+  e.dispatchKeyEvent('keyDown', 'q', 81, {});
+  assert.equal(e.getMemberProp(ref, 'text'), 'aqefg', 'the selection was replaced');
+});
+
+test('Ctrl/Cmd+A selects the whole field and typing replaces it', () => {
+  // Director's native editable-field shortcuts: Ctrl/Cmd+A highlights the whole
+  // field, and the next typed character (or Backspace) replaces the highlight.
+  // Before this, Ctrl+A fell through to the insertion branch as a plain 'a' and
+  // Ctrl+V typed a 'v' into the field.
+  const e = new DirectorEngine();
+  e.addScriptMember('Setup', 'score', 'on exitFrame\nend');
+  const m = e.addScriptMember('Fld', 'unknown', '');
+  m.kind = 'text';
+  const ref = e.getMember(m.number, m.castLibNumber)!;
+  e.setMemberProp(ref, 'editable', 1);
+  e.setSpriteProp(e.getSprite(12), 'member', ref);
+  e.setThe('keyboardfocussprite', [], 12);
+  e.setMemberProp(ref, 'text', 'hello');
+  e.dispatchKeyEvent('keyDown', 'a', 65, { ctrl: true });
+  assert.equal(e.getMemberProp(ref, 'text'), 'hello', 'Ctrl+A must not type an a');
+  assert.equal(e.interp.evalExpressionString('the selection'), 'hello');
+  assert.equal(e.interp.evalExpressionString('the selStart'), 1, 'selection is 1-based inclusive');
+  assert.equal(e.interp.evalExpressionString('the selEnd'), 5);
+  e.dispatchKeyEvent('keyDown', 'z', 90, {});
+  assert.equal(e.getMemberProp(ref, 'text'), 'z', 'typing replaced the selection');
+  // Cmd+A on the Mac side of the controls, then Backspace clears the highlight
+  e.setMemberProp(ref, 'text', 'hello');
+  e.dispatchKeyEvent('keyDown', 'a', 65, { meta: true });
+  assert.equal(e.interp.evalExpressionString('the selection'), 'hello');
+  e.dispatchKeyEvent('keyDown', 'Backspace', 8, {});
+  assert.equal(e.getMemberProp(ref, 'text'), '');
+  // Option/AltGr are NOT command modifiers: macOS composes a character with
+  // Option (Option+p is 'π') and Windows AltGr reports ctrl+alt — these are the
+  // alt-code characters of U193 and they must still go into the field.
+  e.dispatchKeyEvent('keyDown', 'π', 80, { alt: true });
+  assert.equal(e.getMemberProp(ref, 'text'), 'π');
+  e.dispatchKeyEvent('keyDown', '€', 69, { ctrl: true, alt: true });
+  assert.equal(e.getMemberProp(ref, 'text'), 'π€');
+});
+
+test('clicking in an editable field puts the caret where you clicked, and a drag selects', () => {
+  // Director's own field editing: the press sets the insertion point at the
+  // clicked character (the stage is the only thing that knows where a glyph
+  // sits, so it answers through StageAdapter.caretIndexAt), and a drag with the
+  // button held extends it into a selection. Before this, a click parked the
+  // caret after the text and nothing could be drag-selected.
+  const adapter = {
+    setBackground() {},
+    resize() {},
+    refreshChannel() {},
+    setChannel() {},
+    // 8px per character, exactly like the mocked canvas in caret.test.ts
+    caretIndexAt: (_ch: number, x: number) => Math.max(0, Math.min(11, Math.round(x / 8))),
+  };
+  const e = new DirectorEngine(adapter as never);
+  e.addScriptMember('Setup', 'score', 'on exitFrame\nend');
+  const m = e.addScriptMember('Fld', 'unknown', '');
+  m.kind = 'text';
+  const ref = e.getMember(m.number, m.castLibNumber)!;
+  e.setMemberProp(ref, 'editable', 1);
+  e.setMemberProp(ref, 'text', 'hello world');
+  e.setSpriteProp(e.getSprite(12), 'member', ref);
+  e.setThe('keyboardfocussprite', [], 12);
+
+  // click at x=40 -> character 5
+  e.dispatchPointerEvent('mouseDown', 12, 40, 10);
+  e.dispatchPointerEvent('mouseUp', 12, 40, 10);
+  assert.equal(e.focusedFieldEditState()!.start, 5, 'the click positioned the caret');
+  e.dispatchKeyEvent('keyDown', 'X', 88, {});
+  assert.equal(e.getMemberProp(ref, 'text'), 'helloX world');
+
+  // drag from x=8 (1) to x=40 (5) selects "ello"
+  e.setMemberProp(ref, 'text', 'hello world');
+  e.dispatchPointerEvent('mouseDown', 12, 8, 10);
+  e.dispatchPointerEvent('mouseMove', 12, 40, 10);
+  assert.equal(e.focusedFieldSelectionText(), 'ello');
+  e.dispatchPointerEvent('mouseUp', 12, 40, 10);
+  assert.equal(e.focusedFieldSelectionText(), 'ello', 'the release keeps the selection');
+  e.dispatchKeyEvent('keyDown', 'z', 90, {});
+  assert.equal(e.getMemberProp(ref, 'text'), 'hz world');
+
+  // dragging BACKWARDS normalizes the range
+  e.setMemberProp(ref, 'text', 'hello world');
+  e.dispatchPointerEvent('mouseDown', 12, 40, 10);
+  e.dispatchPointerEvent('mouseMove', 12, 8, 10);
+  assert.equal(e.focusedFieldSelectionText(), 'ello');
+  assert.equal(e.focusedFieldEditState()!.start, 1);
+  e.dispatchPointerEvent('mouseUp', 12, 8, 10);
+  // a later move with the button up must NOT keep selecting
+  e.dispatchPointerEvent('mouseMove', 12, 80, 10);
+  assert.equal(e.focusedFieldSelectionText(), 'ello');
+});
+
+test('the field clipboard API: select-all, copy, cut, paste (embed.ts drives these)', () => {
+  // The DOM layer owns the CLIPBOARD (the `copy`/`cut`/`paste` events, which are
+  // the only synchronous, permission-free way to touch it from a page) and asks
+  // the engine what the selection is and how to change it. Ctrl+C / Ctrl+V must
+  // never reach the insertion branch on the way through.
+  const e = new DirectorEngine();
+  e.addScriptMember('Setup', 'score', 'on exitFrame\nend');
+  const m = e.addScriptMember('Fld', 'unknown', '');
+  m.kind = 'text';
+  const ref = e.getMember(m.number, m.castLibNumber)!;
+  e.setMemberProp(ref, 'editable', 1);
+  e.setMemberProp(ref, 'text', 'hello world');
+  e.setSpriteProp(e.getSprite(12), 'member', ref);
+  e.setThe('keyboardfocussprite', [], 12);
+  assert.equal(e.focusedFieldSelectionText(), '', 'no selection to copy yet');
+  assert.equal(e.cutFocusedFieldSelection(), '');
+  assert.equal(e.selectAllFocusedField(), true);
+  e.setThe('selstart', [], 1);
+  e.setThe('selend', [], 5);
+  assert.equal(e.focusedFieldSelectionText(), 'hello');
+  // Ctrl+C is a no-op inside the field, Ctrl+V is not a 'v'
+  e.dispatchKeyEvent('keyDown', 'c', 67, { ctrl: true });
+  e.dispatchKeyEvent('keyDown', 'v', 86, { meta: true });
+  assert.equal(e.getMemberProp(ref, 'text'), 'hello world');
+  assert.equal(e.cutFocusedFieldSelection(), 'hello', 'Ctrl+X hands the text to the page');
+  assert.equal(e.getMemberProp(ref, 'text'), ' world');
+  assert.equal(e.interp.evalExpressionString('the selStart'), 0, 'the caret sits where the cut was');
+  assert.equal(e.insertFocusedFieldText('hi'), true);
+  assert.equal(e.getMemberProp(ref, 'text'), 'hi world');
+  const state = e.focusedFieldEditState()!;
+  assert.equal(state.text, 'hi world');
+  assert.equal(state.start, 2);
+  assert.equal(state.end, 2);
+  assert.equal(e.insertFocusedFieldText(''), false, 'an empty clipboard inserts nothing');
+  // pasting over a highlight replaces it, like typing
+  assert.equal(e.selectAllFocusedField(), true);
+  assert.equal(e.insertFocusedFieldText('let me in'), true);
+  assert.equal(e.getMemberProp(ref, 'text'), 'let me in');
+  // no editable field focused → the page must fall through to its own handling
+  e.setThe('keyboardfocussprite', [], 0);
+  assert.equal(e.focusedFieldMember(), null);
+  assert.equal(e.focusedFieldEditState(), null);
+  assert.equal(e.focusedFieldSelectionText(), '');
+  assert.equal(e.selectAllFocusedField(), false);
+  assert.equal(e.insertFocusedFieldText('x'), false);
+  assert.equal(e.getMemberProp(ref, 'text'), 'let me in');
+});
+
+test('arrow keys move the field caret (typed text no longer always appends)', () => {
+  // The room chat input / name fields are Director editable text members, so
+  // Left/Right/Home/End move the insertion point instead of inserting the
+  // arrow's control character (\x1C-\x1D) or doing nothing.
+  const e = new DirectorEngine();
+  e.addScriptMember('Setup', 'score', 'on exitFrame\nend');
+  const m = e.addScriptMember('Fld', 'unknown', '');
+  m.kind = 'text';
+  const ref = e.getMember(m.number, m.castLibNumber)!;
+  e.setMemberProp(ref, 'editable', 1);
+  e.setMemberProp(ref, 'text', 'abc');
+  e.setSpriteProp(e.getSprite(12), 'member', ref);
+  e.setThe('keyboardfocussprite', [], 12);
+  assert.equal(e.interp.evalExpressionString('the selStart'), 3, 'focus lands after the text');
+  e.dispatchKeyEvent('keyDown', 'ArrowLeft', 37, {});
+  assert.equal(e.interp.evalExpressionString('the selStart'), 2);
+  e.dispatchKeyEvent('keyDown', 'ArrowLeft', 37, {});
+  e.dispatchKeyEvent('keyDown', 'ArrowLeft', 37, {});
+  e.dispatchKeyEvent('keyDown', 'ArrowLeft', 37, {});
+  assert.equal(e.interp.evalExpressionString('the selStart'), 0, 'clamped at the start');
+  e.dispatchKeyEvent('keyDown', 'x', 88, {});
+  assert.equal(e.getMemberProp(ref, 'text'), 'xabc');
+  e.dispatchKeyEvent('keyDown', 'End', 35, {});
+  assert.equal(e.interp.evalExpressionString('the selStart'), 4);
+  e.dispatchKeyEvent('keyDown', 'Delete', 46, {});
+  assert.equal(e.getMemberProp(ref, 'text'), 'xabc', 'nothing to delete at the end');
+  e.dispatchKeyEvent('keyDown', 'Home', 36, {});
+  e.dispatchKeyEvent('keyDown', 'Delete', 46, {});
+  assert.equal(e.getMemberProp(ref, 'text'), 'abc', 'Delete removes at the caret');
+});
+
 test('boxType #limit live text clips at the field box (chat input / tooltips)', () => {
   // The room bar chat input (0035_text_room_bar.window.txt): #boxType: #limit,
   // #wordWrap: 0 — the typed text is cut off at the field width. The

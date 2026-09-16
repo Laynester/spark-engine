@@ -132,6 +132,14 @@ export interface StageAdapter {
    * When absent the engine falls back to its own sprite rect/alpha test.
    */
   pointerSpriteAt?(x: number, y: number): number;
+  /**
+   * Which character offset of an editable text channel a stage point falls on —
+   * Director's click-to-position and drag-select inside a field. Only the stage
+   * knows where a glyph sits (the live text is laid out by the renderer, and the
+   * rasterizer snaps glyphs to integer columns), so it answers; without it a
+   * click leaves the caret where focus parked it (after the text).
+   */
+  caretIndexAt?(channel: number, x: number, y: number): number | null;
 }
 
 interface WindowData {
@@ -466,6 +474,10 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
   _stopEventPending = false;
   onCastLoaded?: (castName: string) => void;
   keyboardFocusSprite = 0;
+  /** Per-member editable-field caret/selection (see fieldSelection). */
+  private fieldSelections = new Map<number, { start: number; end: number }>();
+  /** The press that may be dragging a selection inside a field. */
+  private fieldDrag: { channel: number; anchor: number } | null = null;
   lastKey = '';
   lastKeyCode = 0;
   /** When the last key was PRESSED, for `the lastKey`. Director defines that
@@ -1545,16 +1557,21 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       this.doubleClick = now - this.lastMouseDownTime < 500;
       this.lastMouseDownTime = now;
       this.clickOnChannel = this.hitSpriteAt(x, y);
-      const m = channel > 0 && channel < this.channels.length ? this.channels[channel].member : undefined;
-      if (m && m.kind === 'text' && m.textProps?.get('editable')) this.keyboardFocusSprite = channel;
-      else this.keyboardFocusSprite = 0;
+      this.focusFieldAt(channel);
+      this.beginFieldPress(channel, x, y);
     }
     if (type === 'mouseUp') {
       this.mouseButton = 'up';
+      this.fieldDrag = null;
       if (this.mouseDownChannel !== 0 && channel !== this.mouseDownChannel) {
         this.dispatchToChannelHandlers(this.mouseDownChannel, 'mouseupoutside', []);
       }
       this.mouseDownChannel = 0;
+    }
+    // A field drag selects natively, i.e. BEFORE the frame/channel handlers see
+    // the move (Director's field editor is in front of the movie).
+    if (type === 'mouseMove' && this.fieldDrag && this.mouseButton === 'down') {
+      this.dragFieldSelection(x, y);
     }
     const lower = type.toLowerCase();
     for (const fs of this.frameScripts) {
@@ -1675,14 +1692,249 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     const member = this.channels[focus].member;
     if (!member) return;
     if (member.kind !== 'text' || !member.textProps?.get('editable')) return;
+    // The shortcuts (Cmd/Ctrl+A/C/X/V) belong to the browser layer for the
+    // clipboard half — embed.ts drives it from the key press — and to Director
+    // here for select-all. A HELD COMMAND modifier must never reach the
+    // insertion branch: that is how `the keyboardFocusSprite` getting the focus
+    // made Ctrl+A type an `a` and Ctrl+V a `v`. Option is NOT a command
+    // modifier here: on macOS it composes the character (Option+p is `π`) and on
+    // Windows AltGr reports ctrl+alt — both must still type, which is how the
+    // corpus's alt-code characters (U193) get in.
+    const altGraph = this.controlDown && this.optionDown;
+    const mod = !altGraph && (this.commandDown || this.controlDown);
+    if (mod && key.length === 1 && key.toLowerCase() === 'a') {
+      this.selectAllFocusedField();
+      this._stopEventPending = false;
+      return;
+    }
+    if (mod) {
+      this._stopEventPending = false;
+      return;
+    }
     const current = toLingoString(member.text ?? '');
-    let next = current;
-    if (keyCode === 8) next = current.slice(0, -1);
-    else if (key.length === 1 && keyCode >= 32) next = current + key;
-    if (next !== current) {
-      this.setMemberProp(new LMemberRefClass(member.number, member.name, member.kind, member.castLibNumber, this), 'text', next);
+    const sel = this.fieldSelection(member, current);
+    const n = current.length;
+    const moveCaret = (at: number): void => this.setFieldSelection(member, at, at);
+    if (keyCode === 8) {
+      // Backspace: delete the selection, else the character before the caret.
+      if (sel.start !== sel.end) this.deleteFieldSelection(member);
+      else if (sel.start > 0) {
+        this.replaceFieldText(member, current.slice(0, sel.start - 1) + current.slice(sel.start));
+        moveCaret(sel.start - 1);
+      }
+    } else if (key === 'Delete' || keyCode === 46) {
+      if (sel.start !== sel.end) this.deleteFieldSelection(member);
+      else if (sel.start < n) {
+        this.replaceFieldText(member, current.slice(0, sel.start) + current.slice(sel.start + 1));
+        moveCaret(sel.start);
+      }
+    } else if (key === 'ArrowLeft') {
+      moveCaret(sel.start === sel.end ? Math.max(0, sel.start - 1) : sel.start);
+    } else if (key === 'ArrowRight') {
+      moveCaret(sel.start === sel.end ? Math.min(n, sel.end + 1) : sel.end);
+    } else if (key === 'ArrowUp' || key === 'Home') {
+      // Single-line fields: Director climbs to the first line, i.e. the start.
+      moveCaret(0);
+    } else if (key === 'ArrowDown' || key === 'End') {
+      moveCaret(n);
+    } else if (key.length === 1 && keyCode >= 32) {
+      // Director inserts at the insertion point and the highlight is replaced.
+      this.replaceFieldText(member, current.slice(0, sel.start) + key + current.slice(sel.end));
+      moveCaret(sel.start + 1);
     }
     this._stopEventPending = false;
+  }
+
+  /**
+   * Director's editable-field selection, per cast member (the docs call
+   * `selStart`/`selEnd` cast member properties; `the selStart` reads the field
+   * the user is in). Held as a pair of 0-based caret offsets [start, end] into
+   * the member text, `start === end` meaning "no selection".
+   *
+   * The Lingo face of this is deliberately asymmetric, exactly like Director's:
+   * an EMPTY selection reports the caret offset (so the end of a 7-char field
+   * reads 7 — the idiom the corpus autofillers write, and what PostIt Manager's
+   * `if the selStart < length(pText)` gate tests), while a real selection
+   * reports the 1-based first and last selected character
+   * (drmx2004_scripting_ref.txt:39400: `selStart = 3`, `selEnd = 5` selects
+   * "cde" from "abcdefg").
+   */
+  private fieldSelection(member: Member, text: string): { start: number; end: number } {
+    const key = this.memberGlobalNum(member.castLibNumber, member.number);
+    const n = text.length;
+    const stored = this.fieldSelections.get(key);
+    const sel = stored ?? { start: n, end: n };
+    sel.start = Math.max(0, Math.min(n, sel.start));
+    sel.end = Math.max(sel.start, Math.min(n, sel.end));
+    this.fieldSelections.set(key, sel);
+    return sel;
+  }
+
+  private setFieldSelection(member: Member, start: number, end: number): void {
+    const key = this.memberGlobalNum(member.castLibNumber, member.number);
+    const s = Math.max(0, Math.min(start, end));
+    this.fieldSelections.set(key, { start: s, end: Math.max(s, end) });
+  }
+
+  private replaceFieldText(member: Member, text: string): void {
+    this.setMemberProp(new LMemberRefClass(member.number, member.name, member.kind, member.castLibNumber, this), 'text', text);
+  }
+
+  /** The editable text member the keyboard is in, or null. */
+  focusedFieldMember(): Member | null {
+    const ch = this.keyboardFocusSprite;
+    if (ch <= 0 || ch >= this.channels.length) return null;
+    const m = this.channels[ch].member;
+    if (!m || m.kind !== 'text' || !m.textProps?.get('editable')) return null;
+    return m;
+  }
+
+  /** Focus from a CLICK: Director moves the keyboard into an editable field and
+   *  drops it to 0 for anything else (a button, the drag bar, empty stage). */
+  private focusFieldAt(channel: number): void {
+    const m = channel > 0 && channel < this.channels.length ? this.channels[channel].member : undefined;
+    if (!m || m.kind !== 'text' || !m.textProps?.get('editable')) {
+      this.keyboardFocusSprite = 0;
+      return;
+    }
+    this.setKeyboardFocus(channel);
+  }
+
+  /** `the keyboardFocusSprite = n`: Director takes ANY channel number (the
+   *  corpus writes its own spriteNum, and `0` disables typing), so the value is
+   *  stored as written; only an editable field gets an insertion point parked in
+   *  it, and only when the focus actually MOVES — re-parking on every write
+   *  would drop a selection the user just made. */
+  /**
+   * A press inside an editable field is Director's own field press: it sets the
+   * insertion point at the clicked character and starts a drag selection (the
+   * move handler extends it, the release ends it). The stage answers where the
+   * character is (StageAdapter.caretIndexAt); with no answer the caret stays
+   * where the focus parked it, which is the pre-existing behaviour.
+   */
+  private beginFieldPress(channel: number, x: number, y: number): void {
+    this.fieldDrag = null;
+    const m = this.focusedFieldMember();
+    if (!m || channel !== this.keyboardFocusSprite) return;
+    const idx = this.adapter?.caretIndexAt?.(channel, x, y);
+    if (idx === null || idx === undefined) return;
+    const text = toLingoString(m.text ?? '');
+    const at = Math.max(0, Math.min(text.length, Math.round(idx)));
+    this.setFieldSelection(m, at, at);
+    this.fieldDrag = { channel, anchor: at };
+  }
+
+  /** Extend the drag selection to the character under the pointer. */
+  private dragFieldSelection(x: number, y: number): void {
+    const drag = this.fieldDrag;
+    const m = this.focusedFieldMember();
+    if (!drag || !m || this.keyboardFocusSprite !== drag.channel) {
+      this.fieldDrag = null;
+      return;
+    }
+    const idx = this.adapter?.caretIndexAt?.(drag.channel, x, y);
+    if (idx === null || idx === undefined) return;
+    const text = toLingoString(m.text ?? '');
+    const at = Math.max(0, Math.min(text.length, Math.round(idx)));
+    this.setFieldSelection(m, Math.min(drag.anchor, at), Math.max(drag.anchor, at));
+  }
+
+  private setKeyboardFocus(channel: number): void {
+    const prev = this.keyboardFocusSprite;
+    this.keyboardFocusSprite = Math.max(0, Math.round(channel));
+    if (prev === this.keyboardFocusSprite) return;
+    const m = this.focusedFieldMember();
+    if (!m) return;
+    const text = toLingoString(m.text ?? '');
+    this.setFieldSelection(m, text.length, text.length);
+  }
+
+  /** The highlighted text of the focused field (Director's `the selection`). */
+  focusedFieldSelectionText(): string {
+    const m = this.focusedFieldMember();
+    if (!m) return '';
+    const text = toLingoString(m.text ?? '');
+    const sel = this.fieldSelection(m, text);
+    return text.slice(sel.start, sel.end);
+  }
+
+  /** `the selStart` / `the selEnd` — see fieldSelection for the mapping. */
+  private fieldSelGet(member: Member | null, which: 'start' | 'end'): number {
+    if (!member) return 0;
+    return this.memberSelGet(member, which);
+  }
+
+  private memberSelGet(member: Member, which: 'start' | 'end'): number {
+    const text = toLingoString(member.text ?? '');
+    const sel = this.fieldSelection(member, text);
+    if (sel.start === sel.end) return sel.start;
+    return which === 'start' ? sel.start + 1 : sel.end;
+  }
+
+  private fieldSelSet(member: Member | null, which: 'start' | 'end', value: LVal): void {
+    const m = member;
+    if (!m || m.kind !== 'text') return;
+    const text = toLingoString(m.text ?? '');
+    const n = text.length;
+    const sel = this.fieldSelection(m, text);
+    const p = Math.max(0, Math.round(asNum(value) || 0));
+    if (sel.start === sel.end) {
+      // The autofill idiom: both halves are set to length(text) and the caret
+      // must land AFTER the last character (Director reads 7 back for a 7-char
+      // field, so the position is the offset itself, not offset + 1).
+      const caret = Math.min(n, p);
+      this.setFieldSelection(m, caret, caret);
+      return;
+    }
+    if (which === 'start') this.setFieldSelection(m, Math.max(0, Math.min(p - 1, sel.end)), sel.end);
+    else this.setFieldSelection(m, sel.start, Math.max(sel.start, Math.min(p, n)));
+  }
+
+  /** Director's Ctrl/Cmd+A. False when no editable field holds the keyboard. */
+  selectAllFocusedField(): boolean {
+    const m = this.focusedFieldMember();
+    if (!m) return false;
+    const text = toLingoString(m.text ?? '');
+    this.setFieldSelection(m, 0, text.length);
+    return true;
+  }
+
+  /** Cut the highlight, returning the removed text ('' when nothing to cut). */
+  cutFocusedFieldSelection(): string {
+    return this.deleteFieldSelection(this.focusedFieldMember());
+  }
+
+  private deleteFieldSelection(member: Member | null): string {
+    if (!member) return '';
+    const text = toLingoString(member.text ?? '');
+    const sel = this.fieldSelection(member, text);
+    if (sel.start === sel.end) return '';
+    const removed = text.slice(sel.start, sel.end);
+    this.replaceFieldText(member, text.slice(0, sel.start) + text.slice(sel.end));
+    this.setFieldSelection(member, sel.start, sel.start);
+    return removed;
+  }
+
+  /** Paste/insert text at the insertion point (the selection is replaced).
+   *  False when no editable field holds the keyboard. */
+  insertFocusedFieldText(text: string): boolean {
+    const m = this.focusedFieldMember();
+    if (!m || !text) return false;
+    const current = toLingoString(m.text ?? '');
+    const sel = this.fieldSelection(m, current);
+    this.replaceFieldText(m, current.slice(0, sel.start) + text + current.slice(sel.end));
+    const caret = sel.start + text.length;
+    this.setFieldSelection(m, caret, caret);
+    return true;
+  }
+
+  /** The focused field's caret/selection, for the stage's caret + highlight. */
+  focusedFieldEditState(): { member: Member; text: string; start: number; end: number } | null {
+    const m = this.focusedFieldMember();
+    if (!m) return null;
+    const text = toLingoString(m.text ?? '');
+    const sel = this.fieldSelection(m, text);
+    return { member: m, text, start: sel.start, end: sel.end };
   }
 
   private dispatchToChannelHandlers(channel: number, handler: string, args: LVal[]): void {
@@ -2071,6 +2323,11 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         case 'mousev': result = this.mouseV; break;
         case 'mouseloc': result = new LPointClass(this.mouseH, this.mouseV); break;
         case 'keyboardfocussprite': result = this.keyboardFocusSprite; break;
+        // Live input state, never cached: the selection moves between two reads
+        // in the same frame (a Field Wrapper keyDown handler reads it).
+        case 'selstart': result = this.fieldSelGet(this.focusedFieldMember(), 'start'); break;
+        case 'selend': result = this.fieldSelGet(this.focusedFieldMember(), 'end'); break;
+        case 'selection': result = this.focusedFieldSelectionText(); break;
         case 'key': result = this.lastKey; break;
         case 'keypressed': result = this.keyPressed; break;
         case 'keycode': result = this.lastKeyCode; break;
@@ -2315,12 +2572,19 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         break;
       case 'exitlock':
       case 'debugplaybackenabled':
-      case 'selstart':
-      case 'selend':
       case 'mouseline':
       case 'mouseh':
+        break;
+      // NOT the focus: `set the selStart to length(x)` is how the corpus parks
+      // the caret (Login Interface 0006:202, Room Kiosk Interface 0003:412).
+      case 'selstart':
+        this.fieldSelSet(this.focusedFieldMember(), 'start', value);
+        break;
+      case 'selend':
+        this.fieldSelSet(this.focusedFieldMember(), 'end', value);
+        break;
       case 'keyboardfocussprite':
-        this.keyboardFocusSprite = Math.max(0, Math.round(asNum(value)));
+        this.setKeyboardFocus(Math.max(0, Math.round(asNum(value))));
         break;
       case 'mousev':
       case 'title':
@@ -3847,6 +4111,13 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         return 0;
       case 'paletteref':
         return member.paletteRef ?? 0;
+      // Cast member properties (drmx2004:4788-4791 lists selStart/selEnd among
+      // a field's properties); a member nobody has typed in reads 0, Director's
+      // documented default.
+      case 'selstart':
+        return member.kind === 'text' ? this.memberSelGet(member, 'start') : 0;
+      case 'selend':
+        return member.kind === 'text' ? this.memberSelGet(member, 'end') : 0;
       default:
         if (member.textProps && member.textProps.has(p)) return member.textProps.get(p)!;
         if (MEMBER_TEXT_PROPS.has(p)) return member.textProps?.get(p) ?? 0;
@@ -3869,6 +4140,10 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         if (ch.member === member) this.buildChannelVisual(ch);
       }
     };
+    if (p === 'selstart' || p === 'selend') {
+      if (member.kind === 'text') this.fieldSelSet(member, p === 'selstart' ? 'start' : 'end', value);
+      return;
+    }
     if (p === 'text') {
       member.text = toLingoString(value);
       member.chunkStyles = undefined;

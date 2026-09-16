@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { caretBlinkOn, caretBox, caretX } from '../stage/caret.js';
+import { textMemberCaretAt, textMemberPrefixWidth } from '../stage/text.js';
+import { Member } from '../engine/members.js';
 
 test('caret blink toggles on a half-period square wave (0.53s on / 0.53s off)', () => {
   assert.equal(caretBlinkOn(0), true);
@@ -30,6 +32,62 @@ test('caret x follows alignment and rendered text width', () => {
   assert.equal(caretX('', 100, 40), 40);
   // text wider than the box: the caret tracks the overflow (you're still typing)
   assert.equal(caretX('left', 100, 140), 140);
+});
+
+test('textMemberPrefixWidth measures the run before a caret offset', () => {
+  // The selection highlight and the moved caret both need "where does character
+  // i start inside the field?" — the width of everything before it in the
+  // member's own font. Measured with a canvas in the browser, and monotonically
+  // growing (never NaN) when there is no DOM at all.
+  const m = new Member(1, 1, 'int_speechtext_text', 'text');
+  m.text = 'hello world';
+  m.font = 'Volter';
+  m.fontSize = 9;
+  const ctxMock = {
+    font: '',
+    measureText: (str: string) => ({ width: str.length * 8 }),
+  };
+  const { document } = globalThis as { document?: unknown };
+  (globalThis as Record<string, unknown>).document = {
+    createElement: () => ({ width: 0, height: 0, getContext: () => ctxMock }),
+  };
+  try {
+    assert.equal(textMemberPrefixWidth(m, m.text, 0), 0);
+    assert.equal(textMemberPrefixWidth(m, m.text, 5), 40);
+    assert.equal(textMemberPrefixWidth(m, m.text, m.text.length), 88);
+    // clamped past the end / before the start
+    assert.equal(textMemberPrefixWidth(m, m.text, 99), 88);
+    assert.equal(textMemberPrefixWidth(m, m.text, -3), 0);
+  } finally {
+    if (document) (globalThis as Record<string, unknown>).document = document;
+    else delete (globalThis as Record<string, unknown>).document;
+  }
+});
+
+test('textMemberCaretAt picks the offset nearest a click inside the text block', () => {
+  // The click-to-position half of Director's field editing: the stage measures
+  // the glyph run, the engine only gets the offset. 8px per character here.
+  const m = new Member(1, 1, 'int_speechtext_text', 'text');
+  m.text = 'hello world';
+  m.font = 'Volter';
+  m.fontSize = 9;
+  const ctxMock = { font: '', measureText: (str: string) => ({ width: str.length * 8 }) };
+  const { document } = globalThis as { document?: unknown };
+  (globalThis as Record<string, unknown>).document = {
+    createElement: () => ({ width: 0, height: 0, getContext: () => ctxMock }),
+  };
+  try {
+    assert.equal(textMemberCaretAt(m, m.text, 40), 5);
+    assert.equal(textMemberCaretAt(m, m.text, 0), 0);
+    assert.equal(textMemberCaretAt(m, m.text, 4), 0, 'ties round toward the earlier offset');
+    assert.equal(textMemberCaretAt(m, m.text, 5), 1);
+    assert.equal(textMemberCaretAt(m, m.text, -20), 0, 'left of the text clamps to the start');
+    assert.equal(textMemberCaretAt(m, m.text, 999), 11, 'right of the text clamps to the end');
+    assert.equal(textMemberCaretAt(m, '', 50), 0, 'an empty field has one position');
+  } finally {
+    if (document) (globalThis as Record<string, unknown>).document = document;
+    else delete (globalThis as Record<string, unknown>).document;
+  }
 });
 
 test('caret height follows the font, not the field box', () => {

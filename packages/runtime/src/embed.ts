@@ -157,6 +157,11 @@ export class SparkElement extends SparkBase {
       phase('movie booted');
       await this.loadFonts(engine);
 
+      // The Director field the keyboard is in, driven by the DOM clipboard
+      // events below. `paste` may not fire on a page whose focus is not in an
+      // editable element (the canvas holds it here), so a Ctrl/Cmd+V that never
+      // saw one falls back to the async clipboard API.
+      let pasteSeen = false;
       const onKeyDown = (e: KeyboardEvent): void => {
         if (!this.engine) return;
         this.engine.dispatchKeyEvent('keyDown', e.key, e.keyCode, {
@@ -165,7 +170,57 @@ export class SparkElement extends SparkBase {
           ctrl: e.ctrlKey,
           meta: e.metaKey,
         });
-        if (this.engine.keyboardFocusSprite > 0 &&
+        const engine = this.engine;
+        // Ctrl+Alt together is AltGr on a Windows keyboard (it TYPES a
+        // character), so it is not a command modifier — same rule as the
+        // engine's insertion gate.
+        const mod = (e.ctrlKey || e.metaKey) && !(e.ctrlKey && e.altKey);
+        if (mod && (e.key === 'a' || e.key === 'A')) {
+          // Select the field's text, not the whole page.
+          if (engine.selectAllFocusedField()) e.preventDefault();
+          return;
+        }
+        // Chrome fires NO copy/cut/paste event while the focus is a canvas: the
+        // editing command never runs, so the document listeners below stay quiet
+        // (measured: copyEvents/cutEvents/pasteEvents all 0 with the field
+        // focused — scripts/cdp-field-clipboard.mjs). The clipboard therefore has
+        // to be driven from here, and the listeners are only a path for hosts
+        // that do hand the events over.
+        if (mod && (e.key === 'c' || e.key === 'C')) {
+          const text = engine.focusedFieldSelectionText();
+          if (text) {
+            e.preventDefault();
+            this.writeClipboard(text);
+          }
+          return;
+        }
+        if (mod && (e.key === 'x' || e.key === 'X')) {
+          const text = engine.cutFocusedFieldSelection();
+          if (text) {
+            e.preventDefault();
+            this.writeClipboard(text);
+          }
+          return;
+        }
+        if (mod && (e.key === 'v' || e.key === 'V') && engine.focusedFieldMember()) {
+          // The async read is the only way in when no paste event arrives; when
+          // one does (the listener below) it wins and this bails out.
+          pasteSeen = false;
+          globalThis.setTimeout(() => {
+            if (pasteSeen || !engine.focusedFieldMember()) return;
+            const clip = globalThis.navigator?.clipboard;
+            if (!clip?.readText) return;
+            clip.readText()
+              .then((text) => { if (text) engine.insertFocusedFieldText(text); })
+              .catch(() => undefined);
+          }, 60);
+          return;
+        }
+        // A held modifier belongs to the browser (Ctrl+C/V/X and everything the
+        // OS owns), so it must NOT be swallowed: preventing the keydown default
+        // action also suppresses the copy/cut/paste event that carries the
+        // clipboard data.
+        if (!mod && engine.keyboardFocusSprite > 0 &&
             (e.keyCode === 8 || e.key.length === 1 || e.key === ' ' || e.key.startsWith('Arrow'))) {
           e.preventDefault();
         }
@@ -178,11 +233,38 @@ export class SparkElement extends SparkBase {
           meta: e.metaKey,
         });
       };
+      /** Ctrl/Cmd+C: Director's field selection (when there is one) instead of
+       *  whatever the page has highlighted. */
+      const onCopy = (e: ClipboardEvent): void => {
+        const text = this.engine?.focusedFieldSelectionText() ?? '';
+        if (!text || !e.clipboardData) return;
+        e.clipboardData.setData('text/plain', text);
+        e.preventDefault();
+      };
+      const onCut = (e: ClipboardEvent): void => {
+        if (!e.clipboardData || !this.engine?.focusedFieldSelectionText()) return;
+        const text = this.engine.cutFocusedFieldSelection();
+        if (!text) return;
+        e.clipboardData.setData('text/plain', text);
+        e.preventDefault();
+      };
+      const onPaste = (e: ClipboardEvent): void => {
+        pasteSeen = true;
+        const text = e.clipboardData?.getData('text/plain') ?? '';
+        if (!text) return;
+        if (this.engine?.insertFocusedFieldText(text)) e.preventDefault();
+      };
       document.addEventListener('keydown', onKeyDown);
       document.addEventListener('keyup', onKeyUp);
+      document.addEventListener('copy', onCopy);
+      document.addEventListener('cut', onCut);
+      document.addEventListener('paste', onPaste);
       this._keyCleanup = () => {
         document.removeEventListener('keydown', onKeyDown);
         document.removeEventListener('keyup', onKeyUp);
+        document.removeEventListener('copy', onCopy);
+        document.removeEventListener('cut', onCut);
+        document.removeEventListener('paste', onPaste);
       };
 
       this.watchCanvasScale(engine);
@@ -193,6 +275,16 @@ export class SparkElement extends SparkBase {
     } catch (err) {
       this.showError(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  /** Copy/cut of a Director field selection. The async clipboard API works off
+   *  a key press (a user gesture) even though the canvas holds the focus, which
+   *  is why the shortcuts use it instead of the DOM `copy`/`cut` events — those
+   *  need an editable DOM target and never fire here. */
+  private writeClipboard(text: string): void {
+    const clip = globalThis.navigator?.clipboard;
+    if (!clip?.writeText) return;
+    clip.writeText(text).catch(() => undefined);
   }
 
   /**

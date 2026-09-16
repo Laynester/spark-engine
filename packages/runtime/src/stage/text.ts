@@ -41,6 +41,60 @@ export function textMemberLineMetrics(member: Member): { glyphH: number; lineH: 
   return { glyphH, lineH };
 }
 
+/** One shared 2D context for font metrics — the live caret and the selection
+ *  highlight ask it every frame while a field is focused. */
+let metricsCtx: CanvasRenderingContext2D | null | undefined;
+
+function fontMetricsCtx(): CanvasRenderingContext2D | null {
+  if (metricsCtx === undefined) {
+    metricsCtx = typeof document !== 'undefined' ? document.createElement('canvas').getContext('2d') : null;
+  }
+  return metricsCtx;
+}
+
+/**
+ * The x offset of `index` inside a text member's own rendered text: the width of
+ * everything before it, in the field's font. The live PIXI text lays glyphs out
+ * with subpixel advances while the rasterizer snaps each character to an integer
+ * column, so a caret or a selection highlight measured here can sit a pixel or
+ * two off the glyphs — close enough to show which run is selected.
+ */
+export function textMemberPrefixWidth(member: Member, text: string, index: number): number {
+  const i = Math.max(0, Math.min(index, text.length));
+  if (i <= 0) return 0;
+  const size = Math.max(1, Math.round(asNum(member.fontSize ?? 0) || 12));
+  const { family, weight } = cssFontFor(member.font);
+  const style = fontStyleFlags(member.fontStyle);
+  const effWeight = style.bold ? '700' : weight;
+  const ctx = fontMetricsCtx();
+  if (!ctx) return i * Math.max(1, Math.round(size / 2));
+  ctx.font = `${style.italic ? 'italic ' : ''}${effWeight} ${size}px ${family}`;
+  return ctx.measureText(text.slice(0, i)).width;
+}
+
+/**
+ * The caret offset nearest a click inside the text block: `x` is measured from
+ * the block's left edge (see textMemberPrefixWidth). A tie rounds toward the
+ * earlier offset, and a click outside the run clamps to its end. Prefix widths
+ * only ever grow, so the search bisects instead of measuring `text.length`
+ * prefixes on every pointer move of a drag.
+ */
+export function textMemberCaretAt(member: Member, text: string, x: number): number {
+  const n = text.length;
+  if (n === 0) return 0;
+  let lo = 0;
+  let hi = n;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (textMemberPrefixWidth(member, text, mid) < x) lo = mid + 1;
+    else hi = mid;
+  }
+  const after = Math.max(0, lo - 1);
+  const a = textMemberPrefixWidth(member, text, after);
+  const b = textMemberPrefixWidth(member, text, lo);
+  return Math.abs(x - a) <= Math.abs(x - b) ? after : lo;
+}
+
 export function rasterizeTextMember(member: Member): LImage | null {
   if (typeof document === 'undefined') return null;
   const r = member.rect;

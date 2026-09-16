@@ -10,7 +10,7 @@ import { LImage, LList, LObject, LPoint, LPropList, LSpriteRef, LSymbol } from '
 import type { ShapeDef } from '../engine/members.js';
 import { applyMaskAlpha, bakeEdgeBackground, bakeInputsForImage, bakeModeForInk, bakeSurface, blendFilterMode, blendModeForInk, cornersAreNearWhite, spritePixelHitTest, setMatteIdentityFill, tintSpriteBackground, tintSpriteDarken, DARKEST_BLEND_MODE, LIGHTEST_BLEND_MODE, REVERSE_BLEND_MODE, SUBTRACT_BLEND_MODE, SUBTRACT_WRAP_BLEND_MODE, type BakeMode } from './matte.js';
 import { caretBlinkOn, caretBox, caretX } from './caret.js';
-import { textMemberLineMetrics } from './text.js';
+import { textMemberCaretAt, textMemberLineMetrics, textMemberPrefixWidth } from './text.js';
 import { registerInkBlendFilters } from './blendFilters.js';
 import { perf, perfEnabled, perfFrame, perfTimeBake, type PerfMilestone } from '../perf.js';
 import type { DevSnapshot } from './devOverlay.js';
@@ -44,10 +44,18 @@ interface ChannelNode {
   shape?: ShapeDef;
   textObj?: Text;
   caret?: Graphics;
+  /** The selection highlight, drawn UNDER the text run it covers. */
+  caretHilite?: Graphics;
+  /** The selected glyphs, redrawn over the highlight in `caretBg`. */
+  caretText?: Text;
+  /** The field's background colour — the reverse of `caretColor`. */
+  caretBg?: number | string;
   caretColor?: number | string;
   caretX?: number;
   caretY?: number;
   caretH?: number;
+  /** Cached caret/highlight geometry key (see syncCaret). */
+  caretKey?: string;
   hitW?: number;
   hitH?: number;
   bgFill?: Graphics;
@@ -550,36 +558,98 @@ export class PixiStage implements StageAdapter {
     return type === 1 ? 'webgl' : type === 2 ? 'webgpu' : type === 4 ? 'canvas' : `type ${String(type)}`;
   }
 
+  /**
+   * The insertion point and the selection highlight of the focused editable
+   * field. Both follow the ENGINE's caret (a click parks it after the text, the
+   * arrow keys and the corpus's own `set the selStart` move it, typing and
+   * pasting insert there), so a highlight the user made with Cmd/Ctrl+A is
+   * visible and the caret no longer sits permanently at the end of the text.
+   */
   private syncCaret(): void {
+    const state = this.engine.focusedFieldEditState();
     const focus = this.engine.keyboardFocusSprite;
-    const ch = focus > 0 && focus < this.engine.channels.length ? this.engine.getChannel(focus) : undefined;
-    const node = ch ? this.nodes.get(focus) : undefined;
-    const member = ch?.member;
-    const editable = member?.kind === 'text' && !!member.textProps?.get('editable');
+    const ch = state ? this.engine.getChannel(focus) : undefined;
+    const node = state ? this.nodes.get(focus) : undefined;
     const group = node?.visual;
-    if (!editable || !member || !node?.textObj || !(group instanceof Container) || ch?.visible !== 1) {
+    if (!state || !ch || !node?.textObj || !(group instanceof Container) || ch.visible !== 1) {
       if (node?.caret) node.caret.visible = false;
+      if (node?.caretHilite) node.caretHilite.visible = false;
       return;
     }
+    const member = state.member;
     const w = Math.max(1, Math.round(ch.width || node.baseW || 1));
     const h = Math.max(1, Math.round(ch.height || node.baseH || 1));
-    const x = caretX(alignmentName(member.alignment), w, node.textObj.width);
+    // Director draws a field selection by REVERSING the field's own colours:
+    // the band is the text colour and the glyphs come back in the background
+    // colour (the system highlight is the other documented source — `hilite`
+    // docs: "on the Macintosh, the highlight color is set in the Color control
+    // panel" — and there is no per-member property for it anywhere in the
+    // corpus). For the black-on-white fields the client actually uses (chat
+    // input, login, search) that is a BLACK band with WHITE letters.
+    const hiliteBg = node.caretColor ?? 0xffffff;
+    // caretX gives the x of the text block's RIGHT edge for the field's
+    // alignment; the block's left edge is that minus its width, and a character
+    // offset inside it is the width of the run before it.
+    const blockW = node.textObj.width;
+    const blockX = caretX(alignmentName(member.alignment), w, blockW) - blockW;
+    const xAt = (i: number): number => blockX + textMemberPrefixWidth(member, state.text, i);
     // The insertion point is one line of the field's FONT, not the height of
     // the field box: taking `h` stretched the caret down a whole tall input
     // (gift greeting, console compose) and made it ignore fontSize.
     const metrics = textMemberLineMetrics(member);
     const { h: caretH, y: caretY } = caretBox(h, metrics.lineH, metrics.glyphH, node.textObj.height);
-    if (!node.caret) {
-      node.caret = new Graphics();
-      group.addChild(node.caret);
-    }
-    if (node.caretX !== x || node.caretH !== caretH || node.caretY !== caretY) {
-      node.caret.clear().rect(x, caretY, 1, caretH).fill(node.caretColor ?? 0xffffff);
-      node.caretX = x;
+    const caretX0 = Math.round(xAt(state.start));
+    const hiliteW = Math.round(xAt(state.end)) - caretX0;
+    const run = state.text.slice(state.start, state.end);
+    const key = `${caretX0},${hiliteW},${caretH},${caretY}|${run}`;
+    if (node.caretKey !== key) {
+      node.caretKey = key;
+      if (!node.caret) {
+        node.caret = new Graphics();
+        group.addChild(node.caret);
+      }
+      node.caret.clear();
+      // A selection hides the caret, exactly like Director's field editor.
+      if (hiliteW <= 0) node.caret.rect(caretX0, caretY, 1, caretH).fill(node.caretColor ?? 0xffffff);
+      if (hiliteW > 0 && !node.caretHilite) {
+        // The band goes UNDER the text: the selected glyphs are re-drawn on top
+        // of it in the reversed colour (both built below).
+        node.caretHilite = new Graphics();
+        group.addChildAt(node.caretHilite, group.getChildIndex(node.textObj));
+      }
+      if (node.caretHilite) {
+        node.caretHilite.clear();
+        if (hiliteW > 0) node.caretHilite.rect(caretX0, caretY, hiliteW, caretH).fill(hiliteBg);
+      }
+      if (hiliteW > 0 && !node.caretText) {
+        node.caretText = new Text({
+          text: '',
+          style: {
+            fill: node.caretBg ?? 0xffffff,
+            fontFamily: node.textObj.style.fontFamily,
+            fontSize: node.textObj.style.fontSize,
+            fontWeight: node.textObj.style.fontWeight,
+            fontStyle: node.textObj.style.fontStyle,
+            align: 'left',
+          },
+        });
+        group.addChild(node.caretText);
+      }
+      if (node.caretText) {
+        // The run in the field's BACKGROUND colour, over the band of its text
+        // colour: white letters on a black band for the black-on-white fields
+        // this client uses, which is the Shockwave look the user reported.
+        node.caretText.text = run;
+        node.caretText.x = caretX0;
+        node.caretText.y = node.textObj.y;
+        node.caretText.visible = hiliteW > 0;
+      }
+      node.caretX = caretX0;
       node.caretH = caretH;
       node.caretY = caretY;
     }
-    node.caret.visible = caretBlinkOn(performance.now());
+    if (node.caret) node.caret.visible = hiliteW <= 0 && caretBlinkOn(performance.now());
+    if (node.caretHilite) node.caretHilite.visible = hiliteW > 0;
   }
 
   private static readonly BAKE_BATCH = 8;
@@ -917,6 +987,9 @@ export class PixiStage implements StageAdapter {
     node.shape = undefined;
     node.textObj = undefined;
     node.caret = undefined;
+    node.caretHilite = undefined;
+    node.caretText = undefined;
+    node.caretKey = undefined;
     node.caretX = undefined;
     node.caretY = undefined;
     node.caretH = undefined;
@@ -981,6 +1054,11 @@ export class PixiStage implements StageAdapter {
       }
       node.textObj = text;
       node.caretColor = visual.color ?? 0xffffff;
+      // The colour the selected glyphs come back in (see syncCaret): the
+      // member's own background, white when it has none — Director's field
+      // default — even for the inks whose background is keyed away on screen
+      // (the room bar's chat input is ink 36 with a white member background).
+      node.caretBg = visual.bgColor ?? 0xffffff;
       node.visual = group;
       node.baseW = w;
       node.baseH = h;
@@ -1471,6 +1549,26 @@ export class PixiStage implements StageAdapter {
    *  pointer event was routed to. */
   pointerSpriteAt(x: number, y: number): number {
     return this.hitTest(Math.trunc(x), Math.trunc(y));
+  }
+
+  /** `StageAdapter.caretIndexAt` — the character offset of an editable field a
+   *  stage point falls on (click-to-position and drag-select). Measured in the
+   *  SAME local space the caret geometry uses (`syncCaret`): the sprite's box
+   *  sits at (locH - regX, locV - regY) and the text block starts at the
+   *  alignment offset inside it. `y` is ignored — the live text is a single
+   *  unbroken block, and every editable field in the corpus is one line
+   *  (`#wordWrap: 0`), so a multi-line wrap would only be approximate. */
+  caretIndexAt(channel: number, x: number, y: number): number | null {
+    const node = this.nodes.get(channel);
+    const ch = this.engine.getChannel(channel);
+    const member = ch.member;
+    if (!node?.textObj || !member || member.kind !== 'text') return null;
+    const { tx } = this.inverseTransformPoint(ch, x, y);
+    const w = Math.max(1, Math.round(ch.width || node.baseW || 1));
+    const blockW = node.textObj.width;
+    const blockX = caretX(alignmentName(member.alignment), w, blockW) - blockW;
+    const localX = tx - (ch.locH - node.regX) - blockX;
+    return textMemberCaretAt(member, member.text ?? '', localX);
   }
 
   private hitTest(x: number, y: number, opts?: { onlyScripted?: boolean }): number {
