@@ -1173,10 +1173,21 @@ export class Interpreter {
         return this.compareLingo(l, r) <= 0 ? 1 : 0;
       case '>=':
         return this.compareLingo(l, r) >= 0 ? 1 : 0;
+      // Lingo string comparisons FOLD CASE (same rule lingoEquals implements for
+      // `=`), and the corpus depends on it: Director's `the platform` reads
+      // "Windows,32" (drmx2004_scripting_ref.txt:30256) while hh_entry/0003 and the
+      // JP/RU patches ask `if the platform contains "windows"`, and String Services
+      // picks its 8-bit translation table with `contains "win"`. Case-sensitive
+      // matching here loaded the MacOS table into a Windows client and rewrote every
+      // inbound latin1 byte. See [G61b].
       case 'contains':
-        return typeof l === 'string' && typeof r === 'string' && l.includes(r) ? 1 : 0;
+        return typeof l === 'string' && typeof r === 'string'
+          ? (l.toLowerCase().includes(r.toLowerCase()) ? 1 : 0)
+          : 0;
       case 'starts':
-        return typeof l === 'string' && typeof r === 'string' && l.startsWith(r) ? 1 : 0;
+        return typeof l === 'string' && typeof r === 'string'
+          ? (l.toLowerCase().startsWith(r.toLowerCase()) ? 1 : 0)
+          : 0;
       case '&':
         return lingoConcat(l) + lingoConcat(r);
       case '&&':

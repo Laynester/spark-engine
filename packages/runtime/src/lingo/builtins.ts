@@ -229,8 +229,13 @@ export function createBuiltinTable(): Map<string, BuiltinFn> {
   set(['bitOr'], (b, a) => Math.round(numArgs(a, 0)) | Math.round(numArgs(a, 1)));
   set(['bitXor'], (b, a) => Math.round(numArgs(a, 0)) ^ Math.round(numArgs(a, 1)));
   set(['bitNot'], (b, a) => ~Math.round(numArgs(a, 0)));
-  set(['sin'], (b, a) => Math.sin((numArgs(a, 0) * Math.PI) / 180));
-  set(['cos'], (b, a) => Math.cos((numArgs(a, 0) * Math.PI) / 180));
+  // RADIANS, not degrees: "The angle must be expressed in radians as a floating-point
+  // number" (drmx2004_scripting_ref.txt:21764 sin / :10690 cos), and the corpus converts
+  // degrees itself where it has them (`Lobby_Bubble_Class`: pDivPi = PI / 180 then
+  // sin(pMuutos * pDivPi)). The degrees reading flattened every corpus animation — the
+  // Select Arrow's `-8 * sin(float(pAnimCntr) / 10)` bob was 0.39px instead of 8px.
+  set(['sin'], (b, a) => Math.sin(numArgs(a, 0)));
+  set(['cos'], (b, a) => Math.cos(numArgs(a, 0)));
 
   set(['updatestage'], () => VOID);
   set(['beep'], () => VOID);

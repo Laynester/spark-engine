@@ -563,6 +563,20 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     this.interp = new Interpreter(this);
     this._movie = this.hostGlobalObj('_movie');
     this._player = this.hostGlobalObj('_player');
+    // `_player.productVersion` is how the corpus decides whether it runs under a
+    // UNICODE player: String Services (0037), Connection (0051) and Multiuser
+    // (0052) all start with
+    //   if value(chars(_player.productVersion, 1, 2)) >= 11 then pUnicodeDirector = 1
+    // A Director 11+ player's strings ARE text, so the corpus then skips its own
+    // UTF-8 codec (`if pUnicodeDirector and not tForceDecode then return tStr` in
+    // decodeUTF8, `if not pUnicodeDirector then encodeUTF8(...)` in 0052). This
+    // engine's strings are BYTE strings — every byte<->string boundary in it is
+    // Latin-1 (bytesOf/latin1Of, MUS payloads, HTTP bodies) — i.e. the Director 10
+    // model, so it must answer with a pre-11 version or the client NEVER decodes
+    // the UTF-8 the server sends (`ª` C2 AA stays two Latin-1 chars `Âª`) and the
+    // re-encoded reply goes out double-encoded (C3 82 C2 AA = `ÃÂª`). A void
+    // version made the corpus's own gate misfire true. Same value as `the environment`.
+    this._player.props.set('productVersion', '10.1');
     this.globals.set('_movie', this._movie);
     this.globals.set('_player', this._player);
     this.refreshPlayerWindowList();
@@ -4124,6 +4138,8 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         return new LSymbol('sprite');
       case 'spritenum':
         return s.channel;
+      case 'sprite':
+        return s;
       case 'visible':
         return ch.visible;
       case 'width':
@@ -4503,6 +4519,21 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
    *    same shape — `[ink: 4, bgcolor: "#CCFFFF", forecolor: "#66CCFF"]`, the
    *    documented "Not copy" ink, which replaces the body sprite's `resetSpriteColors`
    *    ink 36 and would otherwise leave the canvas's opaque white block on screen.
+   *
+   *  - inks 4/8/9 with a background and NO foreground: still a full ramp, because
+   *    the Director sprite foreground defaults to BLACK — "Neither ink has any
+   *    effect on a sprite until you change the foreground or background color
+   *    from the default settings of black and white" (adobe_director_11.5.txt:3320),
+   *    and LibreShockwave's `BitmapColorizer::allowsColorization` names 0/8/9 as
+   *    the ramp inks. This is the whole mechanism behind the colour-changing room
+   *    floors: `hh_room_clubmammoth/0117 club_mammoth Class::ColorTiles` writes
+   *    `pSpriteList[i].bgColor = rgb(tCols[1], tCols[2], tCols[3])` onto the 49
+   *    `discotile` sprites the room declares `#ink: 8`
+   *    (`0005_text_club_mammoth.room.txt:132`), and `hh_room_sunsetcafe/0013`
+   *    does the same for its own tiles. Sending a background-only sprite down the
+   *    grey-only `tintSpriteBackground` path instead left the disco tile's
+   *    diamond (#CFDAE2 — channels 19 apart, past its 16 near-grey cut-off)
+   *    untouched, so the floor never changed colour.
    */
   duotoneForChannel(ch: Channel): { fg: number; bg: number } | null {
     const bg = this.bgTintForChannel(ch) ?? 0xffffff;
@@ -4513,8 +4544,10 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     }
     if (ch.ink === 4 || ch.ink === 8 || ch.ink === 9) {
       const fg = this.foreColorRgbForChannel(ch);
-      if (fg === null) return null;
-      return { fg, bg };
+      if (fg !== null) return { fg, bg };
+      // Default foreground = black, so the ramp is per-pixel `bg * pixel / 255`.
+      // A white/idx-0 background is the identity and stays "no colour".
+      return bg === 0xffffff ? null : { fg: 0x000000, bg };
     }
     return null;
   }

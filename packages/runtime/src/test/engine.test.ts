@@ -11,7 +11,7 @@ import type { PersistWorkerLike, PersistWorkerMsg } from '../worker/persist.js';
 import { decodePng } from '../engine/png.js';
 import { decodeMemberMedia, encodeMemberMedia } from '../engine/media.js';
 import { decodeGif } from '../engine/gif.js';
-import { bakeEdgeBackground, cornersAreNearWhite, tintSpriteBackground } from '../stage/matte.js';
+import { bakeEdgeBackground, bakeModeForInk, bakeSurface, cornersAreNearWhite, tintSpriteBackground } from '../stage/matte.js';
 import { bindPointerEvents, directorTransformFlip, imageDirtyDebts, inverseDirectorTransformPoint, parseRendererPreference, releaseImageDirty } from '../stage/pixi.js';
 import { defringeTextPixels, hardenTextAlpha, rasterizeTextMember } from '../stage/text.js';
 import { frameGap } from '../stage/devOverlay.js';
@@ -3273,6 +3273,42 @@ test('sprite ilk/spritenum read back (FUSE hideLogo/releaseSprite)', () => {
   assert.equal(e.getSpriteProp(s, 'spriteNum'), 1);
 });
 
+test('sprite.sprite is the sprite the channel holds (club mammoth disco ball)', () => {
+  // Director documents `.sprite` on a sprite CHANNEL as the sprite it holds —
+  // `objSprite = channel(3).sprite` and `labelSprite = channel(2).sprite.backColor`
+  // (drmx2004_scripting_ref.txt:4376 / :4448) — and the corpus reads it straight off a
+  // sprite REFERENCE: `club_mammoth Class::animDiscoBall` (hh_room_clubmammoth/0117)
+  // does `pDbStarSpr.sprite.member = member(getmemnum("mammothblink" & pDbAnimFrame))`
+  // on the sprite it reserved (`pDbStarSpr = sprite(reserveSprite(me.getID()))`), once
+  // per update. With no `sprite` case, `getSpriteProp` fell through to its default and
+  // logged `sprite(272).sprite: unsupported property` EVERY frame while silently
+  // returning VOID — so the write went nowhere and the disco ball never animated.
+  const e = new DirectorEngine();
+  const bm = e.addScriptMember('mammothblink1', 'unknown', '');
+  bm.kind = 'bitmap';
+  const num = (bm.castLibNumber << 16) | bm.number;
+  const spr = e.getSprite(272);
+  e.setSpriteProp(spr, 'member', num);
+
+  const self = e.getSpriteProp(spr, 'sprite') as { channel: number };
+  assert.ok(self && typeof self === 'object', 'sprite.sprite reads back an object');
+  assert.equal(self.channel, 272, 'and it is the SAME channel, not a copy of the properties');
+  assert.equal((e.getSpriteProp(self as never, 'spriteNum') as number), 272);
+
+  // The corpus's own shape, at the Lingo level.
+  const ev = (s: string) => e.interp.evalExpressionString(s);
+  assert.equal((ev('ilk(sprite(272).sprite)') as LSymbol).name, 'sprite');
+  assert.equal(ev('sprite(272).sprite.spriteNum'), 272);
+  assert.equal(ev('sprite(272).sprite.member.name'), 'mammothblink1');
+
+  // ...and the write lands on that channel: the disco-ball member switch.
+  e.setSpriteProp(self as never, 'member', null);
+  assert.equal(e.getChannel(272).member, undefined, 'writing through .sprite clears the channel member');
+  e.setSpriteProp(self as never, 'member', num);
+  assert.equal(e.getChannel(272).member?.name, 'mammothblink1', 'and writing through .sprite sets it');
+  assert.ok(!e.logs.some((l) => l.includes('unsupported property')), 'no unsupported-property spam');
+});
+
 test('member.erase() removes the member from its castLib', () => {
   const e = new DirectorEngine();
   const m = e.addScriptMember('Temp', 'movie', '-- empty\n');
@@ -4623,18 +4659,67 @@ test('avatar colour effects: ink 8 + rgb foreColor resolves a fg->bg duotone (x-
   e.setSpriteProp(s, 'ink', 8);
   assert.equal(e.duotoneForChannel(e.getChannel(3)), null, 'default ink 8 sprite has no duotone');
   e.setSpriteProp(s, 'bgcolor', new LColor(0, 0x77, 0));
-  assert.equal(e.duotoneForChannel(e.getChannel(3)), null, 'bgColor alone keeps the plain bg tint');
+  assert.deepEqual(e.duotoneForChannel(e.getChannel(3)), { fg: 0x000000, bg: 0x007700 }, 'a background alone ramps from the default black foreground');
   e.setSpriteProp(s, 'forecolor', new LColor(0, 0xff, 0));
   assert.deepEqual(e.duotoneForChannel(e.getChannel(3)), { fg: 0x00ff00, bg: 0x007700 }, 'x-ray ramp');
   assert.equal(e.foreColorRgbForChannel(e.getChannel(3)), 0x00ff00, 'rgb foreColor is a colour');
-  // `sprite.foreColor = 255` is a palette INDEX (black), not a colour.
+  // `sprite.foreColor = 255` is a palette INDEX (black), not a colour — the
+  // Director default, which is black at the ramp's other end.
   e.setSpriteProp(s, 'forecolor', 255);
-  assert.equal(e.duotoneForChannel(e.getChannel(3)), null, 'palette-index foreColor is the no-op default');
+  assert.deepEqual(e.duotoneForChannel(e.getChannel(3)), { fg: 0x000000, bg: 0x007700 }, 'palette-index foreColor = the black default');
   assert.equal(e.foreColorRgbForChannel(e.getChannel(3)), null, 'index 255 resolves to black');
   // ink 41 keeps its own fg source (`sprite.color`), so the ink-8 foreColor is
   // not read: the leftover rgb backColor is a plain multiply-only ramp.
   e.setSpriteProp(s, 'ink', 41);
   assert.deepEqual(e.duotoneForChannel(e.getChannel(3)), { fg: 0x000000, bg: 0x007700 }, 'ink 41 ignores the foreColor');
+});
+
+test('ink 8 + a background alone ramps the whole art (club mammoth disco floor)', () => {
+  // `hh_room_clubmammoth/0117 club_mammoth Class::ColorTiles` recolours the dance
+  // floor with `pSpriteList[i].bgColor = rgb(tCols[1], tCols[2], tCols[3])` on the
+  // 49 `discotile` sprites — which the room declares `#ink: 8`
+  // (`texts/0005_text_club_mammoth.room.txt:132`, member `disco_floor_block`).
+  // That art (`bitmaps/0114`) is WHITE, which matte keys away, plus ONE light
+  // blue-grey diamond: palette index 17 = #CFDAE2. The diamond is therefore the
+  // tile's only visible colour, and its channels are 19 apart — past the
+  // near-grey cut-off of `tintSpriteBackground` (`mx - mn > 16 -> skip`), so no
+  // pixel of the tile ever moved: "the flooring ... just stays green".
+  // Director's ramp inks cover 8 (LibreShockwave `BitmapColorizer::
+  // allowsColorization` names 0/8/9) and the sprite foreground defaults to BLACK,
+  // so a background on its own still ramps black->black, white->the background.
+  const e = new DirectorEngine();
+  const s = e.getSprite(3);
+  e.setSpriteProp(s, 'ink', 8);
+  assert.equal(e.duotoneForChannel(e.getChannel(3)), null, 'the default background is the identity');
+  const style = new LColor(241, 117, 137); // a disco style colour (Club Mammoth `discofloor` line 1)
+  e.setSpriteProp(s, 'bgcolor', style);
+  const ch = e.getChannel(3);
+  assert.deepEqual(e.duotoneForChannel(ch), { fg: 0x000000, bg: 0xf17589 }, 'a background alone ramps from the default black');
+
+  // The real tile art, 4x4: white (index 0 floats to the border, so matte keys it)
+  // plus the 2x2 diamond at #CFDAE2.
+  const W = 4, H = 4;
+  const palette: number[][] = Array.from({ length: 256 }, (_, i) => [i, i, i]);
+  palette[0] = [255, 255, 255];
+  palette[17] = [207, 218, 226];
+  const data = new Uint8ClampedArray(W * H * 4);
+  const indices = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const centre = x >= 1 && x <= 2 && y >= 1 && y <= 2;
+      const [r, g, b] = centre ? [207, 218, 226] : [255, 255, 255];
+      const o = (y * W + x) * 4;
+      data[o] = r; data[o + 1] = g; data[o + 2] = b; data[o + 3] = 255;
+      indices[y * W + x] = centre ? 17 : 0;
+    }
+  }
+  const out = bakeSurface(data, W, H, bakeModeForInk(8), e.bgTintForChannel(ch), null, 8, 0, palette, null, e.duotoneForChannel(ch), indices);
+  const px = (x: number, y: number) => { const o = (y * W + x) * 4; return [out.pixels[o], out.pixels[o + 1], out.pixels[o + 2]]; };
+  assert.equal(out.pixels[(1 * W + 1) * 4 + 3], 255, 'the diamond stays opaque');
+  // bg * pixel / 255 per channel — 241/117/137 against 207/218/226.
+  assert.deepEqual(px(1, 1), [196, 100, 121], 'the diamond takes the style colour');
+  assert.deepEqual(px(2, 2), [196, 100, 121], 'both diamond pixels');
+  assert.equal(out.pixels[3], 0, 'and the white tile background is still keyed away');
 });
 
 test('a member image shared by two channels serves BOTH nodes before it goes clean (avatar canvas)', () => {
@@ -4686,7 +4771,7 @@ test('avatar colour effects: ink 4 + rgb foreColor resolves the Ice FX fg->bg du
   e.setSpriteProp(s, 'ink', 4);
   assert.equal(e.duotoneForChannel(e.getChannel(3)), null, 'default ink 4 sprite has no duotone');
   e.setSpriteProp(s, 'bgcolor', new LColor(0xcc, 0xff, 0xff));
-  assert.equal(e.duotoneForChannel(e.getChannel(3)), null, 'bgColor alone keeps the plain bg tint');
+  assert.deepEqual(e.duotoneForChannel(e.getChannel(3)), { fg: 0x000000, bg: 0xccffff }, 'a background alone ramps from the default black foreground');
   e.setSpriteProp(s, 'forecolor', new LColor(0x66, 0xcc, 0xff));
   assert.deepEqual(e.duotoneForChannel(e.getChannel(3)), { fg: 0x66ccff, bg: 0xccffff }, 'ice ramp');
 });
@@ -9044,12 +9129,32 @@ test('union/intersect are rect functions (Bodypart updateRect, C++ unionRect par
   assert.equal(ev('union(1, 2)') === null, true);
 });
 
-test('sin/cos take degrees; startTimer resets the timer (C++ MathBuiltins parity)', () => {
+test('sin/cos take RADIANS, so the Select Arrow bob actually moves (Director parity)', () => {
+  // Director: "The angle must be expressed in radians as a floating-point number" for
+  // both sin() and cos() (lingo-docs/drmx2004_scripting_ref.txt:21764 / :10690), and the
+  // corpus proves it by converting degrees ITSELF wherever it has degrees:
+  //   hh_room_lobby/0003 Lobby_Bubble_Class: pDivPi = PI / 180 -> sin(pMuutos * pDivPi)
+  //   hh_room_starlounge/0097  Star_Lounge_Gradient_Class: sin(pPhase * PI / 1800)
+  // The old degrees reading made every such animation a dead flat line.
   const e = new DirectorEngine();
   const ev = (s: string) => e.interp.evalExpressionString(s);
-  assert.ok(Math.abs((ev('sin(30)') as number) - 0.5) < 1e-9, 'sin(30) = 0.5 (degrees)');
-  assert.ok(Math.abs((ev('cos(60)') as number) - 0.5) < 1e-9, 'cos(60) = 0.5 (degrees)');
-  assert.ok(Math.abs((ev('sin(90)') as number) - 1) < 1e-9);
+  assert.ok(Math.abs((ev('sin(PI / 2)') as number) - 1) < 1e-9, 'sin(PI/2) = 1');
+  assert.ok(Math.abs((ev('sin(30)') as number) - Math.sin(30)) < 1e-9, 'sin(30) is sin of 30 RADIANS');
+  assert.ok(Math.abs((ev('cos(PI)') as number) + 1) < 1e-9, 'cos(PI) = -1');
+  assert.ok(Math.abs((ev('cos(60)') as number) - Math.cos(60)) < 1e-9, 'cos(60) is cos of 60 RADIANS');
+
+  // THE ARROW ITSELF — hh_room_utils/0005 Select_Arrow_Class::update (also v14/0004):
+  //   pAnimCntr = (pAnimCntr + 4) mod 32
+  //   tOffY = tHumanLoc[2] + -8 * sin(float(pAnimCntr) / 10)
+  // so the phase is 0 .. 2.8 rad and the sprite has to climb the full -8px and come back.
+  // Under the degrees reading this whole half-wave spanned 0.39px, i.e. the bob the user
+  // reports as "supposed to bob up and down but it doesnt".
+  const offs = [0, 4, 8, 12, 16, 20, 24, 28].map((c) => ev(`-8 * sin(float(${c}) / 10)`) as number);
+  const amplitude = -Math.min(...offs);
+  assert.ok(amplitude > 7.9, `the arrow bob spans ~8px, got ${amplitude.toFixed(3)}`);
+  assert.ok(Math.abs(offs[0]) < 1e-9, 'and it starts level with the head (pAnimCntr 0)');
+  assert.ok(offs[0] > offs[1] && offs[1] > offs[2], 'climbs, does not jitter in place');
+
   // the timer + startTimer: startTimer resets the clock base
   const t0 = ev('the timer') as number;
   assert.ok(typeof t0 === 'number' && t0 >= 0);
