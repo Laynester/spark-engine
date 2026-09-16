@@ -59,6 +59,11 @@ export interface InterpreterHost extends MemberHost {
   builtin(name: string, args: LVal[], interp: Interpreter): LVal | undefined;
   memberMethod(m: LMemberRef, name: string, args: LVal[]): LVal;
   spriteMethod(s: LSpriteRef, name: string, args: LVal[]): LVal;
+  /**
+   * The behavior object carried by a sprite that defines `name` — the target of a
+   * `handler(spriteRef, …)` call. See the note in `invokeIdentCallee`.
+   */
+  spriteBehaviorFor?(s: LSpriteRef, name: string): LObject | null;
   windowMethod(w: LWindowRef, name: string, args: LVal[]): LVal;
   rollover(): number;
   rolloverSprite?(n: number): boolean;
@@ -887,16 +892,39 @@ export class Interpreter {
     return this.dispatchMethod(obj, name, argVals);
   }
 
+  /** Does this object (or an ancestor) define the handler? */
+  hasHandler(obj: LObject, name: string): boolean {
+    return this.findHandler(obj, name) !== null;
+  }
+
   invokeIdentCallee(lower: string, name: string, argVals: LVal[], env: Env): LVal {
     if (lower === 'call') return this.callBuiltin(argVals);
+    // A SPRITE passed as the first argument IS the target: the handler is looked
+    // up on the behavior attached to that sprite's channel, not in the movie
+    // scripts. The corpus registers every room-sprite click this way —
+    // `registerProcedure(tSpr, #poolTeleport, me.getID(), #mouseDown)`
+    // (hh_room_pool/0007:52, hh_room_pool/0008:60+63, hh_room_park/0105:27,
+    // hh_room_park/0106:18, hh_room_cinema/0001:15) and
+    // `registerProcedure(tSpr, #eventProc, me.getID(), #mouseUp)` — where tSpr is
+    // what `Visualizer::getSprById` returns: the raw sprite, whose channel carries
+    // the Event Broker Behavior wired by `Sprite Manager::setEventBroker`. The
+    // only movie-script global of that name is Window API's, and its first
+    // parameter is a WINDOW id: resolving to it returns 0 for a sprite and the
+    // registration is silently lost, so the bus door / pool teleports / cinema
+    // teleport never fired. Director dispatches to the behavior the sprite owns.
+    const first = argVals[0];
+    if (first instanceof LSpriteRefClass) {
+      const target = this.host.spriteBehaviorFor?.(first, name) ?? null;
+      if (target) return this.callObjectHandler(target, name, argVals.slice(1));
+    }
     const global = lower === 'new' ? null : this.host.resolveGlobalHandler(name);
     if (global) {
       const selfCall = global.script === this.currentScript;
       let instance: LObject | null = null;
       if (selfCall) {
-        const first = argVals[0];
-        if (first instanceof LObjectClass && this.findHandler(first, name) !== null) {
-          instance = first;
+        const self = argVals[0];
+        if (self instanceof LObjectClass && this.findHandler(self, name) !== null) {
+          instance = self;
           argVals = argVals.slice(1);
         } else if (env.me instanceof LObjectClass) {
           instance = env.me;
@@ -1234,28 +1262,12 @@ export class Interpreter {
     const callee = call.callee;
 
     if (callee.kind === 'ident') {
-      const name = callee.name;
-      const lower = name.toLowerCase();
-      if (lower === 'call') return this.callBuiltin(args);
-      const global = lower === 'new' ? null : this.host.resolveGlobalHandler(name);
-      if (global) {
-        const selfCall = global.script === this.currentScript;
-        let instance: LObject | null = null;
-        if (selfCall) {
-          const first = args[0];
-          if (first instanceof LObjectClass && this.findHandler(first, name) !== null) {
-            instance = first;
-            args = args.slice(1);
-          } else if (env.me instanceof LObjectClass) {
-            instance = env.me;
-          }
-        }
-        return this.callHandler(global.script, global.handler, args, instance, NO_GLOBALS);
-      }
-      const b = this.host.builtin(name, args, this);
-      if (b !== undefined) return b;
-      this.host.warn(`unresolved handler/builtin: ${name}`);
-      return VOID;
+      // One implementation for both paths: the evaluator here and the compiled
+      // (jit) one, which calls invokeIdentCallee directly. This copy used to be
+      // duplicated — and the sprite-target rule below only existed in it after the
+      // fix, which is exactly the kind of drift that makes a corpus idiom work in a
+      // script body but not in an evaluated expression.
+      return this.invokeIdentCallee(callee.name.toLowerCase(), callee.name, args, env);
     }
 
     if (callee.kind === 'prop') {

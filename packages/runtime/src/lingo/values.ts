@@ -835,11 +835,13 @@ function applyInkPixel(
     // Not Reverse is NOT a bitwise op here: the corpus's only ink-6 item has a
     // band art whose R and B are 0, and the
     // documented `dst ^ ~src` pins that band to magenta in every room while the
-    // live client paints the DESTINATION's brightness as a green duotone. Full
+    // live client paints the DESTINATION's brightness as a duotone line. Full
     // derivation + the screenshot calibration in stage/blendFilters.ts and
-    // stage/matte.ts (`duotoneRampRgb` is the shared CPU/GPU twin).
+    // stage/matte.ts (`duotoneRampRgb` is the shared CPU/GPU twin). Both ends of
+    // that line are DERIVED from the colour of the sprite's own art (`srcRgb`),
+    // so a second item using this ink ramps in its own colour.
     if (sa === 0) return [dr, dg, db, da];
-    const [xr, xg, xb] = duotoneRampRgb(dr, dg, db);
+    const [xr, xg, xb] = duotoneRampRgb(dr, dg, db, srcRgb);
     return sa === 255 ? [xr, xg, xb, 255] : alphaBlendPixel(xr, xg, xb, sa, dr, dg, db, da);
   }
   if (ink === 7) {

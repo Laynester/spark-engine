@@ -2595,6 +2595,23 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     }
   }
 
+  /**
+   * The behavior object carried by a sprite that defines `name` — the target of a
+   * `handler(spriteRef, …)` call. A room sprite's channel holds the Event Broker
+   * Behavior its element's `#id` was wired to (`Sprite Manager::setEventBroker`,
+   * fuse_client/0034:86), and the corpus's room classes call their handlers on it
+   * with the sprite as the first argument (hh_room_park/0105, hh_room_pool/0007).
+   */
+  spriteBehaviorFor(s: LSpriteRef, name: string): LObject | null {
+    if (s.channel <= 0 || s.channel >= this.channels.length) return null;
+    const list = this.channels[s.channel].scriptInstanceList;
+    if (!(list instanceof LList)) return null;
+    for (const item of list.items) {
+      if (item instanceof LObjectClass && this.interp.hasHandler(item, name)) return item;
+    }
+    return null;
+  }
+
   spriteMethod(s: LSpriteRef, name: string, args: LVal[]): LVal {
     const lower = name.toLowerCase();
     this.dispatchToChannelHandlers(s.channel, lower, args);
@@ -2608,12 +2625,18 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       this.setSpriteProp(s, 'member', args[0] ?? VOID);
       return VOID;
     }
-    if (lower === 'registerprocedure' || lower === 'unregisterprocedure') {
+    if (lower === 'registerprocedure' || lower === 'unregisterprocedure' || lower === 'removeprocedure') {
       const handler = args[0] instanceof LSymbol ? args[0].name : toLingoString(args[0] ?? '');
       const objId = toLingoString(args[1] ?? '');
       const msg = args[2] instanceof LSymbol ? args[2].name : toLingoString(args[2] ?? '');
       const obj = this.getObjectById(objId);
       if (lower === 'registerprocedure' && obj && handler && msg) this.addEvent(msg, handler, obj);
+      // The sprite's own behavior already received the call — the name is
+      // dispatched to the channel's scriptInstanceList at the top of this method,
+      // which is where Event Broker `registerProcedure` / `removeProcedure` live
+      // (and `removeProcedure` is how the corpus unregisters:
+      // hh_shared/0003:112, snowwar 0005:44, hh_cat_new/0045:31). Recognising the
+      // name here just keeps it from being reported as `unsupported`.
       return VOID;
     }
     this.warn(`sprite(${s.channel}).${name}(): unsupported`);

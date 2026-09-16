@@ -56,12 +56,15 @@ import { REVERSE_BLEND_MODE, PASS_THROUGH_BLEND_MODE, SUBTRACT_WRAP_BLEND_MODE, 
  *
  * A screenshot of the real client (`scripts/probe-xray-shot.mjs`,
  * `scripts/probe-xray-band-colors.mjs`) shows what it actually does: the band
- * maps the ROOM's brightness onto a single green hue — `#74fa4c` lime where the
+ * maps the ROOM's brightness onto a single hue — `#74fa4c` lime where the
  * room is darkest, `#225413` where it is lightest, with every intermediate
  * (`#54b936`, `#43962a`, `#33751f`, ...) sitting on the straight line between
  * them. Both endpoints are exact measured colours; the shape between them is
  * gamma-compressed a step darker than the straight line, which is what the
  * hand comparison asked for — see `DUOTONE_RAMP_STEEPNESS` in stage/matte.ts.
+ * Those colours are a CALIBRATION, not the ramp: both ends are derived from the
+ * art the ink is compositing (see the NOT_REVERSE_GL note below), so that
+ * screenshot's band is green only because the art it is drawn with is green.
  *
  * So ink 6 is modelled as a destination duotone with those two measured
  * endpoints, not as a bitwise op. Nothing else in the v31 corpus uses ink 6, so
@@ -151,13 +154,68 @@ fn inkXor(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
  *  - the result is then chroma-boosted about its own luma (DUOTONE_RAMP_SATURATION
  *    in matte.ts), because the measured line — `#225413` is an olive at
  *    34/84/19 — still read washed out beside the real band.
+ *
+ * Both ends are then DERIVED from the colour of the art being composited (`src`,
+ * the sprite's own texel) instead of being constants: the ramp is the art at its
+ * own brightness for a bright room and the art LIGHTENED for a dark room, so a
+ * red art ramps red and this measured green (which is green only because its art
+ * is green) cannot leak onto another item. Same arithmetic as `rgbHueDegrees` /
+ * `rgbSaturation` / `rgbValue` / `hsvToRgbBytes` / `duotoneRampEnds` in matte.ts,
+ * which carries the shape and its measurement — keep the two in step.
  */
 const NOT_REVERSE_GL = `
-vec3 inkNotReverseRamp(vec3 back) {
+float inkRampHue(vec3 c) {
+    float mx = max(c.r, max(c.g, c.b));
+    float mn = min(c.r, min(c.g, c.b));
+    float chroma = mx - mn;
+    if (chroma <= 0.0) {
+        return 0.0;
+    }
+    if (mx == c.r) {
+        return fract(((c.g - c.b) / chroma) / 6.0) * 360.0;
+    }
+    if (mx == c.g) {
+        return ((c.b - c.r) / chroma + 2.0) * 60.0;
+    }
+    return ((c.r - c.g) / chroma + 4.0) * 60.0;
+}
+
+float inkRampSat(vec3 c) {
+    float mx = max(c.r, max(c.g, c.b));
+    return mx > 0.0 ? (mx - min(c.r, min(c.g, c.b))) / mx : 0.0;
+}
+
+// HSV -> RGB, quantised to the 8-bit bytes the ramp is built from — the shader
+// and the CPU twin have to mix the SAME two end colours to stay identical.
+vec3 inkRampHsvToRgb(float h, float s, float v) {
+    float c = v * s;
+    float hp = fract(h / 360.0) * 6.0;
+    float x = c * (1.0 - abs(mod(hp, 2.0) - 1.0));
+    vec3 rgb;
+    if (hp < 1.0) {
+        rgb = vec3(c, x, 0.0);
+    } else if (hp < 2.0) {
+        rgb = vec3(x, c, 0.0);
+    } else if (hp < 3.0) {
+        rgb = vec3(0.0, c, x);
+    } else if (hp < 4.0) {
+        rgb = vec3(0.0, x, c);
+    } else if (hp < 5.0) {
+        rgb = vec3(x, 0.0, c);
+    } else {
+        rgb = vec3(c, 0.0, x);
+    }
+    return floor((rgb + (v - c)) * 255.0 + 0.5) / 255.0;
+}
+
+vec3 inkNotReverseRamp(vec3 back, vec3 src) {
     float lum = (back.r + back.g + back.b) / 1.0;
     float t = clamp(1.0 - pow(lum, 0.75), 0.0, 1.0);
-    vec3 light = vec3(34.0, 84.0, 19.0) / 255.0;   // #225413 - the LIGHTEST room tones
-    vec3 dark = vec3(116.0, 250.0, 76.0) / 255.0;  // #74fa4c - the DARKEST room tones
+    float hue = inkRampHue(src) - 13.8;             // the ink's measured hue trim
+    float sat = inkRampSat(src);
+    float v = max(src.r, max(src.g, src.b));        // the art's own brightness
+    vec3 light = inkRampHsvToRgb(hue, sat * 0.774, v * 0.988);  // bright room: the art itself
+    vec3 dark = inkRampHsvToRgb(hue, sat * 0.696, 0.98);        // dark room: the art lightened
     vec3 c = mix(light, dark, t);
     float luma = dot(c, vec3(0.299, 0.587, 0.114));
     return clamp(luma + (c - luma) * 1.35, 0.0, 1.0);
@@ -165,11 +223,56 @@ vec3 inkNotReverseRamp(vec3 back) {
 `;
 
 const NOT_REVERSE_GPU = `
-fn inkNotReverseRamp(back: vec3<f32>) -> vec3<f32> {
+fn inkRampHue(c: vec3<f32>) -> f32 {
+    let mx = max(c.r, max(c.g, c.b));
+    let mn = min(c.r, min(c.g, c.b));
+    let chroma = mx - mn;
+    if (chroma <= 0.0) {
+        return 0.0;
+    }
+    if (mx == c.r) {
+        return fract(((c.g - c.b) / chroma) / 6.0) * 360.0;
+    }
+    if (mx == c.g) {
+        return ((c.b - c.r) / chroma + 2.0) * 60.0;
+    }
+    return ((c.r - c.g) / chroma + 4.0) * 60.0;
+}
+
+fn inkRampSat(c: vec3<f32>) -> f32 {
+    let mx = max(c.r, max(c.g, c.b));
+    return select(0.0, (mx - min(c.r, min(c.g, c.b))) / mx, mx > 0.0);
+}
+
+fn inkRampHsvToRgb(h: f32, s: f32, v: f32) -> vec3<f32> {
+    let c = v * s;
+    let hp = fract(h / 360.0) * 6.0;
+    let x = c * (1.0 - abs(hp % 2.0 - 1.0));
+    var rgb: vec3<f32>;
+    if (hp < 1.0) {
+        rgb = vec3<f32>(c, x, 0.0);
+    } else if (hp < 2.0) {
+        rgb = vec3<f32>(x, c, 0.0);
+    } else if (hp < 3.0) {
+        rgb = vec3<f32>(0.0, c, x);
+    } else if (hp < 4.0) {
+        rgb = vec3<f32>(0.0, x, c);
+    } else if (hp < 5.0) {
+        rgb = vec3<f32>(x, 0.0, c);
+    } else {
+        rgb = vec3<f32>(c, 0.0, x);
+    }
+    return floor((rgb + vec3<f32>(v - c)) * 255.0 + 0.5) / 255.0;
+}
+
+fn inkNotReverseRamp(back: vec3<f32>, src: vec3<f32>) -> vec3<f32> {
     let lum = (back.r + back.g + back.b) / .0;
     let t = clamp(1.0 - pow(max(lum, 0.0), 0.75), 0.0, 1.0);
-    let light = vec3<f32>(34.0, 84.0, 19.0) / 255.0;   // #225413 - the LIGHTEST room tones
-    let dark = vec3<f32>(116.0, 250.0, 76.0) / 255.0;  // #74fa4c - the DARKEST room tones
+    let hue = inkRampHue(src) - 13.8;               // the ink's measured hue trim
+    let sat = inkRampSat(src);
+    let v = max(src.r, max(src.g, src.b));          // the art's own brightness
+    let light = inkRampHsvToRgb(hue, sat * 0.774, v * 0.988);  // bright room: the art itself
+    let dark = inkRampHsvToRgb(hue, sat * 0.696, 0.98);        // dark room: the art lightened
     let c = mix(light, dark, t);
     let luma = dot(c, vec3<f32>(0.299, 0.587, 0.114));
     return clamp(luma + (c - luma) * 1.35, vec3<f32>(0.0), vec3<f32>(1.0));
@@ -241,8 +344,8 @@ function makeInkBlendClass(gl: InkShader, gpu: InkShader): typeof BlendModeFilte
 
 const XOR_MODES = { functions: XOR_GL, op: 'inkXor(back.rgb, front.rgb)', alpha: 'blend' } as const;
 const XOR_MODES_GPU = { functions: XOR_GPU, op: 'inkXor(back.rgb, front.rgb)', alpha: 'blend' } as const;
-const NOT_REVERSE_MODES = { functions: NOT_REVERSE_GL, op: 'inkNotReverseRamp(back.rgb)', alpha: 'blend' } as const;
-const NOT_REVERSE_MODES_GPU = { functions: NOT_REVERSE_GPU, op: 'inkNotReverseRamp(back.rgb)', alpha: 'blend' } as const;
+const NOT_REVERSE_MODES = { functions: NOT_REVERSE_GL, op: 'inkNotReverseRamp(back.rgb, front.rgb)', alpha: 'blend' } as const;
+const NOT_REVERSE_MODES_GPU = { functions: NOT_REVERSE_GPU, op: 'inkNotReverseRamp(back.rgb, front.rgb)', alpha: 'blend' } as const;
 const PASS_MODES = { functions: PASS_GL, op: 'inkPass(back.rgb)', alpha: 'keep' } as const;
 const PASS_MODES_GPU = { functions: PASS_GPU, op: 'inkPass(back.rgb)', alpha: 'keep' } as const;
 const SUB_MODES = { functions: SUB_WRAP_GL, op: 'inkSubWrap(back.rgb, front.rgb)', alpha: 'blend' } as const;

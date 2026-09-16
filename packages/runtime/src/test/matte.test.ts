@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyMaskAlpha, bakeEdgeBackground, bakeInputsForImage, bakeModeForInk, bakeSurface, blendFilterMode, blendModeForInk, inkUsesPixelHitTest, setMatteIdentityFill, DARKEST_BLEND_MODE, LIGHTEST_BLEND_MODE, matteRegionMask, PASS_THROUGH_BLEND_MODE, REVERSE_BLEND_MODE, spritePixelHitTest, SUBTRACT_BLEND_MODE, SUBTRACT_WRAP_BLEND_MODE, tintSpriteBackground, tintSpriteDarken, NOT_REVERSE_BLEND_MODE, DUOTONE_RAMP_STEEPNESS, duotoneRampRgb, boostSaturation } from '../stage/matte.js';
+import { applyMaskAlpha, bakeEdgeBackground, bakeInputsForImage, bakeModeForInk, bakeSurface, blendFilterMode, blendModeForInk, inkUsesPixelHitTest, setMatteIdentityFill, DARKEST_BLEND_MODE, LIGHTEST_BLEND_MODE, matteRegionMask, PASS_THROUGH_BLEND_MODE, REVERSE_BLEND_MODE, spritePixelHitTest, SUBTRACT_BLEND_MODE, SUBTRACT_WRAP_BLEND_MODE, tintSpriteBackground, tintSpriteDarken, NOT_REVERSE_BLEND_MODE, DUOTONE_RAMP_DARK_SAT, DUOTONE_RAMP_DARK_VALUE, DUOTONE_RAMP_HUE_TRIM, DUOTONE_RAMP_LIGHT_SAT, DUOTONE_RAMP_LIGHT_VALUE, DUOTONE_RAMP_STEEPNESS, duotoneRampEnds, duotoneRampRgb, boostSaturation, hsvToRgbBytes, rgbHueDegrees, rgbSaturation, rgbValue } from '../stage/matte.js';
+
+/** The band art the ink-6 ramp was calibrated against (a flat `#005500`). */
+const BAND_ART = 0x005500;
 
 /** Build an RGBA buffer; fill(x, y, r, g, b, a) default opaque white. */
 function makeImage(width: number, height: number): { data: Uint8ClampedArray; fill: (x: number, y: number, r: number, g: number, b: number, a?: number) => void } {
@@ -717,39 +720,130 @@ test('hc_rntgn ink set: 38/39 pass through so the ink-6 ramp reads the ROOM', ()
 test('the duotone band ramp keeps its measured endpoints and darkens the middle', () => {
   // Calibrated off a real client screenshot: every colour the band paints is
   // on the straight line from #74fa4c (the room's darkest tones) to #225413 (its
-  // lightest), and both endpoints are exact colours from that shot.
-  assert.deepEqual(duotoneRampRgb(0, 0, 0), boostSaturation(116, 250, 76)); // #74fa4c at black
-  assert.deepEqual(duotoneRampRgb(255, 255, 255), boostSaturation(34, 84, 19)); // #225413 at white
+  // lightest), and both endpoints are exact colours from that shot. Those two
+  // colours are DERIVED from the band art the measurement was taken with (see the
+  // next test) — passing it here reproduces the measured pair byte for byte.
+  assert.deepEqual(duotoneRampRgb(0, 0, 0, BAND_ART), boostSaturation(116, 250, 76)); // #74fa4c at black
+  assert.deepEqual(duotoneRampRgb(255, 255, 255, BAND_ART), boostSaturation(34, 84, 19)); // #225413 at white
   // Between them the transfer is gamma-compressed, so a mid room tone lands
   // CLOSER to the dark green than the straight `1 - lum` line did — that was the
   // "nearly perfect, a little bright" report. Endpoints are untouched by it.
   const midTone = 128 * 3; // a room pixel of byte 128 in every channel
-  const got = duotoneRampRgb(midTone, midTone, midTone);
+  const got = duotoneRampRgb(midTone, midTone, midTone, BAND_ART);
   const linear = [34 + 82 * 0.5, 84 + 166 * 0.5, 19 + 57 * 0.5].map((v) => Math.round(v));
   assert.ok(got[1] < linear[1], `mid tone must be darker than the linear ramp: ${got} vs ${linear}`);
   assert.ok(got[1] > 19, `but still on the ramp: ${got}`);
   // Monotone brighter room -> darker output, for every byte level.
   for (let lum = 0; lum < 255; lum++) {
-    const a = duotoneRampRgb(lum, lum, lum);
-    const b = duotoneRampRgb(lum + 1, lum + 1, lum + 1);
+    const a = duotoneRampRgb(lum, lum, lum, BAND_ART);
+    const b = duotoneRampRgb(lum + 1, lum + 1, lum + 1, BAND_ART);
     assert.ok(b[1] <= a[1], `ramp must not get brighter as the room does: ${lum}`);
   }
-  // The greens are chroma-boosted about their own luma, so the band reads as
+  // The ends are chroma-boosted about their own luma, so the band reads as
   // green rather than olive without getting lighter: the dark endpoint loses
   // red and blue, and the lime keeps its green while shedding them too.
-  const dark = duotoneRampRgb(255, 255, 255);
+  const dark = duotoneRampRgb(255, 255, 255, BAND_ART);
   assert.ok(dark[0] < 34 && dark[2] < 19, `dark endpoint goes greener: ${dark}`);
   assert.ok(dark[1] > 84, `dark endpoint keeps its green up: ${dark}`);
-  const lime = duotoneRampRgb(0, 0, 0);
+  const lime = duotoneRampRgb(0, 0, 0, BAND_ART);
   assert.ok(lime[0] < 116 && lime[2] < 76, `lime endpoint sheds red/blue: ${lime}`);
   assert.ok(lime[1] >= 250, `lime endpoint stays lime: ${lime}`);
   // Byte-for-byte agreement with the shader twins in stage/blendFilters.ts
   // (inkNotReverseRamp is `clamp(luma + (c - luma) * 1.35)` over
-  // `mix(light, dark, clamp(1 - pow(lum, 0.75)))`).
+  // `mix(inkRampHsvToRgb(...), inkRampHsvToRgb(...), clamp(1 - pow(lum, 0.75)))`,
+  // both ends byte-quantised the way hsvToRgbBytes does).
+  const ends = duotoneRampEnds(BAND_ART);
   for (let lum = 0; lum <= 255; lum++) {
     const t = Math.max(0, Math.min(1, 1 - Math.pow(lum / 255, DUOTONE_RAMP_STEEPNESS)));
-    const want = boostSaturation(34 + 82 * t, 84 + 166 * t, 19 + 57 * t);
-    assert.deepEqual(duotoneRampRgb(lum, lum, lum), want);
+    const want = boostSaturation(
+      ends.light[0] + (ends.dark[0] - ends.light[0]) * t,
+      ends.light[1] + (ends.dark[1] - ends.light[1]) * t,
+      ends.light[2] + (ends.dark[2] - ends.light[2]) * t,
+    );
+    assert.deepEqual(duotoneRampRgb(lum, lum, lum, BAND_ART), want);
+  }
+});
+
+test('both ends of the duotone band ramp are DERIVED from the art, not hardcoded', () => {
+  // The two ends are the art's own colour (bright room) and the art LIGHTENED
+  // (dark room), so the ramp has no colour of its own: on the art it was
+  // calibrated with it lands exactly on the measured pair, and on any other art
+  // it lands in THAT art's colour family.
+  assert.deepEqual(duotoneRampEnds(BAND_ART), { light: [34, 84, 19], dark: [116, 250, 76] });
+
+  // A red art ramps red and a blue art ramps blue, at both ends of the ramp: a
+  // second item using this ink does not inherit the calibrated green.
+  for (const [art, channel, name] of [
+    [0xff0000, 0, 'red'],
+    [0x0000ff, 2, 'blue'],
+    [0xffff00, 0, 'yellow'],
+  ] as const) {
+    const { light, dark } = duotoneRampEnds(art);
+    for (const [end, px] of [['light', light], ['dark', dark]] as const) {
+      const others = [0, 1, 2].filter((c) => c !== channel);
+      assert.ok(
+        px[channel] > px[others[0]] && px[channel] >= px[others[1]],
+        `a ${name} art's ${end} end must be ${name}, not green: ${px}`,
+      );
+    }
+    // ...and the room's brightness still runs the same way (dark room = the
+    // lightened end), in every colour family.
+    const luma = (c: readonly number[]): number => 0.213 * c[0] + 0.715 * c[1] + 0.072 * c[2];
+    assert.ok(luma(duotoneRampRgb(0, 0, 0, art)) > luma(duotoneRampRgb(255, 255, 255, art)), `dark room is the light end for ${name}`);
+  }
+
+  // Art with no chroma has no hue to take: its ramp is a plain lighten of its
+  // own grey, never a colour borrowed from this calibration.
+  for (const grey of [0x000000, 0x808080, 0xffffff, 0x101010]) {
+    const { light, dark } = duotoneRampEnds(grey);
+    for (const px of [light, dark]) assert.ok(px[0] === px[1] && px[1] === px[2], `a grey art ramps grey: ${px}`);
+  }
+  assert.deepEqual(duotoneRampEnds(0x000000), { light: [0, 0, 0], dark: [250, 250, 250] });
+  const grey = duotoneRampEnds(0x808080);
+  // The bright end is the art's OWN brightness (measured value trim 0.988, the
+  // one that makes the band art land on 84 rather than 85), so a mid grey comes
+  // back a hair under its own byte.
+  assert.ok(Math.abs(grey.light[0] - 128) <= 2, `grey art stays its own grey: ${grey.light}`);
+  assert.ok(grey.dark[0] > grey.light[0], `and lightens: ${grey.dark}`);
+
+  // The art's brightness is where the light end's value comes from, so a
+  // brighter art ramps from a brighter colour.
+  assert.ok(duotoneRampEnds(0x00aa00).light[1] > duotoneRampEnds(0x004400).light[1], 'the art value is carried through');
+
+  // The hue maths the derivation rests on, against the shader twins' form.
+  assert.equal(rgbHueDegrees(0, 0x55, 0), 120);
+  assert.equal(rgbHueDegrees(0xff, 0, 0), 0);
+  assert.equal(rgbHueDegrees(0, 0, 0xff), 240);
+  assert.equal(rgbHueDegrees(0, 0xff, 0xff), 180);
+  assert.equal(rgbHueDegrees(0x80, 0x80, 0x80), 0);
+  assert.equal(rgbSaturation(0x80, 0x80, 0x80), 0);
+  assert.equal(rgbSaturation(0, 0x55, 0), 1);
+  assert.equal(rgbValue(0, 0x55, 0), 0x55 / 255);
+  assert.equal(DUOTONE_RAMP_HUE_TRIM, -13.8);
+  // hsvToRgbBytes rounds to bytes and is the inverse the shader uses.
+  assert.deepEqual(hsvToRgbBytes(120, 0, 0), [0, 0, 0]);
+  assert.deepEqual(hsvToRgbBytes(120, 1, 1), [0, 255, 0]);
+  assert.deepEqual(hsvToRgbBytes(106.2, 0.774, 84 / 255), [34, 84, 19]);
+  assert.deepEqual(hsvToRgbBytes(106.2, 0.696, 0.98), [116, 250, 76]);
+  assert.ok(
+    DUOTONE_RAMP_LIGHT_SAT > 0 &&
+      DUOTONE_RAMP_LIGHT_SAT < 1 &&
+      DUOTONE_RAMP_DARK_SAT > 0 &&
+      DUOTONE_RAMP_DARK_SAT < 1 &&
+      DUOTONE_RAMP_DARK_VALUE > 0 &&
+      DUOTONE_RAMP_DARK_VALUE <= 1 &&
+      DUOTONE_RAMP_LIGHT_VALUE > 0 &&
+      DUOTONE_RAMP_LIGHT_VALUE <= 1,
+    'shape constants are trims, not colours',
+  );
+
+  // Every end of every art is reachable and in range (no NaN from a zero-chroma
+  // or zero-value art, which is what the shader twins must survive too).
+  for (let i = 0; i < 0x1000000; i += 0x11111) {
+    const { light, dark } = duotoneRampEnds(i);
+    for (const px of [light, dark]) {
+      for (const v of px) assert.ok(Number.isInteger(v) && v >= 0 && v <= 255, `byte end for #${i.toString(16)}: ${px}`);
+    }
   }
 });
 

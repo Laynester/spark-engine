@@ -9704,6 +9704,146 @@ test('call(#handler, spriteRef, ...) dispatches to the sprite behavior (room wal
   assert.deepEqual(items, ['#eventProcRoom', 'Room_interface', '#mouseDown'], 'sprite-ref call() reaches the behavior handler');
 });
 
+test('registerProcedure(spriteRef, #handler, id, event) registers on the SPRITE behavior, not the window global (park bus door, pool teleports, cinema)', () => {
+  // The corpus registers room-sprite clicks with the SPRITE AS THE FIRST
+  // ARGUMENT — hh_room_park/0105 park_a Class::prepare:
+  //
+  //   tsprite = tRoomVis.getSprById("bus")
+  //   registerProcedure(tsprite, #parkAEventProc, me.getID(), #mouseDown)
+  //
+  // and the same construct in hh_room_park/0106:18 (goawaybus), hh_room_pool/0007:52
+  // + 0008:60/63 (#poolTeleport, #eventProcJumpTicketAutomatic), hh_room_cinema/0001:15
+  // (#eventProc on "teleport"). `getSprById` hands back the raw sprite
+  // (Visualizer Instance 0054:488 stores `sprite(reserveSprite(...))`), whose channel
+  // carries the Event Broker Behavior that Sprite Manager::setEventBroker wired
+  // (fuse_client/0034:86) — that object is what owns the handler. The bare call used
+  // to resolve to Window API's movie-script global of the same name, whose first
+  // parameter is a WINDOW id: `windowExists(sprite)` was 0, it returned 0 and the
+  // broker's pProcList stayed empty, so the bus door / pool / cinema clicks never
+  // fired (measured with scripts/probe-room-sprite-click.mjs).
+  const e = new DirectorEngine();
+  e.addScriptMember(
+    'Beh',
+    'parent',
+    [
+      'property pProcList',
+      'on registerProcedure me, tMethod, tClientID, tEvent',
+      '  pProcList = [tMethod, tClientID, tEvent]',
+      '  return 1',
+      'end',
+      'on getProc me',
+      '  return pProcList',
+      'end',
+      'on setId2 me, tID',
+      '  return tID',
+      'end',
+    ].join('\n'),
+  );
+  // The real Window API global, which must keep answering for WINDOW ids.
+  e.addScriptMember(
+    'Window API',
+    'movie',
+    [
+      'on registerProcedure tID, tHandler, tClientID, tEvent',
+      '  return "window_global"',
+      'end',
+    ].join('\n'),
+  );
+  const broker = e.interp.evalExpressionString('new(script("Beh"))') as LObject;
+  const s = e.getSprite(9);
+  e.setSpriteProp(s, 'scriptInstanceList', new LList([broker]));
+
+  assert.equal(
+    e.interp.evalExpressionString('registerProcedure("nav_roomlist", #eventProcNav, "nav", #mouseDown)'),
+    'window_global',
+    'a WINDOW id still resolves to the Window API global',
+  );
+  assert.equal(
+    e.interp.evalExpressionString('registerProcedure(sprite(9), #parkAEventProc, "park_a", #mouseDown)'),
+    1,
+    'a SPRITE as the first argument resolves to the behavior its channel carries',
+  );
+  const proc = broker.props.get('pProcList');
+  assert.ok(proc instanceof LList && proc.items.length === 3, 'the behavior got the call');
+  assert.ok(
+    proc.items[0] instanceof LSymbol && proc.items[0].name === 'parkAEventProc' &&
+      String(proc.items[1]) === 'park_a' &&
+      proc.items[2] instanceof LSymbol && proc.items[2].name === 'mouseDown',
+    'and it got the handler, the client id and the event in that order',
+  );
+});
+
+test('a click on a room sprite runs the handler registered with registerProcedure(spriteRef, ...) — and removeProcedure(spriteRef, ...) clears it', () => {
+  // park_a Class::parkAEventProc only sends TRYBUS when the sprite hands it the
+  // click (`if tSprID = "bus" then send("TRYBUS")`), and the hand-off is the Event
+  // Broker's own mouseDown -> redirectEvent -> `call(handler, client, event, id)`.
+  // That is why the registration has to live on the broker and not (only) in the
+  // engine's own event map.
+  const e = new DirectorEngine();
+  e.addScriptMember(
+    'Beh',
+    'parent',
+    [
+      'property pProcList',
+      'property parkSeen',
+      'property id',
+      'on setID me, tID',
+      '  id = tID',
+      '  return 1',
+      'end',
+      'on getID me',
+      '  return id',
+      'end',
+      'on template me',
+      '  return [#mouseDown: [#null, 0], #mouseUp: [#null, 0]]',
+      'end',
+      'on registerProcedure me, tMethod, tClientID, tEvent',
+      '  if voidp(pProcList) then',
+      '    pProcList = me.template()',
+      '  end if',
+      '  pProcList[tEvent] = [tMethod, tClientID]',
+      '  return 1',
+      'end',
+      'on removeProcedure me, tEvent',
+      '  pProcList[tEvent] = [#null, 0]',
+      '  return 1',
+      'end',
+      'on mouseDown me',
+      '  tProc = pProcList[#mouseDown]',
+      '  if voidp(tProc) then',
+      '    return 0',
+      '  end if',
+      '  if tProc[2] = 0 then',
+      '    return 0',
+      '  end if',
+      '  return call(tProc[1], me, #mouseDown, me.getId())',
+      'end',
+      'on parkAEventProc me, tEvent, tSprID',
+      '  parkSeen = tSprID',
+      '  return 1',
+      'end',
+    ].join('\n'),
+  );
+  const broker = e.interp.evalExpressionString('new(script("Beh"))') as LObject;
+  const s = e.getSprite(9);
+  e.setSpriteProp(s, 'scriptInstanceList', new LList([broker]));
+  e.spriteMethod(s, 'setID', [new LSymbol('bus')]);
+
+  e.interp.evalExpressionString('registerProcedure(sprite(9), #parkAEventProc, "park_a", #mouseDown)');
+  e.dispatchPointerEvent('mouseDown', 9, 0, 0);
+  const seen = broker.props.get('parkSeen');
+  assert.ok(seen instanceof LSymbol && seen.name === 'bus', 'the click reached #parkAEventProc carrying the sprite id');
+
+  // The corpus unregisters with the dotted form on the same sprite —
+  // `pModtoolButtonSpr.removeProcedure(#mouseUp)` (hh_shared/0003:112),
+  // snowwar 0005:44, hh_cat_new/0045:31 — which has to reach the broker too or the
+  // removed click keeps firing.
+  e.spriteMethod(s, 'removeProcedure', [new LSymbol('mouseDown')]);
+  broker.props.delete('parkSeen');
+  e.dispatchPointerEvent('mouseDown', 9, 0, 0);
+  assert.equal(broker.props.get('parkSeen'), undefined, 'a removed handler does not fire again');
+});
+
 test('set member(x).palette attaches the palette table (private room patterns)', () => {
   // Visualizer Part Wrapper renderImage: `tPartMem.palette =
   // member(getmemnum(tPalette))` on the wall/floor pattern bitmaps — was

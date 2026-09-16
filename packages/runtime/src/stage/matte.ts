@@ -827,6 +827,12 @@ export const PASS_THROUGH_BLEND_MODE = 'passthrough-ink-gl';
  * lightest — a dark green). Every distinct colour the real band paints is on that
  * line, and both endpoints are exact palette-equivalent values from the shot.
  *
+ * That line is GREEN only because the art measured against it is green: the
+ * measured pair is a CALIBRATION of the ramp's shape, and the two ends are
+ * derived from the art the ink is compositing (`duotoneRampEnds`) — so a second
+ * item using this ink ramps in its own colour instead of inheriting this one.
+ * No colour is hardcoded anywhere in this ramp.
+ *
  * The transfer is `t = 1 - lum^STEEPNESS`: a plain linear `1 - lum` read a
  * little bright against the real thing (the mid tones sat closer to the lime
  * end than the shot does), while compressing the room's brightness first keeps
@@ -870,11 +876,125 @@ export function boostSaturation(r: number, g: number, b: number, k = DUOTONE_RAM
   return [clamp(luma + (r - luma) * k), clamp(luma + (g - luma) * k), clamp(luma + (b - luma) * k)];
 }
 
-/** The CPU twin of the band shader (stage/blendFilters.ts). */
-export function duotoneRampRgb(r: number, g: number, b: number): [number, number, number] {
+/** HSV hue of an RGB triple in degrees; 0 for a colour with no chroma. */
+export function rgbHueDegrees(r: number, g: number, b: number): number {
+  const mx = Math.max(r, g, b);
+  const chroma = mx - Math.min(r, g, b);
+  if (chroma <= 0) return 0;
+  let h: number;
+  if (mx === r) {
+    const f = (g - b) / chroma / 6;
+    h = (f - Math.floor(f)) * 6;
+  } else if (mx === g) {
+    h = (b - r) / chroma + 2;
+  } else {
+    h = (r - g) / chroma + 4;
+  }
+  return h * 60;
+}
+
+/** HSV saturation of an RGB triple, 0..1. */
+export function rgbSaturation(r: number, g: number, b: number): number {
+  const mx = Math.max(r, g, b);
+  return mx <= 0 ? 0 : (mx - Math.min(r, g, b)) / mx;
+}
+
+/** HSV value of an RGB triple, 0..1. */
+export function rgbValue(r: number, g: number, b: number): number {
+  return Math.max(r, g, b) / 255;
+}
+
+/**
+ * The ramp's SHAPE, measured once against a real band and expressed as HSV steps
+ * from the ART's own colour. These are the only numbers left in the ink: the
+ * ramp carries no colour of its own, every colour it paints is derived from the
+ * art it is compositing.
+ *
+ *  - `HUE_TRIM` — the measured line sits 13.8 degrees below the band art's own
+ *    hue (the art is `#005500`, 120 degrees; the line is 106.2). It is the ink's
+ *    own hue offset, applied in every colour family, and it is why the
+ *    calibration below has to be expressed relative to the art rather than as a
+ *    fixed pair of colours.
+ *  - the BRIGHT-room end is the art's own colour at its own brightness, with its
+ *    chroma trimmed by `LIGHT_SAT`;
+ *  - the DARK-room end is the art LIGHTENED to (nearly) full value, chroma
+ *    trimmed by `DARK_SAT`. That lightening is what puts a bright lime on a dark
+ *    room and a dark olive on a light one.
+ *
+ * For the art the ramp was calibrated on these derive back to the measured bytes
+ * exactly (`duotoneRampEnds(0x005500)` is `#225413` / `#74fa4c`), which is pinned
+ * by a test; for any other art they are that art's own colour family.
+ */
+export const DUOTONE_RAMP_HUE_TRIM = -13.8;
+export const DUOTONE_RAMP_LIGHT_SAT = 0.774;
+export const DUOTONE_RAMP_LIGHT_VALUE = 0.988;
+export const DUOTONE_RAMP_DARK_SAT = 0.696;
+export const DUOTONE_RAMP_DARK_VALUE = 0.98;
+
+/**
+ * HSV -> RGB, quantised to the 8-bit bytes the ramp is built from (h in degrees,
+ * s/v in 0..1). Quantising BOTH ends here is what keeps the CPU ramp and the
+ * shader ramp byte-identical: the shader twin (`inkRampHsvToRgb` in
+ * stage/blendFilters.ts) rounds the same way before it mixes.
+ */
+export function hsvToRgbBytes(h: number, s: number, v: number): [number, number, number] {
+  const c = v * s;
+  const hp = (((h / 60) % 6) + 6) % 6;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let rgb: [number, number, number];
+  if (hp < 1) rgb = [c, x, 0];
+  else if (hp < 2) rgb = [x, c, 0];
+  else if (hp < 3) rgb = [0, c, x];
+  else if (hp < 4) rgb = [0, x, c];
+  else if (hp < 5) rgb = [x, 0, c];
+  else rgb = [c, 0, x];
+  const m = v - c;
+  return [
+    Math.round((rgb[0] + m) * 255),
+    Math.round((rgb[1] + m) * 255),
+    Math.round((rgb[2] + m) * 255),
+  ];
+}
+
+/**
+ * The ramp's two ends, DERIVED from the colour of the art being composited
+ * (packed 0xRRGGBB) — see the constants above for the shape they come from.
+ *
+ * `light` is the end a BRIGHT room maps to (the art at its own brightness) and
+ * `dark` the end a DARK room maps to (the art lightened), which is why the ramp
+ * inverts the room's brightness instead of following it.
+ *
+ * An art with no chroma (black / grey / white) has no hue to trim, so its ramp is
+ * a plain lighten of its own grey — not a colour borrowed from this calibration.
+ */
+export function duotoneRampEnds(sourceRgb: number): { light: [number, number, number]; dark: [number, number, number] } {
+  const r = (sourceRgb >> 16) & 0xff;
+  const g = (sourceRgb >> 8) & 0xff;
+  const b = sourceRgb & 0xff;
+  const hue = rgbHueDegrees(r, g, b) + DUOTONE_RAMP_HUE_TRIM;
+  const sat = rgbSaturation(r, g, b);
+  const value = rgbValue(r, g, b);
+  return {
+    light: hsvToRgbBytes(hue, sat * DUOTONE_RAMP_LIGHT_SAT, value * DUOTONE_RAMP_LIGHT_VALUE),
+    dark: hsvToRgbBytes(hue, sat * DUOTONE_RAMP_DARK_SAT, DUOTONE_RAMP_DARK_VALUE),
+  };
+}
+
+/**
+ * The CPU twin of the band shader (stage/blendFilters.ts).
+ *
+ * `sourceRgb` is the colour of the art being composited (packed 0xRRGGBB) and is
+ * where every colour in the result comes from — see `duotoneRampEnds`.
+ */
+export function duotoneRampRgb(r: number, g: number, b: number, sourceRgb: number): [number, number, number] {
   const lum = (r + g + b) / 765;
   const t = Math.max(0, Math.min(1, 1 - Math.pow(lum, DUOTONE_RAMP_STEEPNESS)));
-  return boostSaturation(34 + 82 * t, 84 + 166 * t, 19 + 57 * t);
+  const { light, dark } = duotoneRampEnds(sourceRgb);
+  return boostSaturation(
+    light[0] + (dark[0] - light[0]) * t,
+    light[1] + (dark[1] - light[1]) * t,
+    light[2] + (dark[2] - light[2]) * t,
+  );
 }
 
 /**
