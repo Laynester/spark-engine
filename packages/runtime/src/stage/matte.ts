@@ -396,30 +396,35 @@ export function bakeEdgeBackground(
     // bitmap sprite when `tSpr.member.image.getPixel(...).hexString()` is NOT
     // "#FFFFFF" — white is the transparent colour for these sprites.
     //
-    // Palette-0 is therefore not the KEY COLOUR — but for indexed art it is
-    // still the one form of "the background" that survives a palette REMAP
-    // (`paletteTarget` rewrites the RGB the pixels carry, so a colour test stops
-    // matching the recoloured background — see indexZeroFloodMask), so it is
-    // consulted by INDEX, and only when entry 0 IS that background colour:
-    // entry 0 has to be the same near-white the ink's default wants. That gate is
-    // what keeps hh_entry_jp's `screen3d` — a 29-entry palette with BLACK at
-    // index 0, where the black is ART, because the screen the Entry Image
-    // Scroller paints sits inside a black field whose left edge is index 0 for
-    // its top 48 rows — out of the index rule; without it a border flood walks
-    // into the screen and keys 5834 pixels of the frame the movie just painted.
-    // The matte/notGhost paths below resolve palette-0 unconditionally — that is
-    // ink 8's rule, and ink 8 asks for the member's background where ink 36 asks
-    // for the sprite's.
+    // For INDEXED art the colour pass alone is not enough: the background of the
+    // window furniture and of the placed-item previews IS the member's palette
+    // entry 0, and it is frequently NOT white (the window frames' `#dddddd`
+    // panel, a poster's own ink), so nothing the white default matches goes and
+    // the box stays — the "weirdly white unkeyed things" on wall items and the
+    // white box behind an item being placed.
+    //
+    // That background is removed the way ink 8 removes it, and NOT by keying
+    // palette-0's colour: the placed sprite is ink 8 and keys the BORDER-CONNECTED
+    // index-0 region (`matteRegionMask`'s flood), which is why a placed item looks
+    // right while its ink-36 preview did not. Keying the colour instead is
+    // blanket, so art that happens to sit at index 0 dies with the background —
+    // for an item whose palette-0 is BLACK that reads as "the black pixels are
+    // transparent and the background is still there".
+    //
+    // The flood is a FALLBACK, run only when the colour pass keyed nothing, so it
+    // can never take a second colour away from art the ink already dealt with. A
+    // raster that no longer describes its pixels (`indicesStale` — the movie
+    // painted over the art) is never used: hh_entry_jp's `screen3d` is a 29-entry
+    // palette with BLACK at index 0, the Entry Image Scroller repaints that member
+    // every tick, and the frame it paints is mostly white — a flood seeded from
+    // that border keyed pixels of the freshly painted screen.
+    const hasFreshRaster = !!indices && indices.length >= n;
     const key = keyRgb ?? 0xffffff;
     // Resolved BEFORE the colour pass: the pass makes every key-coloured pixel
     // transparent, and a transparent pixel is a conduit, so computing this
     // afterwards would let the keyed backdrop tunnel into a sealed interior
     // region (see indexZeroFloodMask).
-    const p0 = paletteIndex0Rgb(palette);
-    const indexMask =
-      key === 0xffffff && p0 !== null && isNearWhiteGrayscale(p0, NEAR_WHITE_MIN, NEAR_WHITE_DELTA) && indices && indices.length >= n
-        ? indexZeroFloodMask(rgba, width, height, indices)
-        : null;
+    const indexMask = hasFreshRaster ? indexZeroFloodMask(rgba, width, height, indices!) : null;
     let changed = false;
     for (let i = 0; i < n; i++) {
       if (isOpaque(rgba, i) && rgbAt(rgba, i) === key) {
@@ -430,13 +435,13 @@ export function bakeEdgeBackground(
         changed = true;
       }
     }
-    // The COLOUR pass above misses the background of art that has been RE-INDEXED
-    // (`paletteTarget`): the palette entry is still 0, but the RGB the pixels
-    // carry is no longer the white the pass looks for, so a window's white mask
-    // survived under ink 36 while the room sprite under ink 8 (which resolves
-    // palette-0) lost it. Key the border-connected index-0 pixels too, so both
-    // inks agree on what the background of an indexed member is.
-    if (indexMask) {
+    // Nothing in the colour pass matched, so the art's own background is not the
+    // colour this ink names: key the border-connected index-0 region, which is the
+    // background ink 8 removes from the placed sprite. `indexMask` was resolved
+    // BEFORE the colour pass on purpose: keying makes a pixel a conduit for the
+    // flood, so computing it afterwards would let the keyed backdrop tunnel into a
+    // sealed interior region (see indexZeroFloodMask).
+    if (!changed && indexMask) {
       for (let i = 0; i < n; i++) {
         if (!indexMask[i] || indices![i] !== 0 || rgba[i * 4 + 3] === 0) continue;
         rgba[i * 4] = 0;
@@ -996,6 +1001,37 @@ export function blendModeForInk(ink: number): 'normal' | 'add' | 'subtract-gl' |
  *    heuristic's member may be an 8-bit art whose palette-0 is white, and
  *    forwarding it would key the whole image instead of the mask ring.
  */
+/**
+ * The palette and index raster an IMAGE bake may use for a surface that stands in
+ * for a member (`PixiStage.bakeImagePixels`).
+ *
+ * A palette may only name the background of art whose pixels it INDEXES, so the
+ * two travel together and only while the raster still describes the surface
+ * (`indicesStale` — see LImage). An image's own palette wins over the channel
+ * member's, because the corpus hands a member the image of another one (the
+ * Object Mover's preview, `renderPreviewImage`'s hand icons), and a
+ * `paletteTarget` remap rewrites the RGB the pixels carry.
+ *
+ * A COMPOSED surface has neither: `LImage.copyPixels` adopts the source's palette
+ * on a full-surface copy into an image that has none, so a window part the corpus
+ * pastes piece by piece (a 32-bit buffer with no index raster) ends up carrying
+ * whichever piece was pasted first. The friend list's search bar handed its three
+ * entry greys to the buffer and the matte keyed palette entry 0 (#6b6b6b) — the
+ * bar's top band vanished into the window behind it while its darker greys stayed.
+ * Nothing is forwarded for such a surface, so the bake falls back to the colour
+ * rules (pixel (0,0) / white edge), which is what the reference renderer does.
+ */
+export function bakeInputsForImage(
+  img: { palette?: number[][] | undefined; indices?: Uint8Array | null; indicesStale?: boolean },
+  memberPalette?: number[][],
+): { palette: number[][] | undefined; indices: Uint8Array | null } {
+  const indexed = !!img.indices && !img.indicesStale;
+  return {
+    palette: indexed ? img.palette ?? memberPalette : undefined,
+    indices: indexed ? img.indices! : null,
+  };
+}
+
 export function bakeSurface(
   src: Uint8Array | Uint8ClampedArray,
   w: number,
@@ -1102,15 +1138,6 @@ export function bakeSurface(
  */
 const PIXEL_TEST_INKS = new Set([4, 7, 8, 36]);
 
-/** A sprite surface the hit test can sample: the rendered buffer, or the
- *  runtime image it was baked from (see `spritePixelHitTest`'s `art`). */
-export interface HitSurface {
-  pixels: Uint8Array | Uint8ClampedArray | null | undefined;
-  width: number;
-  height: number;
-  depth: number;
-}
-
 /**
  * Does this sprite's click area follow its DISPLAYED pixels (true) or its whole
  * rectangle (false)? See the note above: `alphaArt` is the artwork's own alpha
@@ -1128,37 +1155,26 @@ export function spritePixelHitTest(
   px: number,
   py: number,
   alphaArt = false,
-  art?: HitSurface | null,
 ): boolean {
   if (!inkUsesPixelHitTest(ink, alphaArt)) return true;
   if (!pixels || w < 1 || h < 1) return true;
   if (px < 0 || py < 0 || px >= w || py >= h) return true;
-  if (pixels[(py * w + px) * 4 + 3] !== 0) return true;
-  // The RENDERED pixel is a hole — but that alone does not settle it. A hole can
-  // mean two very different things, and the two reference rules disagree only
-  // about the second:
+  // A hole in the DISPLAYED pixels settles it: the click belongs to the sprite
+  // underneath. Asking the sprite's own source image ("is the art opaque here?")
+  // as well would keep pixels the ink keyed away — and those pixels are exactly
+  // the ones the player can see through. The navigator's breadcrumb strip is the
+  // case that pinned it: `nav_roomlistBackLinks` is an ink-36 element whose
+  // runtime image is the rendered history text, so ink 36 keys its background to
+  // nothing while the source image stays opaque white there; granting it the
+  // whole rectangle made it swallow the clicks aimed at `nav_tb_guestRooms` and
+  // `nav_tb_publicRooms` — tabs that ARE drawn right there and ARE clickable in
+  // the reference client. The same grant stole the room list's own surface for
+  // `nav_roomlist_hd` and `nav_hidefull`, whose keyed-away text images sit on
+  // top of the list.
   //
-  //  - the art itself is missing there (a chair part's rectangle around its
-  //    art, a furniture canvas outside the body): the sprite covers nothing, so
-  //    the click belongs to whatever is drawn behind it, and
-  //  - the art IS there and the ink's keying removed it against the stage (a
-  //    composited element whose fed/white background the ink keys away).
-  //
-  // So the sprite's OWN surface — the `image(w, h, 32)` buffer it renders from,
-  // which a runtime `feedImage` fills opaquely — is asked as well: where that
-  // surface is solid the sprite still owns the point. This is the combination of
-  // the two hit tests this engine has had: the displayed-pixel rule (which stops
-  // a chair's oversized rectangle from eating the click aimed at the avatar it
-  // carries) and the artwork/rectangle rule (which keeps a window element's
-  // whole rectangle clickable when its background is keyed away).
-  //
-  // Only buffers that carry a real alpha channel of their own (32-bit) can say
-  // this: INDEXED art has no alpha to read — its transparency is exactly what
-  // the bake computes — so those sprites stay on the rendered pixel alone.
-  if (art && art.depth >= 32 && art.pixels && art.width >= 1 && art.height >= 1) {
-    const ax = Math.min(art.width - 1, Math.max(0, px));
-    const ay = Math.min(art.height - 1, Math.max(0, py));
-    if (art.pixels[(ay * art.width + ax) * 4 + 3] !== 0) return true;
-  }
-  return false;
+  // The inks that cannot key at all still own their rectangle (see
+  // `inkUsesPixelHitTest`), and MISSING pixels still fall back to the rectangle
+  // above, so a surface that has not been baked yet can never make a sprite
+  // unclickable.
+  return pixels[(py * w + px) * 4 + 3] !== 0;
 }

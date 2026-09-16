@@ -4061,7 +4061,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         return intColor(ch.color);
       case 'bgcolor':
       case 'backcolor':
-        return intColor(ch.bgColor);
+        return this.spriteBgColor(ch);
       case 'forecolor':
         return intColor(ch.foreColor);
       case 'rotation':
@@ -4267,6 +4267,15 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
           ch.bgColorIndex = raw;
           ch.bgColor = raw;
           ch.bgColorIsRgb = false;
+        } else if (value instanceof LColor && value.paletteIndex !== undefined) {
+          // A colour that still carries the index it came from — another
+          // sprite's bgColor (the Object Mover's copy), a pixel of a palette
+          // member, `paletteIndex(n)` — STAYS an index, so it keeps resolving
+          // against the member's own palette at tint time instead of being
+          // frozen into the RGB it happened to have on the source member.
+          ch.bgColorIndex = value.paletteIndex;
+          ch.bgColor = value.paletteIndex;
+          ch.bgColorIsRgb = false;
         } else {
           ch.bgColorIndex = null;
           ch.bgColor = this.colorToInt(value);
@@ -4353,6 +4362,30 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
    * resolves against the sprite member's OWN bitmap palette; white (or no
    * palette) means no filtering.
    */
+  /**
+   * `sprite.bgColor`/`backColor` as Director reports it.
+   *
+   * A background set from a BARE NUMBER is a palette index (`sprite.backColor =
+   * random(150) + 20`, hh_entry_se's Entry Car) and a background nobody set is
+   * the Director DEFAULT — which is an index too, 0. Both are reported as the
+   * indexed colour they resolve to with the index still attached, exactly like
+   * `image.getPixel()` colours and `paletteIndex(n)`; only an `rgb()` /
+   * `"#RRGGBB"` assignment is a plain colour. Reporting the default as
+   * `rgb(0, 0, 0)` made every Lingo COPY lose the form, and the Object Mover is
+   * exactly that copy: `tSpr.bgColor = tOrigSprList[i].bgColor`
+   * (hh_room_utils/0017) stored an explicit black on the sprite it ghosts the
+   * item with, so ink 36 keyed the item's own black art out while the background
+   * the ink is meant to remove — its palette entry 0 — stayed standing.
+   */
+  private spriteBgColor(ch: Channel): LColor {
+    const index = ch.bgColorIsRgb ? null : ch.bgColorIndex ?? 0;
+    if (index === null) return intColor(ch.bgColor);
+    const entry = ch.member?.palette?.[index];
+    const col = entry ? new LColor(entry[0], entry[1], entry[2]) : intColor(ch.bgColor);
+    col.paletteIndex = index;
+    return col;
+  }
+
   bgTintForChannel(ch: Channel): number | null {
     if (ch.bgColorIsRgb) {
       if (ch.bgColor === 0xffffff) return null;
@@ -4360,6 +4393,14 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       return ch.bgColor;
     }
     if (ch.bgColorIndex != null) {
+      // Index 0 is the DEFAULT background (the corpus resets with it:
+      // `pSprite.backColor = 0`, Entry Car), so it filters nothing — the same
+      // "no colour" a sprite that never had a background reports (index null).
+      // Keeping the two identical matters because Lingo COPIES the background:
+      // the Object Mover writes a sprite's default onto the sprite it ghosts an
+      // item with, and a copy that suddenly resolved palette entry 0 as a tint
+      // would colourize the preview the placed item never is.
+      if (ch.bgColorIndex === 0) return null;
       const pal = ch.member?.palette;
       if (pal && pal[ch.bgColorIndex]) {
         const [r, g, b] = pal[ch.bgColorIndex];

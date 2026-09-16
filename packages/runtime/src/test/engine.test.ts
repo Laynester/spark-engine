@@ -4562,6 +4562,54 @@ test('sprite.backColor palette index resolves via the member bitmap palette (Ent
   assert.equal(e.bgTintForChannel(e.getChannel(3)), (1 << 16) | (2 << 8) | 3, 'rgb tints directly');
 });
 
+test('sprite.bgColor round-trips a palette INDEX (Object Mover copies it onto its reserved sprites)', () => {
+  // The Object Mover copies each item sprite's background onto the sprite it
+  // ghosts the item with — `tSpr.bgColor = tOrigSprList[i].bgColor`
+  // (hh_room_utils/0017, ~line 134). A sprite with no authored background
+  // reports the Director DEFAULT, palette index 0, and reporting that as a plain
+  // `rgb(0, 0, 0)` turned the copy into an EXPLICIT black: ink 36 then keyed the
+  // item's own black art out while the background the ink is meant to remove (its
+  // palette entry 0) stayed standing — the wall items' white/unkeyed look while
+  // being placed, normal once placed.
+  const e = new DirectorEngine();
+  const bm = e.addScriptMember('window_frame', 'unknown', '');
+  bm.kind = 'bitmap';
+  const table: number[][] = Array.from({ length: 256 }, (_, i) => [i, i, i]);
+  table[0] = [221, 221, 221]; // the window furniture's own panel grey
+  bm.palette = table;
+  const num = (bm.castLibNumber << 16) | bm.number;
+
+  const src = e.getSprite(3);
+  e.setSpriteProp(src, 'member', num);
+  e.setSpriteProp(src, 'ink', 36);
+  const read = e.getSpriteProp(src, 'bgColor') as LColor;
+  assert.equal(read.paletteIndex, 0, 'the default background reports its palette index');
+  assert.deepEqual([read.red, read.green, read.blue], [221, 221, 221], 'and the colour that index resolves to');
+
+  const dst = e.getSprite(4);
+  e.setSpriteProp(dst, 'member', num);
+  e.setSpriteProp(dst, 'ink', 36);
+  e.setSpriteProp(dst, 'bgColor', read); // the mover's copy
+  const copied = e.getChannel(4);
+  assert.equal(copied.bgColorIsRgb, false, 'the copy is still an INDEX, not a frozen rgb colour');
+  assert.equal(copied.bgColorIndex, 0);
+  // The default background therefore stays "no colour" at the sprite, which is
+  // what the ink reads: ink 36 keys the white it names by default rather than
+  // the BLACK a frozen `rgb(0, 0, 0)` used to become, so the item's black art
+  // survives being placed.
+  assert.equal(e.bgTintForChannel(copied), null, 'the default background is not a tint');
+  assert.equal((e.getSpriteProp(dst, 'bgColor') as LColor).paletteIndex, 0, 'and it still reads as index 0');
+
+  // An AUTHORED black is a different thing and stays one: the entry room's
+  // elevator shadow is `#bgColor: "#000000"` at ink 7 and really does key black.
+  const auth = e.getSprite(5);
+  e.setSpriteProp(auth, 'bgColor', '#000000');
+  assert.equal(e.getChannel(5).bgColorIsRgb, true, 'authored #000000 is an explicit colour');
+  assert.equal((e.getSpriteProp(auth, 'bgColor') as LColor).paletteIndex, undefined, 'and carries no index');
+  e.setSpriteProp(auth, 'bgColor', new LColor(0, 0, 0));
+  assert.equal(e.getChannel(5).bgColorIsRgb, true, 'rgb(0, 0, 0) is explicit too');
+});
+
 test('avatar colour effects: ink 8 + rgb foreColor resolves a fg->bg duotone (x-ray)', () => {
   // `hh_human/texts/0041_text_fx.11.txt` is only
   //   human_sprite_props/[ink: 8, bgcolor: "#007700", forecolor: "#00FF00"]

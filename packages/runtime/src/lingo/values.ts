@@ -597,11 +597,21 @@ export class LImage {
     const matteMask = (ink === 8 || ink === 7) ? matteRegionMask(s, sw, sh, sx0, sy0, srcW, srcH, srcPalette, srcIndicesFresh, ink === 8) : null;
     // Ink 36 (Background transparent) keys the SPRITE's background colour — WHITE
     // unless the movie set one (`#bgColor`, handled by applyInkPixel below). For
-    // indexed art whose palette entry 0 is NOT white (so nothing would be keyed
-    // by colour) the INDEX is used instead, but only while those indices still
-    // describe the pixels (see `indicesStale`): the rule exists for the
-    // landscape's `%dir% %class%_mask` art, and it must never run against a
-    // surface the movie has painted over.
+    // indexed art whose palette entry 0 is NOT exactly white the INDEX is used as
+    // well, but only while those indices still describe the pixels (see
+    // `indicesStale`): the rule exists for the landscape's `%dir% %class%_mask`
+    // art, and it must never run against a surface the movie has painted over.
+    //
+    // BY INDEX only when the palette CALLS entry 0 white. Every `%class%_mask`
+    // member in the corpus has `#ffffff` there (and white-dominant pixels — the
+    // mask art is a white mask), so the index test is just a more robust way to
+    // remove a white background, catching the off-white and dithered whites the
+    // exact colour test misses. Without that gate it removed whatever happened to
+    // sit at index 0, which for plenty of art is the ARTWORK: the friend list's
+    // frame pieces are drawn with `#ink: 36` and `friend_list_bottom_right`'s
+    // palette entry 0 is its amber rim (`#ffcb00`, 65% of the piece), so the
+    // window's bottom-right corner deleted itself while being composed into the
+    // window buffer ("bottom_right is rendering transparent").
     //
     // The gate here used to be `palette && src.depth <= 8`, which is dead: the
     // engine's member rasters carry `palette` + `indices` but never set `depth`
@@ -613,7 +623,9 @@ export class LImage {
     // pixel). With nothing keyed, the mask member's white background landed in
     // the mask too, the outside view was never copied inside the window, and the
     // window showed the mask's white fill — "the inside of the window is white".
-    const srcIndices = ink === 36 && srcIndicesFresh && srcIndicesFresh.length >= sw * sh ? srcIndicesFresh : null;
+    const srcP0 = ink === 36 && hasPalette ? srcPalette[0] : null;
+    const srcP0IsWhite = !!srcP0 && srcP0[0] >= 232 && srcP0[1] >= 232 && srcP0[2] >= 232;
+    const srcIndices = ink === 36 && srcP0IsWhite && srcIndicesFresh && srcIndicesFresh.length >= sw * sh ? srcIndicesFresh : null;
     const srcBgRgb = ink === 36 && !srcIndices && hasPalette && (src.depth ?? 32) <= 8 ? srcPalette[0] : null;
     const srcKeysWhite = ink === 36 && !srcIndices && !srcBgRgb;
 
