@@ -590,6 +590,50 @@ export class LImage {
     const maskData = mask ? mask.ensure() : null;
     const maskW = mask ? Math.max(0, Math.round(mask.width)) : 0;
     const maskH = mask ? Math.max(0, Math.round(mask.height)) : 0;
+    // Coverage through an 8-bit mask. `Text Wrapper Class::createImgFromTxt`
+    // runs `text.render.compatibility.mode=2` (the real v31 external_vars.txt
+    // sets it, `Sites/v31/stuff/gamedata/external_vars.txt:59`): it builds an
+    // 8-bit availability mask with `tFakeAlpha.copyPixels(pTextMem.image, …,
+    // [#ink: 8])` — an ink-8 matte of the anti-aliased text raster over the
+    // image's white fill, so a half-covered edge pixel lands as MID GREY — and
+    // then pastes a single flat colour through it
+    // (`copyPixels(tFakeSrc, …, [#maskImage: tFakeAlpha])`). Reading that mask
+    // as a clip (paste everything whose grey is below "white") threw the
+    // coverage away and made every real-font glyph bold: Verdana 10 in the
+    // disconnected/error popup and Arial 9 in the terrace and park UIs.
+    //
+    // Director does not read that image as grey COVERAGE: a plain image handed
+    // to `#maskImage` is a mask object, i.e. 1-bit ("Mask objects aren't image
+    // objects; they're useful only with copyPixels", drmx2004:10769 — and the
+    // engine's own createMask() is `luma < 128`). So the text mask stays a
+    // CLIP, but at the half-grey outline instead of `any grey below white`:
+    // that is what keeps a real glyph crisp at its true weight — the raster is
+    // anti-aliased now, so the 50% outline is the glyph's real shape, while
+    // clipping at 250 made every edge pixel opaque (bold) and pasting the grey
+    // through as alpha made the whole string soft (blurry).
+    //
+    // The other 8-bit `#maskImage` user is the room/landscape mask
+    // (`Landscape_Manager` / `Wall_Mask_Manager::renderMask`: fill the mask
+    // WHITE, ink-36 copy a `%class%_mask` member in) and that one keeps its
+    // own clip rule — its art's interior is dark grey (68/119 grey in
+    // `0023_bitmap_wall_mask01`) but its edges are anti-aliased, so cutting
+    // them at 128 would thin the wall coverage by a pixel. It is told apart by
+    // what is pasted through it: the text path passes a single flat opaque
+    // colour (`tFakeSrc`, a `fill(#shape: #rect)`), every mask-art path passes
+    // real bitmap art.
+    const textMask = !!(mask && maskData && mask.depth > 1 && mask.depth <= 8 && isFlatOpaqueColour(s, sw, sh));
+    // The mask's grey IS the glyph's coverage (see above), but Chrome's
+    // grayscale anti-aliasing spreads a wide, very light skirt around every
+    // glyph — measured on this corpus's own faces, a THIRD of the covered
+    // pixels of a 10px Verdana sit below 64/255 alpha (`node
+    // scripts/cdp-font-aa.mjs`: bands 101/66/66/81 with an ink area of 150.9
+    // for 314 covered pixels). Pasting that straight through is the soft, blurry
+    // look; clipping it to 1-bit is the hard, pixelated one. Dropping the light
+    // skirt and stretching what is left back to full range restores the glyph's
+    // real weight (145 against the 150.9 the coverage describes) with a thin
+    // anti-aliased edge, which is what the hinted screen-font rasterizer the
+    // corpus was built against produced.
+    const TEXT_MASK_FLOOR = 32;
 
     const srcPalette = src.palette;
     const hasPalette = srcPalette && srcPalette.length > 0;
@@ -674,11 +718,18 @@ export class LImage {
         const si = (sy * sw + sx) * 4;
         if (ink === 8 && s[si + 3] === 0) continue;
         if (ink === 1 && s[si + 3] === 0) continue;
+        let maskAlpha = 255;
         if (mask && maskData && sx >= 0 && sx < maskW && sy >= 0 && sy < maskH) {
           const mi = (sy * maskW + sx) * 4;
           if (mask.depth <= 8) {
             const luma = ((77 * maskData[mi] + 150 * maskData[mi + 1] + 29 * maskData[mi + 2] + 128) >> 8) & 0xff;
-            if (luma >= 250) continue;
+            if (textMask) {
+              const sharp = Math.round(((255 - luma - TEXT_MASK_FLOOR) * 255) / (255 - TEXT_MASK_FLOOR));
+              if (sharp <= 0) continue;
+              maskAlpha = Math.min(255, sharp);
+            } else if (luma >= 250) {
+              continue;
+            }
           } else if (maskData[mi + 3] === 0) {
             continue;
           }
@@ -692,10 +743,21 @@ export class LImage {
         }
         const di = (py * dw + px) * 4;
         const out = applyInkPixel(s, si, d, di, ink, blend, backgroundKeyRgb, foreColorRgb, fgExplicit, bgExplicit);
-        d[di] = out[0];
-        d[di + 1] = out[1];
-        d[di + 2] = out[2];
-        d[di + 3] = out[3];
+        if (maskAlpha < 255 && out[3] > 0) {
+          // Partial mask coverage: composite at the scaled alpha (a straight
+          // copy would punch a translucent hole in an opaque destination).
+          const covA = Math.trunc((out[3] * maskAlpha) / 255);
+          const [mr, mg, mb, ma] = alphaBlendPixel(out[0], out[1], out[2], covA, d[di], d[di + 1], d[di + 2], d[di + 3]);
+          d[di] = mr;
+          d[di + 1] = mg;
+          d[di + 2] = mb;
+          d[di + 3] = ma;
+        } else {
+          d[di] = out[0];
+          d[di + 1] = out[1];
+          d[di + 2] = out[2];
+          d[di + 3] = out[3];
+        }
         if (this.depth <= 8) d[di + 3] = 255;
       }
     }
@@ -767,6 +829,31 @@ function alphaBlendPixel(sr: number, sg: number, sb: number, sa: number, dr: num
 
 function maskAlphaFromPixel(s: Uint8Array, si: number): number {
   return s[si + 3];
+}
+
+/**
+ * Is this surface ONE flat, fully opaque colour? The corpus's text path builds
+ * exactly that and pastes it through an 8-bit mask (`Text Wrapper Class`:
+ * `tFakeSrc = image(w, h, 32)` then `fill(tFakeSrc.rect, [#color: ..., #shape:
+ * #rect])`), which is how copyPixels tells that paste apart from the mask-art
+ * pastes that go through a `%class%_mask`/landscape mask (see the coverage
+ * note in copyPixels).
+ */
+function isFlatOpaqueColour(s: Uint8Array, w: number, h: number): boolean {
+  const n = w * h;
+  if (n <= 0 || s.length < n * 4) return false;
+  const r = s[0];
+  const g = s[1];
+  const b = s[2];
+  if (s[3] !== 255) return false;
+  // Stride so the check stays cheap on a full-screen surface but still samples
+  // every region (a gradient would show up long before the stride wraps).
+  const step = Math.max(1, Math.floor(n / 4096));
+  for (let i = step; i < n; i += step) {
+    const o = i * 4;
+    if (s[o] !== r || s[o + 1] !== g || s[o + 2] !== b || s[o + 3] !== 255) return false;
+  }
+  return true;
 }
 
 

@@ -115,6 +115,18 @@ export function rasterizeTextMember(member: Member): LImage | null {
   const style = fontStyleFlags(member.fontStyle);
   const effWeight = style.bold ? '700' : weight;
   const fontStr = `${style.italic ? 'italic ' : ''}${effWeight} ${size}px ${family}`;
+  // Director anti-aliases text members by default (`antiAlias` "is TRUE by
+  // default", drmx2004:25378) and the corpus turns it OFF exactly where it
+  // wants a 1-bit mask (`member.antialias = 0` on the chat balloons and the
+  // Writer scratch members). So the pixel face (Volter, which `cssFontFor`
+  // also answers for the writers' "Courier") keeps Director's crisp look, and
+  // a REAL face — the ~24 layouts that ask for Verdana / Arial / MS Sans Serif
+  // / Times New Roman — keeps the canvas coverage its anti-aliasing produced.
+  // Thresholding those was what made a 9px Arial unreadable: half-alpha stems
+  // were dropped and the rest snapped, so the glyphs came out jagged and thin.
+  const pixelFace = family === 'Volter';
+  const aaProp = member.textProps?.get('antialias');
+  const harden = pixelFace || (aaProp !== undefined && aaProp !== null && asNum(aaProp) === 0);
   const wrap = asNum(member.wordWrap ?? 0) === 1;
   let lines: TextLine[] = hardLines.map((l, i) => ({
     text: l,
@@ -173,6 +185,9 @@ export function rasterizeTextMember(member: Member): LImage | null {
         // whole-run blob's subpixel advance drift can't flip stroke thickness
         // with the box width parity (pixel fonts render fatter at even widths
         // otherwise). Center/right start from the measured line width, rounded.
+        // A real face is a normal vector font: it is drawn a RUN at a time so
+        // the browser keeps its advances and kerning (per-glyph columns left
+        // the letters unevenly spaced).
         const tw = Math.max(0, ctx.measureText(ln.text).width);
         const x0 = align === 'center' ? Math.round((w - tw) / 2) : align === 'right' ? Math.max(0, Math.round(w - 1 - tw)) : 0;
         if (hasChunkStyles) {
@@ -192,19 +207,29 @@ export function rasterizeTextMember(member: Member): LImage | null {
             const rc = runColVal !== undefined && runColVal !== null ? colorFrom(runColVal) : null;
             const runCol = rc ?? effCol;
             ctx.fillStyle = `rgb(${runCol.red},${runCol.green},${runCol.blue})`;
-            for (let k = 0; k < run.length; k++) {
-              ctx.fillText(run[k], Math.round(cx), y);
-              cx += ctx.measureText(run[k]).width;
+            const runPixelFace = rcf.family === 'Volter';
+            if (runPixelFace) {
+              for (let k = 0; k < run.length; k++) {
+                ctx.fillText(run[k], Math.round(cx), y);
+                cx += ctx.measureText(run[k]).width;
+              }
+            } else {
+              ctx.fillText(run, cx, y);
+              cx += ctx.measureText(run).width;
             }
             i = j;
           }
         } else {
           ctx.fillStyle = `rgb(${effCol.red},${effCol.green},${effCol.blue})`;
-          let cx = x0;
-          for (let k = 0; k < ln.text.length; k++) {
-            const ch = ln.text[k];
-            ctx.fillText(ch, Math.round(cx), y);
-            cx += ctx.measureText(ch).width;
+          if (pixelFace) {
+            let cx = x0;
+            for (let k = 0; k < ln.text.length; k++) {
+              const ch = ln.text[k];
+              ctx.fillText(ch, Math.round(cx), y);
+              cx += ctx.measureText(ch).width;
+            }
+          } else {
+            ctx.fillText(ln.text, x0, y);
           }
           if (style.underline && ln.text) {
             const ty = Math.min(h - 1, Math.round(y + size * 0.9));
@@ -217,7 +242,7 @@ export function rasterizeTextMember(member: Member): LImage | null {
   }
 
   const px = ctx.getImageData(0, 0, w, h).data;
-  if (text) {
+  if (text && harden) {
     hardenTextAlpha(px, (effCol.red << 16) | (effCol.green << 8) | effCol.blue);
   }
   const img = new LImage(w, h);

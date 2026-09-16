@@ -3214,6 +3214,74 @@ test('hardenTextAlpha snaps no-bg AA fringes to transparent or the exact glyph c
   assert.deepEqual([...rgba], [238, 238, 238, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 });
 
+test('rasterizeTextMember keeps a REAL face anti-aliased and hardens the pixel face', () => {
+  // Director anti-aliases text by default (antiAlias "is TRUE by default",
+  // drmx2004:25378) and the corpus turns it off exactly where it wants a 1-bit
+  // mask (`member.antialias = 0` on the chat balloons and the Writer scratch
+  // members). The ~24 layouts that ask for Verdana / Arial / MS Sans Serif /
+  // Times New Roman (pool buttons, park polls, the game-room bars, the
+  // error/performance windows) were being thresholded at half alpha like the
+  // pixel face: thin stems dropped out and the rest snapped, so 9px Arial came
+  // out jagged and partly missing — the "non-pixel fonts are unreadable"
+  // report. A real face now keeps its coverage AND is drawn one run at a time
+  // (so the browser's advances/kerning apply) while Volter is unchanged.
+  const { document } = globalThis as { document?: unknown };
+  const draws: Array<[string, number]> = [];
+  const makeCtx = () => ({
+    font: '', fillStyle: '', textAlign: '', textBaseline: '',
+    measureText: (s: string) => ({ width: s.length * 8 }),
+    fillRect: () => undefined,
+    fillText: (t: string, x: number) => { draws.push([t, x]); },
+    // A synthetic anti-aliased raster: opaque cores plus half-covered edges.
+    getImageData: (_x: number, _y: number, w: number, h: number) => {
+      const data = new Uint8ClampedArray(w * h * 4);
+      for (let i = 0; i < data.length; i += 4) {
+        const p = (i / 4) % 3;
+        data[i + 3] = p === 0 ? 255 : p === 1 ? 120 : 0;
+      }
+      return { data };
+    },
+  });
+  (globalThis as Record<string, unknown>).document = {
+    createElement: () => ({ width: 0, height: 0, getContext: makeCtx }),
+  };
+  const alphas = (img: { width: number; height: number; data: Uint8Array | null }): number[] => {
+    const d = img.data ?? new Uint8Array(0);
+    return [...new Set(Array.from({ length: img.width * img.height }, (_, i) => d[i * 4 + 3]))].sort((a, b) => a - b);
+  };
+  const mk = (name: string, font: string): Member => {
+    const m = new Member(1, 1, name, 'text');
+    m.text = 'Wanna swim?';
+    m.font = font;
+    m.fontSize = 9;
+    m.color = new LColor(255, 255, 255);
+    return m;
+  };
+  try {
+    const real = rasterizeTextMember(mk('pool_gobutton', 'Arial'));
+    assert.ok(real);
+    assert.deepEqual(alphas(real), [0, 120, 255], 'a real face keeps its anti-aliased coverage');
+    assert.deepEqual(draws.map(([t]) => t), ['Wanna swim?'], 'a real face is drawn as one run');
+
+    draws.length = 0;
+    const pixel = rasterizeTextMember(mk('bar_label', 'V'));
+    assert.ok(pixel);
+    assert.deepEqual(alphas(pixel), [0, 255], 'the pixel face is still thresholded to a 1-bit mask');
+    assert.equal(draws.length, 'Wanna swim?'.length, 'the pixel face still snaps glyph by glyph');
+
+    // `member.antialias = 0` asks for the 1-bit mask even from a real face.
+    draws.length = 0;
+    const off = mk('pool_gobutton_off', 'Arial');
+    off.textProps = new Map<string, LVal>([['antialias', 0]]);
+    const offImg = rasterizeTextMember(off);
+    assert.ok(offImg);
+    assert.deepEqual(alphas(offImg), [0, 255]);
+  } finally {
+    if (document) (globalThis as Record<string, unknown>).document = document;
+    else delete (globalThis as Record<string, unknown>).document;
+  }
+});
+
 test('defringeTextPixels snaps near-endpoint fringes to the EXACT colors so the ink key removes them', () => {
   // The messenger Messages/Requests links are #model: #image fields whose
   // Layout Parser defaults #bgColor to white; the 9px EEEEEE text rasterizes
@@ -6380,6 +6448,59 @@ test('ink-8 copy into an 8-bit image builds a WHITE-BACKED mask; maskImage sampl
   assert.equal(rgb(0, 0), 0, 'dest bg stays black (white mask blocks)');
   assert.equal(rgb(2, 2), 255, 'glyph pixel becomes white (dark mask allows)');
   assert.equal(rgb(4, 4), 0, 'other corner stays black');
+});
+
+test('a text availability mask pastes its grey as (sharpened) coverage, while mask ART stays a clip', () => {
+  // The mode-2 text paste (`Text Wrapper Class::createImgFromTxt`:
+  // `copyPixels(tFakeSrc, …, [#maskImage: tFakeAlpha])`) hands a FLAT opaque
+  // colour to an 8-bit mask whose grey is the glyph's anti-aliasing coverage.
+  // Clipping that at "any grey below white" made every real-font glyph bold
+  // (Verdana 10 in the disconnected popup); pasting the raw coverage made it
+  // blurry (Chrome's AA leaves a third of the covered pixels below 64/255).
+  // The light skirt is dropped and the rest stretched back to full range:
+  // `(coverage - 32) * 255 / 223`.
+  //
+  // The room/landscape masks are the other 8-bit user and must stay CLIPS —
+  // their art's interior is dark grey (68/119 grey in a `%class%_mask`) — so
+  // the coverage rule is scoped to the flat-colour source.
+  const grey = (v: number): number => Math.round(((v - 32) * 255) / 223);
+  const build = (maskGrey: number, flatSource: boolean): LImage => {
+    const mask = new LImage(3, 1);
+    mask.depth = 8;
+    const m = mask.ensure();
+    for (let i = 0; i < 3; i++) {
+      m[i * 4] = maskGrey; m[i * 4 + 1] = maskGrey; m[i * 4 + 2] = maskGrey; m[i * 4 + 3] = 255;
+    }
+    const src = new LImage(3, 1);
+    if (flatSource) {
+      src.fillRect(0, 0, 3, 1, new LColor(255, 255, 255));
+    } else {
+      const s = src.ensure();
+      // Mask ART: three different colours, so the source is not a flat fill.
+      s[0] = 255; s[1] = 255; s[2] = 255; s[3] = 255;
+      s[4] = 200; s[5] = 210; s[6] = 220; s[7] = 255;
+      s[8] = 10; s[9] = 20; s[10] = 30; s[11] = 255;
+    }
+    const dst = new LImage(3, 1);
+    dst.fillRect(0, 0, 3, 1, new LColor(0, 0, 0));
+    dst.copyPixels(src, new LRect(0, 0, 3, 1), new LRect(0, 0, 3, 1), 0, 255, 0xffffff, mask);
+    return dst;
+  };
+  const px = (img: LImage, x: number): number => (img.data ?? new Uint8Array(0))[x * 4];
+
+  // Glyph core: coverage 128 -> grey 127 -> sharpened to 108/255 alpha.
+  assert.equal(px(build(128, true), 0), grey(127), 'half-covered glyph edge pastes at partial alpha');
+  // Heavier coverage keeps more of the mask's alpha.
+  assert.equal(px(build(20, true), 0), grey(235));
+  // The light skirt is dropped outright.
+  assert.equal(px(build(245, true), 0), 0, 'a 10/255 fringe writes nothing');
+
+  // Mask art (a non-flat source) keeps the clip: "any grey below white covers"
+  // (LibreShockwave maskAllowsPixel: luma < 255), including the greys our
+  // coverage rule would treat as a fringe.
+  assert.equal(px(build(128, false), 0), 255, 'mask art pastes opaque');
+  assert.equal(px(build(245, false), 0), 255, 'mask art just below white still covers');
+  assert.equal(px(build(252, false), 0), 0, 'near-white mask art pixels block');
 });
 
 test('copyPixels ink 8 keeps a puff in a PARTIAL rect (cloud turn slices)', () => {
