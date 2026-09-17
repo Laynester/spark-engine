@@ -9261,6 +9261,10 @@ var COMMAND_FUNCS = /* @__PURE__ */ new Set([
   "nettextresult",
   "netabort",
   "getmemnum",
+  // Director's external links, command form: `gotoNetPage "URL", "_new"`
+  // (drmx2004_scripting_ref.txt:13909) / `getURL "URL"`.
+  "gotonetpage",
+  "geturl",
   "getobject",
   "removeobject",
   "objectexists",
@@ -10161,6 +10165,86 @@ function matteRegionMask(rgba, imgW, imgH, left, top, w, h, palette, indices, ma
   }
   return background > 0 ? mask : null;
 }
+var DUOTONE_RAMP_STEEPNESS = 0.75;
+var DUOTONE_RAMP_SATURATION = 1.35;
+var LUMA_R = 0.299;
+var LUMA_G = 0.587;
+var LUMA_B = 0.114;
+function boostSaturation(r, g, b, k = DUOTONE_RAMP_SATURATION) {
+  const luma = LUMA_R * r + LUMA_G * g + LUMA_B * b;
+  const clamp = (v) => Math.max(0, Math.min(255, Math.round(v)));
+  return [clamp(luma + (r - luma) * k), clamp(luma + (g - luma) * k), clamp(luma + (b - luma) * k)];
+}
+function rgbHueDegrees(r, g, b) {
+  const mx = Math.max(r, g, b);
+  const chroma = mx - Math.min(r, g, b);
+  if (chroma <= 0)
+    return 0;
+  let h;
+  if (mx === r) {
+    const f = (g - b) / chroma / 6;
+    h = (f - Math.floor(f)) * 6;
+  } else if (mx === g) {
+    h = (b - r) / chroma + 2;
+  } else {
+    h = (r - g) / chroma + 4;
+  }
+  return h * 60;
+}
+function rgbSaturation(r, g, b) {
+  const mx = Math.max(r, g, b);
+  return mx <= 0 ? 0 : (mx - Math.min(r, g, b)) / mx;
+}
+function rgbValue(r, g, b) {
+  return Math.max(r, g, b) / 255;
+}
+var DUOTONE_RAMP_HUE_TRIM = -13.8;
+var DUOTONE_RAMP_LIGHT_SAT = 0.774;
+var DUOTONE_RAMP_LIGHT_VALUE = 0.988;
+var DUOTONE_RAMP_DARK_SAT = 0.696;
+var DUOTONE_RAMP_DARK_VALUE = 0.98;
+function hsvToRgbBytes(h, s, v) {
+  const c = v * s;
+  const hp = (h / 60 % 6 + 6) % 6;
+  const x = c * (1 - Math.abs(hp % 2 - 1));
+  let rgb;
+  if (hp < 1)
+    rgb = [c, x, 0];
+  else if (hp < 2)
+    rgb = [x, c, 0];
+  else if (hp < 3)
+    rgb = [0, c, x];
+  else if (hp < 4)
+    rgb = [0, x, c];
+  else if (hp < 5)
+    rgb = [x, 0, c];
+  else
+    rgb = [c, 0, x];
+  const m = v - c;
+  return [
+    Math.round((rgb[0] + m) * 255),
+    Math.round((rgb[1] + m) * 255),
+    Math.round((rgb[2] + m) * 255)
+  ];
+}
+function duotoneRampEnds(sourceRgb) {
+  const r = sourceRgb >> 16 & 255;
+  const g = sourceRgb >> 8 & 255;
+  const b = sourceRgb & 255;
+  const hue = rgbHueDegrees(r, g, b) + DUOTONE_RAMP_HUE_TRIM;
+  const sat = rgbSaturation(r, g, b);
+  const value = rgbValue(r, g, b);
+  return {
+    light: hsvToRgbBytes(hue, sat * DUOTONE_RAMP_LIGHT_SAT, value * DUOTONE_RAMP_LIGHT_VALUE),
+    dark: hsvToRgbBytes(hue, sat * DUOTONE_RAMP_DARK_SAT, DUOTONE_RAMP_DARK_VALUE)
+  };
+}
+function duotoneRampRgb(r, g, b, sourceRgb) {
+  const lum = (r + g + b) / 765;
+  const t = Math.max(0, Math.min(1, 1 - Math.pow(lum, DUOTONE_RAMP_STEEPNESS)));
+  const { light, dark } = duotoneRampEnds(sourceRgb);
+  return boostSaturation(light[0] + (dark[0] - light[0]) * t, light[1] + (dark[1] - light[1]) * t, light[2] + (dark[2] - light[2]) * t);
+}
 
 // ../../packages/runtime/dist/lingo/values.js
 var LSymbol = class {
@@ -10360,6 +10444,12 @@ var PropPairs = class {
   getAt(n) {
     return this.vs[n - 1];
   }
+  keyAt(n) {
+    return this.ks[n - 1];
+  }
+  lastValue() {
+    return this.vs.length > 0 ? this.vs[this.vs.length - 1] : void 0;
+  }
   setAt(n, value) {
     if (n >= 1 && n <= this.vs.length)
       this.vs[n - 1] = value;
@@ -10478,6 +10568,41 @@ var LWindowRef = class {
     this.host = host;
   }
 };
+function inverseQuadTransform(quad) {
+  const [x0, y0, x1, y1, x2, y2, x3, y3] = quad;
+  const dx1 = x1 - x2;
+  const dx2 = x3 - x2;
+  const dy1 = y1 - y2;
+  const dy2 = y3 - y2;
+  const den = dx1 * dy2 - dx2 * dy1;
+  if (Math.abs(den) < 1e-12)
+    return null;
+  const sq = x0 - x1 + x2 - x3;
+  const sy = y0 - y1 + y2 - y3;
+  const g = (sq * dy2 - dx2 * sy) / den;
+  const h = (dx1 * sy - sq * dy1) / den;
+  const a = x1 - x0 + g * x1;
+  const b = x3 - x0 + h * x3;
+  const c = x0;
+  const d = y1 - y0 + g * y1;
+  const e = y3 - y0 + h * y3;
+  const f = y0;
+  const det = a * (e - f * h) - b * (d - f * g) + c * (d * h - e * g);
+  if (Math.abs(det) < 1e-12)
+    return null;
+  const inv = 1 / det;
+  return [
+    (e - f * h) * inv,
+    (c * h - b) * inv,
+    (b * f - c * e) * inv,
+    (f * g - d) * inv,
+    (a - c * g) * inv,
+    (c * d - a * f) * inv,
+    (d * h - e * g) * inv,
+    (b * g - a * h) * inv,
+    (a * e - b * d) * inv
+  ];
+}
 var LImage = class _LImage {
   width;
   height;
@@ -10486,6 +10611,24 @@ var LImage = class _LImage {
   palette;
   depth = 32;
   indices = null;
+  /**
+   * The movie has WRITTEN pixels into this image, so `indices` (the palette
+   * indices the member was DECODED with) no longer describe the surface.
+   *
+   * Index-based rules must stop reading them once this is set, or they operate
+   * on the wrong pixel positions entirely: `screen3d` (hh_entry_jp) is a member
+   * the Entry Image Scroller paints over every frame, and the ink-36 index key
+   * was resolving "border-connected palette-0" against the ORIGINAL screen art —
+   * 5834 positions of the freshly painted frame were punched transparent, which
+   * is what made the scroller look broken.
+   *
+   * Set by the engine's `imageMutated` (the hook the interpreter fires after
+   * every pixel-writing Lingo call). Camera/photo media keeps its OWN freshly
+   * decoded indices, which is why this is a paint flag and not "the member has
+   * an image": `set member.media` decodes an index raster and those indices are
+   * exactly what the bake wants.
+   */
+  indicesStale = false;
   paletteRef = VOID;
   useAlpha = false;
   constructor(width = 0, height = 0) {
@@ -10667,7 +10810,7 @@ var LImage = class _LImage {
       }
     }
   }
-  copyPixels(src, destRect, srcRect, ink = 0, blend = 255, backgroundKeyRgb = 16777215, mask = null, flipH = false, flipV = false, foreColorRgb = 0, fgExplicit = false, bgExplicit = false, orient) {
+  copyPixels(src, destRect, srcRect, ink = 0, blend = 255, backgroundKeyRgb = 16777215, mask = null, flipH = false, flipV = false, foreColorRgb = 0, fgExplicit = false, bgExplicit = false, orient, quad) {
     const s = src.ensure();
     const d = this.ensure();
     const sw = Math.max(0, Math.round(src.width));
@@ -10691,12 +10834,20 @@ var LImage = class _LImage {
     const maskData = mask ? mask.ensure() : null;
     const maskW = mask ? Math.max(0, Math.round(mask.width)) : 0;
     const maskH = mask ? Math.max(0, Math.round(mask.height)) : 0;
+    const textMask = !!(mask && maskData && mask.depth > 1 && mask.depth <= 8 && isFlatOpaqueColour(s, sw, sh));
+    const TEXT_MASK_FLOOR = 32;
     const srcPalette = src.palette;
     const hasPalette = srcPalette && srcPalette.length > 0;
-    const matteMask = ink === 8 || ink === 7 ? matteRegionMask(s, sw, sh, sx0, sy0, srcW, srcH, srcPalette, src.indices, ink === 8) : null;
-    const srcBgRgb = ink === 36 && hasPalette && (src.depth ?? 32) <= 8 ? srcPalette[0] : null;
+    const srcIndicesFresh = src.indicesStale ? null : src.indices;
+    const matteMask = ink === 8 || ink === 7 ? matteRegionMask(s, sw, sh, sx0, sy0, srcW, srcH, srcPalette, srcIndicesFresh, ink === 8) : null;
+    const srcP0 = ink === 36 && hasPalette ? srcPalette[0] : null;
+    const srcP0IsWhite = !!srcP0 && srcP0[0] >= 232 && srcP0[1] >= 232 && srcP0[2] >= 232;
+    const srcIndices = ink === 36 && srcP0IsWhite && srcIndicesFresh && srcIndicesFresh.length >= sw * sh ? srcIndicesFresh : null;
+    const srcBgRgb = ink === 36 && !srcIndices && hasPalette && (src.depth ?? 32) <= 8 ? srcPalette[0] : null;
+    const srcKeysWhite = ink === 36 && !srcIndices && !srcBgRgb;
     const orientDet = orient ? orient.a * orient.e - orient.b * orient.d : 0;
     const orientInv = orientDet !== 0 ? 1 / orientDet : 0;
+    const quadInv = quad ? inverseQuadTransform(quad) : null;
     for (let y = 0; y < destH; y++) {
       const py = dy + y;
       if (py < 0 || py >= dh)
@@ -10704,7 +10855,7 @@ var LImage = class _LImage {
       const fy = flipV ? destH - 1 - y : y;
       const syRow = sy0 + Math.trunc(fy * srcH / destH);
       const orientV = orient && orientInv !== 0 ? (py - dy) / destH : 0;
-      if (!orient && (syRow < 0 || syRow >= sh))
+      if (!quadInv && !orient && (syRow < 0 || syRow >= sh))
         continue;
       for (let x = 0; x < destW; x++) {
         const px = dx + x;
@@ -10712,7 +10863,19 @@ var LImage = class _LImage {
           continue;
         let sx;
         let sy;
-        if (orient && orientInv !== 0) {
+        if (quadInv) {
+          const qx = px + 0.5;
+          const qy = py + 0.5;
+          const w = quadInv[6] * qx + quadInv[7] * qy + quadInv[8];
+          if (w === 0)
+            continue;
+          const u = (quadInv[0] * qx + quadInv[1] * qy + quadInv[2]) / w;
+          const v = (quadInv[3] * qx + quadInv[4] * qy + quadInv[5]) / w;
+          if (u < 0 || u >= 1 || v < 0 || v >= 1)
+            continue;
+          sx = sx0 + Math.trunc(u * srcW);
+          sy = sy0 + Math.trunc(v * srcH);
+        } else if (orient && orientInv !== 0) {
           const u = (px - dx) / destW;
           sx = sx0 + Math.trunc((orient.e * (u - orient.c) - orient.b * (orientV - orient.f)) * orientInv * srcW);
           sy = sy0 + Math.trunc((-orient.d * (u - orient.c) + orient.a * (orientV - orient.f)) * orientInv * srcH);
@@ -10732,25 +10895,48 @@ var LImage = class _LImage {
         const si = (sy * sw + sx) * 4;
         if (ink === 8 && s[si + 3] === 0)
           continue;
+        if (ink === 1 && s[si + 3] === 0)
+          continue;
+        let maskAlpha = 255;
         if (mask && maskData && sx >= 0 && sx < maskW && sy >= 0 && sy < maskH) {
           const mi = (sy * maskW + sx) * 4;
           if (mask.depth <= 8) {
             const luma = 77 * maskData[mi] + 150 * maskData[mi + 1] + 29 * maskData[mi + 2] + 128 >> 8 & 255;
-            if (luma >= 250)
+            if (textMask) {
+              const sharp = Math.round((255 - luma - TEXT_MASK_FLOOR) * 255 / (255 - TEXT_MASK_FLOOR));
+              if (sharp <= 0)
+                continue;
+              maskAlpha = Math.min(255, sharp);
+            } else if (luma >= 250) {
               continue;
+            }
           } else if (maskData[mi + 3] === 0) {
             continue;
           }
         }
-        if (srcBgRgb && s[si + 3] >= 128 && s[si] === srcBgRgb[0] && s[si + 1] === srcBgRgb[1] && s[si + 2] === srcBgRgb[2]) {
+        if (srcIndices) {
+          if (srcIndices[sy * sw + sx] === 0)
+            continue;
+        } else if (srcBgRgb && s[si + 3] >= 128 && s[si] === srcBgRgb[0] && s[si + 1] === srcBgRgb[1] && s[si + 2] === srcBgRgb[2]) {
+          continue;
+        } else if (srcKeysWhite && s[si + 3] >= 128 && s[si] === 255 && s[si + 1] === 255 && s[si + 2] === 255) {
           continue;
         }
         const di = (py * dw + px) * 4;
         const out = applyInkPixel(s, si, d, di, ink, blend, backgroundKeyRgb, foreColorRgb, fgExplicit, bgExplicit);
-        d[di] = out[0];
-        d[di + 1] = out[1];
-        d[di + 2] = out[2];
-        d[di + 3] = out[3];
+        if (maskAlpha < 255 && out[3] > 0) {
+          const covA = Math.trunc(out[3] * maskAlpha / 255);
+          const [mr, mg, mb, ma] = alphaBlendPixel(out[0], out[1], out[2], covA, d[di], d[di + 1], d[di + 2], d[di + 3]);
+          d[di] = mr;
+          d[di + 1] = mg;
+          d[di + 2] = mb;
+          d[di + 3] = ma;
+        } else {
+          d[di] = out[0];
+          d[di + 1] = out[1];
+          d[di + 2] = out[2];
+          d[di + 3] = out[3];
+        }
         if (this.depth <= 8)
           d[di + 3] = 255;
       }
@@ -10817,6 +11003,23 @@ function alphaBlendPixel(sr, sg, sb, sa, dr, dg, db, da) {
 function maskAlphaFromPixel(s, si) {
   return s[si + 3];
 }
+function isFlatOpaqueColour(s, w, h) {
+  const n = w * h;
+  if (n <= 0 || s.length < n * 4)
+    return false;
+  const r = s[0];
+  const g = s[1];
+  const b = s[2];
+  if (s[3] !== 255)
+    return false;
+  const step = Math.max(1, Math.floor(n / 4096));
+  for (let i = step; i < n; i += step) {
+    const o = i * 4;
+    if (s[o] !== r || s[o + 1] !== g || s[o + 2] !== b || s[o + 3] !== 255)
+      return false;
+  }
+  return true;
+}
 function applyInkPixel(s, si, d, di, ink, blend, backgroundKeyRgb, foreColorRgb = 0, fgExplicit = false, bgExplicit = false) {
   const sa = s[si + 3];
   let sr = s[si];
@@ -10850,6 +11053,8 @@ function applyInkPixel(s, si, d, di, ink, blend, backgroundKeyRgb, foreColorRgb 
     }
   }
   if (ink === 1) {
+    if (sa === 0)
+      return [dr, dg, db, da];
     return srcRgb === 16777215 ? [dr, dg, db, da] : [sr, sg, sb, 255];
   }
   if (ink === 2) {
@@ -10865,7 +11070,10 @@ function applyInkPixel(s, si, d, di, ink, blend, backgroundKeyRgb, foreColorRgb 
     return srcRgb === 0 ? [dr, dg, db, da] : [255 - sr, 255 - sg, 255 - sb, 255];
   }
   if (ink === 6) {
-    return [dr ^ 255 - sr, dg ^ 255 - sg, db ^ 255 - sb, 255];
+    if (sa === 0)
+      return [dr, dg, db, da];
+    const [xr, xg, xb] = duotoneRampRgb(dr, dg, db, srcRgb);
+    return sa === 255 ? [xr, xg, xb, 255] : alphaBlendPixel(xr, xg, xb, sa, dr, dg, db, da);
   }
   if (ink === 7) {
     return [
@@ -10964,6 +11172,9 @@ function intColor(n) {
 }
 function hexColor(s) {
   let h = s.trim().replace(/^#/, "");
+  const leading = /^[0-9a-fA-F]{6}/.exec(h);
+  if (leading)
+    return intColor(parseInt(leading[0], 16));
   if (h.length === 3)
     h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
   if (h.length !== 6 || !/^[0-9a-fA-F]{6}$/.test(h))
@@ -11049,15 +11260,20 @@ function toLingoString(v) {
     return `window(${v.id})`;
   if (v instanceof LImage)
     return `image(${v.width}, ${v.height})`;
-  if (v instanceof LColor)
-    return `color(${v.red}, ${v.green}, ${v.blue})`;
+  if (v instanceof LColor) {
+    if (v.paletteIndex !== void 0)
+      return `paletteIndex(${v.paletteIndex})`;
+    return `rgb(${v.red}, ${v.green}, ${v.blue})`;
+  }
   if (v instanceof LStageRef)
     return `stage(${v.width}, ${v.height})`;
   return String(v);
 }
-function resolvePropKey(props, key) {
+function resolvePropKey(props, key, symbol = true) {
   if (props.has(key))
     return key;
+  if (!symbol)
+    return void 0;
   if (props.lowerKey)
     return props.lowerKey(key);
   const lower = key.toLowerCase();
@@ -11344,8 +11560,8 @@ function createBuiltinTable() {
   set(["bitOr"], (b, a) => Math.round(numArgs(a, 0)) | Math.round(numArgs(a, 1)));
   set(["bitXor"], (b, a) => Math.round(numArgs(a, 0)) ^ Math.round(numArgs(a, 1)));
   set(["bitNot"], (b, a) => ~Math.round(numArgs(a, 0)));
-  set(["sin"], (b, a) => Math.sin(numArgs(a, 0) * Math.PI / 180));
-  set(["cos"], (b, a) => Math.cos(numArgs(a, 0) * Math.PI / 180));
+  set(["sin"], (b, a) => Math.sin(numArgs(a, 0)));
+  set(["cos"], (b, a) => Math.cos(numArgs(a, 0)));
   set(["updatestage"], () => VOID);
   set(["beep"], () => VOID);
   set(["cursor"], () => VOID);
@@ -11355,17 +11571,15 @@ function createBuiltinTable() {
     return VOID;
   });
   set(["gotonetpage"], (b, a) => {
+    b.openNetPage(toLingoString(a[0] ?? VOID), a[1]);
+    return VOID;
+  });
+  set(["geturl"], (b, a) => {
     const url = toLingoString(a[0] ?? VOID);
-    const target = a[1] === void 0 ? "_blank" : a[1] instanceof LSymbol ? a[1].name : toLingoString(a[1]);
-    const g = globalThis;
-    if (url !== "" && typeof g.open === "function") {
-      try {
-        g.open(url, target);
-      } catch {
-      }
-    } else {
-      b.log(`gotoNetPage(${url}, ${target})`);
-    }
+    if (/^javascript:/i.test(url))
+      b.runPageJavaScript(url.slice("javascript:".length));
+    else
+      b.openNetPage(url, a[1]);
     return VOID;
   });
   set(["callancestor"], (b, a, interp) => {
@@ -11951,7 +12165,7 @@ function createBuiltinTable() {
     const c = a[0];
     const key = keyOf(a[1]);
     if (c instanceof LPropList && key !== void 0) {
-      const stored = resolvePropKey(c.props, key);
+      const stored = resolvePropKey(c.props, key, a[1] instanceof LSymbol);
       return (stored === void 0 ? void 0 : c.props.get(stored)) ?? VOID;
     }
     if (c instanceof LList && typeof a[1] === "number") {
@@ -11964,7 +12178,7 @@ function createBuiltinTable() {
     const c = a[0];
     const key = keyOf(a[1]);
     if (c instanceof LPropList && key !== void 0)
-      c.props.set(resolvePropKey(c.props, key) ?? key, a[2] ?? VOID);
+      c.props.set(resolvePropKey(c.props, key, a[1] instanceof LSymbol) ?? key, a[2] ?? VOID);
     else if (c instanceof LList && typeof a[1] === "number") {
       const i = Math.round(a[1]);
       if (i >= 1) {
@@ -11988,7 +12202,7 @@ function createBuiltinTable() {
     const c = a[0];
     const key = keyOf(a[1]);
     if (c instanceof LPropList && key !== void 0) {
-      const stored = resolvePropKey(c.props, key);
+      const stored = resolvePropKey(c.props, key, a[1] instanceof LSymbol);
       if (stored !== void 0)
         c.props.delete(stored);
     }
@@ -12035,7 +12249,7 @@ function createBuiltinTable() {
     b.log("stopClient: client stopped");
     return VOID;
   });
-  set(["noop", "setCallback", "updateStage", "unloadCast", "loadCast", "startTimer", "stopTimer", "cursor", "setCursor", "pauseUpdate", "nothing", "beep", "delay", "alert", "quit", "halt", "restart"], () => VOID);
+  set(["noop", "setCallback", "updateStage", "unloadCast", "loadCast", "stopTimer", "cursor", "setCursor", "pauseUpdate", "nothing", "beep", "delay", "alert", "quit", "halt", "restart"], () => VOID);
   return t;
 }
 

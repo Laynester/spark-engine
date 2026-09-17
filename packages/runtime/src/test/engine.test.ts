@@ -11469,6 +11469,80 @@ test('member.duration: sound samples near a 2000ms slot boundary snap down to th
   assert.ok(click > 520 && click < 530, `expected ~522ms, got ${click}`);
 });
 
+function soundOffsetFixture() {
+  const e = new DirectorEngine();
+  const cast = e.casts[0] ?? new CastLib(1, 'internal');
+  if (!e.casts.includes(cast)) e.casts.push(cast);
+  const snd = new Member(1, 132, 'offset_sample', 'sound');
+  snd.raw = new Uint8Array(417 * 82);
+  for (let i = 0; i < 82; i++) snd.raw.set([0xff, 0xfb, 0x90, 0], i * 417);
+  cast.members.set(132, snd);
+  cast.byName.set(snd.name, snd);
+  e.membersByGlobal.set((1 << 16) | 132, snd);
+  const plays: { startTime?: number; endTime?: number; loop?: boolean; onEnded?: () => void }[] = [];
+  e.audioHost = {
+    play: (_channel, _name, _raw, opts) => plays.push(opts),
+    stop: () => {},
+    setVolume: () => {},
+    isBusy: () => false,
+  };
+  return { e, plays };
+}
+
+test('sound offsets: both queue APIs forward chosen millisecond endpoints and default to logical MP3 duration', () => {
+  const { e, plays } = soundOffsetFixture();
+  e.interp.evalExpressionString('queueSound("offset_sample", 1, [#startTime: 500, #endTime: 1500])');
+  e.interp.evalExpressionString('sound(1).queue([#member: member("offset_sample"), #startTime: 750])');
+  e.interp.evalExpressionString('startSoundChannel(1)');
+  assert.deepEqual(plays.map(({ startTime, endTime }) => [startTime, endTime]), [[500, 1500]]);
+  assert.equal(e.interp.evalExpressionString('sound(1).endTime'), 1500);
+  plays[0].onEnded!();
+  assert.deepEqual(plays.map(({ startTime, endTime }) => [startTime, endTime]), [[500, 1500], [750, 2000]]);
+  assert.equal(e.interp.evalExpressionString('sound(1).startTime'), 750);
+  assert.equal(e.interp.evalExpressionString('sound(1).endTime'), 2000);
+  plays[1].onEnded!();
+  assert.equal(e.interp.evalExpressionString('sound(1).startTime'), 0);
+  assert.equal(e.interp.evalExpressionString('sound(1).endTime'), 0);
+});
+
+test('sound offsets: startTime stays the chosen offset rather than elapsed wall time', (t) => {
+  const { e } = soundOffsetFixture();
+  let now = 10000;
+  t.mock.method(Date, 'now', () => now);
+  e.interp.evalExpressionString('queueSound("offset_sample", 1, [#startTime: 500])');
+  e.interp.evalExpressionString('startSoundChannel(1)');
+  assert.equal(e.interp.evalExpressionString('sound(1).startTime'), 500);
+  now += 900;
+  assert.equal(e.interp.evalExpressionString('sound(1).startTime'), 500);
+  assert.equal(e.interp.evalExpressionString('sound(1).endTime'), 2000);
+  e.interp.evalExpressionString('stopSoundChannel(1)');
+  assert.equal(e.interp.evalExpressionString('sound(1).startTime'), 0);
+  assert.equal(e.interp.evalExpressionString('sound(1).endTime'), 0);
+});
+
+test('sound offsets: direct play forwards offsets and legacy calls retain logical defaults', () => {
+  const { e, plays } = soundOffsetFixture();
+  e.interp.evalExpressionString('sound(1).play([#member: member("offset_sample"), #loopCount: 1, #startTime: 250, #endTime: 1250])');
+  assert.deepEqual([plays[0].startTime, plays[0].endTime, plays[0].loop], [250, 1250, false]);
+  assert.equal(e.interp.evalExpressionString('sound(1).endTime'), 1250);
+  e.interp.evalExpressionString('sound(1).play([#member: member("offset_sample"), #loopCount: 0, #startTime: 250, #endTime: 1250])');
+  assert.deepEqual([plays[1].startTime, plays[1].endTime, plays[1].loop], [250, 1250, true]);
+  e.puppetSound(2, 'offset_sample');
+  e.playSoundInChannelBuiltin('offset_sample', 3);
+  assert.deepEqual(plays.slice(2).map(({ startTime, endTime, loop }) => [startTime, endTime, loop]), [[0, 2000, false], [0, 2000, false]]);
+});
+
+test('sound offsets: clamp ranges to logical duration and preserve case-insensitive property keys', () => {
+  const { e, plays } = soundOffsetFixture();
+  for (const props of ['#STARTTIME: -100, #ENDTIME: 3000', '#startTime: 700, #endTime: 200', '#startTime: 3000', '#endTime: 0']) {
+    e.interp.evalExpressionString(`sound(1).play([#member: member("offset_sample"), #loopCount: 1, ${props}])`);
+    const last = plays[plays.length - 1];
+    assert.equal(e.interp.evalExpressionString('sound(1).startTime'), last.startTime);
+    assert.equal(e.interp.evalExpressionString('sound(1).endTime'), last.endTime);
+  }
+  assert.deepEqual(plays.map(({ startTime, endTime }) => [startTime, endTime]), [[0, 2000], [700, 700], [2000, 2000], [0, 0]]);
+});
+
 test('sound channels: puppetSound + sound(n) play/queue/stop/volume drive the audio host', () => {
   const e = new DirectorEngine();
   const cast = e.casts[0] ?? new CastLib(1, 'internal');
@@ -11576,8 +11650,6 @@ test('Song Player builtins: queueSound/startSoundChannel/stopSoundChannel/playSo
   // The queue advances as sounds end: playing consumed the entry.
   assert.equal(e.interp.evalExpressionString('sound(1).getPlaylist().count'), 0);
 
-  // addPlayRound queue entries with a #startTime prop survive (host can't
-  // seek, but the entry keeps the prop).
   calls.length = 0;
   e.interp.evalExpressionString('stopSoundChannel(1)');
   assert.deepEqual(calls, ['stop:1']);

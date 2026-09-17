@@ -34,6 +34,15 @@ function id3v2End(bytes: Uint8Array): number {
   return 10 + size;
 }
 
+function compatibleHeader(bytes: Uint8Array, off: number, version: number, layerBits: number, srIdx: number): boolean {
+  if (bytes[off] !== 0xff || (bytes[off + 1] & 0xe0) !== 0xe0) return false;
+  const bitrateIdx = (bytes[off + 2] >> 4) & 0xf;
+  return ((bytes[off + 1] >> 3) & 0x3) === version
+    && ((bytes[off + 1] >> 1) & 0x3) === layerBits
+    && ((bytes[off + 2] >> 2) & 0x3) === srIdx
+    && bitrateIdx !== 0 && bitrateIdx !== 15;
+}
+
 export function mp3DurationMs(bytes: Uint8Array): number {
   if (!bytes || bytes.length < 4) return 0;
   let off = id3v2End(bytes);
@@ -73,7 +82,14 @@ export function mp3DurationMs(bytes: Uint8Array): number {
       off++;
       continue;
     }
-    if (firstSampleRate === 0) firstSampleRate = sampleRate;
+    if (firstSampleRate === 0) {
+      const next = off + frameLen;
+      if (next + 4 <= bytes.length && !compatibleHeader(bytes, next, version, layerBits, srIdx)) {
+        off++;
+        continue;
+      }
+      firstSampleRate = sampleRate;
+    }
     totalSamples += samplesPerFrame;
     frames++;
     off += frameLen;

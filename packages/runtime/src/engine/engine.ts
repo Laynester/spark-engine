@@ -8,7 +8,7 @@ import {
   type LCastLibRef, type LMemberRef, type LObject, type LPoint, type LPropList,
   type LSpriteRef, type LStageRef, type LVal, type LWindowRef,
   LImage, LList, LPoint as LPointClass, LPropList as LPropListClass, LRect as LRectClass,
-  LSymbol, intColor, LColor, hexColor, fontStyleFlags, duplicateValue, PropPairs,
+  LSymbol, intColor, LColor, hexColor, fontStyleFlags, duplicateValue, PropPairs, resolvePropKey,
   LObject as LObjectClass, LMemberRef as LMemberRefClass, LSpriteRef as LSpriteRefClass,
   LCastLibRef as LCastLibRefClass, LWindowRef as LWindowRefClass, LStageRef as LStageRefClass,
 } from '../lingo/values.js';
@@ -51,6 +51,7 @@ const WEB_TO_DIRECTOR_KEYCODE: Record<number, number> = {
 const GRAYSCALE_PALETTE: number[][] = Array.from({ length: 256 }, (_, i) => [255 - i, 255 - i, 255 - i]);
 import { bakeModeForInk, inkUsesPixelHitTest } from '../stage/matte.js';
 import { mp3DurationMs } from './mp3.js';
+import { soundPlaybackRange, type SoundPlaybackOptions } from './audio.js';
 import type { MemberKind } from '../bundle/types.js';
 import { Channel } from './sprites.js';
 import type { PersistWorkerLike, PersistWorkerMsg } from '../worker/persist.js';
@@ -3658,7 +3659,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
 
 
   audioHost?: {
-    play(channel: number, name: string, raw: Uint8Array, opts: { loop?: boolean; volume?: number; onEnded?: () => void }): void;
+    play(channel: number, name: string, raw: Uint8Array, opts: SoundPlaybackOptions): void;
     stop(channel: number): void;
     setVolume(channel: number, volume: number): void;
     isBusy(channel: number): boolean;
@@ -3666,13 +3667,13 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
 
   private soundChannels = new Map<
     number,
-    { volume: number; memberRef: LMemberRef | null; memberName: string; loop: boolean; playing: boolean; queue: LList; playStartedAt: number; soundDuration: number }
+    { volume: number; memberRef: LMemberRef | null; memberName: string; loop: boolean; playing: boolean; queue: LList; startTime: number; endTime: number }
   >();
 
-  private soundChannel(channel: number): { volume: number; memberRef: LMemberRef | null; memberName: string; loop: boolean; playing: boolean; queue: LList; playStartedAt: number; soundDuration: number } {
+  private soundChannel(channel: number): { volume: number; memberRef: LMemberRef | null; memberName: string; loop: boolean; playing: boolean; queue: LList; startTime: number; endTime: number } {
     let st = this.soundChannels.get(channel);
     if (!st) {
-      st = { volume: 255, memberRef: null, memberName: '', loop: false, playing: false, queue: new LList(), playStartedAt: 0, soundDuration: 0 };
+      st = { volume: 255, memberRef: null, memberName: '', loop: false, playing: false, queue: new LList(), startTime: 0, endTime: 0 };
       this.soundChannels.set(channel, st);
     }
     return st;
@@ -3738,13 +3739,13 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       st.memberName = '';
       st.loop = false;
       st.queue = new LList();
-      st.playStartedAt = 0;
-      st.soundDuration = 0;
+      st.startTime = 0;
+      st.endTime = 0;
     }
     this.audioHost?.stop(channel);
   }
 
-  private playSoundChannel(channel: number, ref: LMemberRef, loop: boolean): void {
+  private playSoundChannel(channel: number, ref: LMemberRef, loop: boolean, props?: LVal): void {
     const member = this.memberFor(ref);
     const name = ref.name;
     if (!member || !member.raw) {
@@ -3756,8 +3757,15 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     st.memberName = member.name;
     st.playing = true;
     st.loop = loop;
-    st.playStartedAt = Date.now();
-    st.soundDuration = (this.getMemberProp(ref, 'duration') as number) || 0;
+    const duration = asNum(this.getMemberProp(ref, 'duration'));
+    const offset = (key: string): number | undefined => {
+      if (!(props instanceof LPropListClass)) return undefined;
+      const value = props.props.get(resolvePropKey(props.props, key) ?? key);
+      return value === undefined || value === VOID ? undefined : asNum(value);
+    };
+    const range = soundPlaybackRange(duration, offset('startTime'), offset('endTime'));
+    st.startTime = range.startTime;
+    st.endTime = range.endTime;
     if (!this.audioHost) {
       this.log(`sound: puppetSound(${channel}, ${name}) (no audio host)`);
       return;
@@ -3765,6 +3773,8 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     this.audioHost.play(channel, member.name, member.raw, {
       loop,
       volume: st.volume,
+      startTime: st.startTime,
+      endTime: st.endTime,
       onEnded: () => this.advanceSoundQueue(channel),
     });
   }
@@ -3783,10 +3793,9 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     obj.props.set('volume', 255);
     obj.props.set('member', VOID);
     const st = this.soundChannels.get(channel);
-    if (st && st.playing && st.playStartedAt > 0) {
-      const elapsed = Date.now() - st.playStartedAt;
-      obj.props.set('startTime', Math.min(elapsed, st.soundDuration));
-      obj.props.set('endTime', st.soundDuration);
+    if (st && st.playing) {
+      obj.props.set('startTime', st.startTime);
+      obj.props.set('endTime', st.endTime);
     } else {
       obj.props.set('startTime', 0);
       obj.props.set('endTime', 0);
@@ -3833,7 +3842,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
         return 0;
       }
       this.stopSoundChannel(channel);
-      this.playSoundChannel(channel, ref, loopCount === 0);
+      this.playSoundChannel(channel, ref, loopCount === 0, list);
       obj.props.set('member', ref);
       return 1;
     }
@@ -3887,7 +3896,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
             typeof memberVal === 'string' ? this.getMemberByName(memberVal) :
               null;
       if (!ref) continue;
-      this.playSoundChannel(channel, ref, false);
+      this.playSoundChannel(channel, ref, false, next);
       return;
     }
   }
