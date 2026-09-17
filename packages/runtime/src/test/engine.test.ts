@@ -2341,6 +2341,53 @@ test('integer(spriteRef) coerces to the channel (Visualizer Part Wrapper setSpri
   assert.equal(ev('sprite(5).spriteNum'), 5);
 });
 
+test('current-script handler lookup caches local names but keeps global fallbacks live', (t) => {
+  const e = new DirectorEngine();
+  e.addScriptMember('LocalLookup', 'parent', 'on same\n return 1\nend\non SAME\n return 2\nend\n');
+  e.addScriptMember('GlobalLookup', 'movie', 'on fallback\n return 3\nend\n');
+  const local = e.resolveScript('LocalLookup')!;
+  const global = e.resolveScript('GlobalLookup')!;
+  e.interp.currentScript = local;
+  assert.equal(e.resolveGlobalHandler('SAME')?.handler, local.handlers[0]);
+  Object.defineProperty(local.handlers, 'find', {
+    configurable: true,
+    value: () => { throw new Error('repeated resolution must not scan handlers'); },
+  });
+  t.after(() => Reflect.deleteProperty(local.handlers, 'find'));
+  assert.equal(e.resolveGlobalHandler('same')?.handler, local.handlers[0]);
+  assert.equal(e.resolveGlobalHandler('fallback')?.script, global);
+  e.globalHandlers.delete('fallback');
+  assert.equal(e.resolveGlobalHandler('fallback'), null);
+  assert.equal(e.resolveGlobalHandler('charToNum'), null);
+});
+
+test('string char reads preserve array-based bounds and UTF-16 semantics without splitting', (t) => {
+  const e = new DirectorEngine();
+  const cases: [string, number | undefined, number | undefined, unknown][] = [];
+  for (const text of ['', 'abc', 'A\u00e9\ud83d\ude00Z', 'x\r\ny', 'a'.repeat(4000)]) {
+    const parts = text.split('');
+    for (const from of [undefined, -30001, -30000, -4001, -3, -1, 0, 1, 2, 4000, 4001]) {
+      for (const to of [undefined, -30000, -3, -1, 0, 1, 3, 5000]) {
+        const rawStart = from ?? 1;
+        const rawEnd = to ?? rawStart;
+        const start = rawStart < 0 ? parts.length + rawStart + 1 : rawStart;
+        const end = rawEnd < 0 ? parts.length + rawEnd + 1 : rawEnd;
+        const expected = rawStart <= -30000 ? parts[parts.length - 1] ?? '' :
+          start < 1 || start > parts.length || start > end ? '' :
+          parts.slice(start - 1, Math.min(parts.length, end)).join('');
+        cases.push([text, from, to, expected]);
+      }
+    }
+  }
+  const split = t.mock.method(String.prototype, 'split', () => {
+    throw new Error('char reads must not split the string');
+  });
+  for (const [text, from, to, expected] of cases) {
+    assert.equal(e.interp.getChunkValue(text, 'char', from, to), expected);
+  }
+  assert.equal(split.mock.callCount(), 0);
+});
+
 test('chars(str, from, to) returns the 1-based inclusive substring (FUSE helper)', () => {
   // Defined nowhere in the exported scripts but used by CastLoad/HttpCookie/
   // Connection/Variable Container (e.g. stripping "#" or extensions).
@@ -2351,7 +2398,10 @@ test('chars(str, from, to) returns the 1-based inclusive substring (FUSE helper)
   assert.equal(e.interp.evalExpressionString('chars("hello", 3)'), 'llo');
 });
 
-test('getStreamStatus reports bytes>0 once a local download completes', async () => {
+test('getStreamStatus reports bytes>0 once a local download completes', async (t) => {
+  const originalFetch = Object.getOwnPropertyDescriptor(globalThis, 'fetch')!;
+  Object.defineProperty(globalThis, 'fetch', { ...originalFetch, value: undefined });
+  t.after(() => Object.defineProperty(globalThis, 'fetch', originalFetch));
   // The Download Instance only imports when tStreamStatus[#bytesSoFar] > 0;
   // local preloads carry no text, so a completed download must report >= 1.
   const e = new DirectorEngine();
@@ -2641,6 +2691,82 @@ test('importFileInto decodes a downloaded image into the member surface (non-cas
     assert.deepEqual([...rgba.subarray(4, 8)], [0, 0xff, 0, 0xff], 'second pixel green');
     // A cast URL still registers a cast (no image path regression).
     assert.equal(e.importFileInto(null, 'hh_second.cct'), 0, 'no bundle for hh_second -> 0 (cast path intact)');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('preloadNetThing: a loaded cast without progress completes on the next tick, not after the 24-tick ramp', async () => {
+  const zip = makeCastZip('hh_noprogress', [], {
+    '0001_script_A.ls': '-- Cast member: A\n-- Type: Movie Script\non a\n  return 1\nend\n',
+  });
+  const loader = new BundleLoader({
+    async fetchBundle(name) {
+      if (name !== 'hh_noprogress') return null;
+      return zip;
+    },
+  });
+  const e = new DirectorEngine();
+  e.bundleLoader = loader;
+  e.addScriptMember('Loop', 'score', 'on exitFrame me\nend\n');
+  e.boot();
+  const id = e.preloadNetThing('http://x/hh_noprogress.cct?randp1=1');
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(loader.getCast('hh_noprogress'), 'cast parsed and cached before any tick');
+  e.tick();
+  assert.equal(e.netDone(id), 1, 'completes on the first tick after readiness (was 24)');
+  assert.equal(e.netError(id), 'OK');
+  const st = e.getStreamStatus(id) as LPropList;
+  assert.equal(st.props.get('bytesTotal'), 100, 'loading bar still fills');
+  assert.equal(st.props.get('bytesSoFar'), 100);
+});
+
+test('preloadNetThing: full byte progress does not complete an unresolved cast load', async () => {
+  const zip = makeCastZip('hh_pending', [], {});
+  let release!: (bytes: Uint8Array) => void;
+  const pending = new Promise<Uint8Array>((resolve) => { release = resolve; });
+  const loader = new BundleLoader({
+    async fetchBundle(_name, onProgress) {
+      onProgress?.(zip.length, zip.length);
+      return pending;
+    },
+  });
+  const e = new DirectorEngine();
+  e.bundleLoader = loader;
+  e.boot();
+  const id = e.preloadNetThing('hh_pending.cct');
+  for (let i = 0; i < 40; i++) e.tick();
+  assert.equal(e.netDone(id), 0);
+  assert.equal(loader.getCast('hh_pending'), null);
+  release(zip);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(loader.getCast('hh_pending'));
+  assert.equal(e.netDone(id), 0);
+  e.tick();
+  assert.equal(e.netDone(id), 1);
+});
+
+test('preloadNetThing: raw download stays pending until the body arrives (slow network)', async () => {
+  const gif = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x3b]);
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    await gate;
+    return new Response(gif, { status: 200 });
+  };
+  try {
+    const e = new DirectorEngine();
+    e.addScriptMember('Loop', 'score', 'on exitFrame me\nend\n');
+    e.boot();
+    const id = e.preloadNetThing('http://x/slow.gif');
+    for (let i = 0; i < 40; i++) e.tick();
+    assert.equal(e.netDone(id), 0, 'not done at tick 40 with the fetch pending (was done at 24)');
+    release();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(e.netDone(id), 1, 'completes when the body arrives');
+    const st = e.getStreamStatus(id) as LPropList;
+    assert.equal(st.props.get('bytesSoFar'), gif.length, 'late bytes are kept');
   } finally {
     globalThis.fetch = origFetch;
   }

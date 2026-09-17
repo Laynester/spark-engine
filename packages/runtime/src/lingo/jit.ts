@@ -59,8 +59,8 @@ export interface CompiledBody {
  *      occur outside the fallthrough paths above.
  *    - Handlers containing put/delete/globalDecl/the/chunk/chunkCount or
  *      non-embeddable targets compile to null — never partially compiled. */
-export function compileHandlerBody(handler: Handler, propsLower: ReadonlySet<string>): CompiledBody | null {
-  const c = new Gen(handler, propsLower);
+export function compileHandlerBody(handler: Handler, propsLower: ReadonlySet<string>, options?: { scalarTheReads?: boolean }): CompiledBody | null {
+  const c = new Gen(handler, propsLower, options);
   try {
     return c.run();
   } catch {
@@ -78,8 +78,9 @@ class Gen {
   private meParam = false;
   private tempCount = 0;
   private stmtDepth = 0;
+  private loopNext: string[] = [];
 
-  constructor(private handler: Handler, private propsLower: ReadonlySet<string>) {}
+  constructor(private handler: Handler, private propsLower: ReadonlySet<string>, private options?: { scalarTheReads?: boolean }) {}
 
   run(): CompiledBody | null {
     const h = this.handler;
@@ -230,7 +231,8 @@ class Gen {
       case 'chunkCount':
         return this.scanExpr(e.obj);
       case 'the':
-        return false;
+        return this.options?.scalarTheReads === true && this.propsLower.size === 0 &&
+          e.chain.length === 0;
       default:
         return false;
     }
@@ -329,7 +331,9 @@ class Gen {
         this.emit(`if (${s.down ? `asNum(V[${slot}] ?? 0) < ${to}` : `asNum(V[${slot}] ?? 0) > ${to}`}) break;`);
         this.emit(`if (++${iterV} > ${MAX_LOOP}) { I.host.warn("repeat loop guard hit"); break; }`);
         this.emit('try {');
+        this.loopNext.push(`V[${slot}] = asNum(V[${slot}] ?? 0) + ${step}; continue;`);
         if (this.withIn(s.body) === false) return false;
+        this.loopNext.pop();
         this.emit('} catch (e) {');
         this.emit('if (e instanceof ExitR) break;');
         this.emit(`if (e instanceof NextR) { V[${slot}] = asNum(V[${slot}] ?? 0) + ${step}; continue; }`);
@@ -355,7 +359,9 @@ class Gen {
         this.emit(`if (++${iterT} > ${MAX_LOOP}) break;`);
         this.emit(`V[${slot}] = ${itemsT}[${ixt}]; S[${slot}] = (S[${slot}] & 2) | 1;`);
         this.emit('try {');
+        this.loopNext.push('continue;');
         if (this.withIn(s.body) === false) return false;
+        this.loopNext.pop();
         this.emit('} catch (e) {');
         this.emit('if (e instanceof ExitR) break;');
         this.emit('if (e instanceof NextR) continue;');
@@ -371,7 +377,9 @@ class Gen {
         this.emit(`while (isTruthy(${this.expr(s.cond)})) {`);
         this.emit(`if (++${iterT} > ${MAX_LOOP}) { I.host.warn("repeat loop guard hit"); break; }`);
         this.emit('try {');
+        this.loopNext.push('continue;');
         if (this.withIn(s.body) === false) return false;
+        this.loopNext.pop();
         this.emit('} catch (e) {');
         this.emit('if (e instanceof ExitR) break;');
         this.emit('if (e instanceof NextR) continue;');
@@ -389,10 +397,15 @@ class Gen {
         this.emit('I.floatEpoch++; return VOID;');
         return true;
       case 'exitRepeat':
-        this.emit('I.floatEpoch++; throw new ExitR();');
+        this.emit(this.loopNext.length > 0 ? 'I.floatEpoch++; break;' : 'I.floatEpoch++; throw new ExitR();');
         return true;
       case 'nextRepeat':
-        this.emit('I.floatEpoch++; throw new NextR();');
+        this.emit('I.floatEpoch++;');
+        if (this.loopNext.length > 0) {
+          this.emit(this.loopNext[this.loopNext.length - 1]);
+        } else {
+          this.emit('throw new NextR();');
+        }
         return true;
       case 'return': {
         this.emit('I.floatEpoch++;');
@@ -557,6 +570,8 @@ class Gen {
         if (oe === null) return null;
         return `((${o} = ${oe}, I.chunkCount(${o}, ${j(e.chunk)})))`;
       }
+      case 'the':
+        return `I.evalExpr(${this.node(e)}, env)`;
       default:
         return null;
     }

@@ -353,7 +353,7 @@ export class Interpreter {
     let entry = this.jitCache.get(handler);
     if (entry !== undefined) return entry;
     let result: { fn: Function; nodes: unknown[] } | null = null;
-    const compiled = compileHandlerBody(handler, this.propsLowerOf(script));
+    const compiled = compileHandlerBody(handler, this.propsLowerOf(script), { scalarTheReads: true });
     if (compiled) {
       try {
         result = {
@@ -2358,6 +2358,15 @@ export class Interpreter {
   }
 
   getChunkValue(obj: LVal, chunk: string, from?: number, to?: number): LVal {
+    if (typeof obj === 'string' && chunk === 'char') {
+      const rawStart = from ?? 1;
+      const rawEnd = to ?? rawStart;
+      if (rawStart <= -30000) return obj.slice(-1);
+      const start = rawStart < 0 ? obj.length + rawStart + 1 : rawStart;
+      const end = rawEnd < 0 ? obj.length + rawEnd + 1 : rawEnd;
+      if (start < 1 || start > obj.length || start > end) return '';
+      return obj.slice(start - 1, Math.min(obj.length, end));
+    }
     const parts = this.cachedChunkParts(obj, chunk);
     if (parts === null) return VOID;
     const rawStart = from ?? 1;

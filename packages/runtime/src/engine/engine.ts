@@ -2682,12 +2682,24 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
     if (cacheableSetKeys.has(h)) this.theCache.clear();
   }
 
+  private localHandlerIndex = new WeakMap<Script, { handlers: Handler[]; length: number; byName: Map<string, GlobalHandlerRef> }>();
+
   resolveGlobalHandler(name: string): GlobalHandlerRef | null {
     const lower = name.toLowerCase();
     const current = this.interp.currentScript;
     if (current) {
-      const h = current.handlers.find((x) => x.name.toLowerCase() === lower);
-      if (h) return { script: current, handler: h };
+      let index = this.localHandlerIndex.get(current);
+      if (!index || index.handlers !== current.handlers || index.length !== current.handlers.length) {
+        const byName = new Map<string, GlobalHandlerRef>();
+        for (const handler of current.handlers) {
+          const key = handler.name.toLowerCase();
+          if (!byName.has(key)) byName.set(key, { script: current, handler });
+        }
+        index = { handlers: current.handlers, length: current.handlers.length, byName };
+        this.localHandlerIndex.set(current, index);
+      }
+      const hit = index.byName.get(lower);
+      if (hit) return hit;
     }
     return this.globalHandlers.get(lower) ?? null;
   }
@@ -3327,6 +3339,8 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
             this.log(`net: error #${id} (${url}): ${r.error}`);
             return;
           }
+          r.rampFrames = 0;
+          r.bytesSoFar = r.bytesTotal;
           r.awaitingFinish = true;
         }, (e: unknown) => {
           const r = this.net.get(id);
@@ -3338,7 +3352,7 @@ export class DirectorEngine implements InterpreterHost, BuiltinBackend, MemberHo
       }
     } else {
       if (typeof fetch === 'function') {
-        req.awaitingFinish = true;
+        req.rampFrames = 0;
         this.fetchFileBytes(id, url).catch(() => {
           const r = this.net.get(id);
           if (r && !r.done) {
